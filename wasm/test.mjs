@@ -3871,13 +3871,80 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     let log = "";
     proc.stdout.on("data", (b) => (log += b));
     proc.stderr.on("data", (b) => (log += b));
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
     try {
-      // Long enough for a compile to have happened and been written.
-      await new Promise((r) => setTimeout(r, 1500));
+      // The banner is the synchronisation point. A fixed sleep is not
+      // one: a watch that never started would satisfy every assertion
+      // below — "it wrote nothing" is trivially true of a process that
+      // did nothing — and this case would pass while testing nothing.
+      assert.ok(
+        await until(() => log.includes("watching for changes"), 20000),
+        `${target}: the watch never started, so the guard was never reached: ${JSON.stringify(log)}`,
+      );
+      // The banner is printed AFTER the first compile, so by here the
+      // decision this case is about has already been made. The pause is
+      // for the burst behind it, not for the compile.
+      await new Promise((r) => setTimeout(r, 800));
       assert.equal(readFileSync(join(wdir, "main.scss"), "utf8"), MAIN, `${target}: the entry was overwritten`);
       assert.equal(readFileSync(join(wdir, "_v.scss"), "utf8"), DEP, `${target}: the dependency was overwritten`);
       // Silent, because dart is silent when it declines.
       assert.ok(!log.includes("Compiled"), `${target}: it narrated a write it should not have made: ${JSON.stringify(log)}`);
+    } finally {
+      proc.kill();
+    }
+  }
+
+  // The link still points at a source when that source is DELETED.
+  //
+  // `realpath` answers nothing for a dangling link, and "nothing" must
+  // not read as "not a source": the failure path writes the error
+  // stylesheet through the link and RECREATES the file it is complaining
+  // about. Measured before this — `_v.scss` came back holding
+  // `/* Error: Can't find stylesheet to import. */`.
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchdangle-"));
+    writeFileSync(join(wdir, "main.scss"), `@use "v" as v;
+.a { color: v.$c; }
+`);
+    writeFileSync(join(wdir, "_v.scss"), `$c: red;
+`);
+    symlinkSync(join(wdir, "_v.scss"), join(wdir, "out.css"));
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
+    try {
+      assert.ok(
+        await until(() => log.includes("watching for changes"), 20000),
+        `dangling: the watch never started: ${JSON.stringify(log)}`,
+      );
+      rmSync(join(wdir, "_v.scss"));
+      // Wait for the watch to NOTICE, so the assertion is about what it
+      // did rather than about it not having looked yet.
+      assert.ok(
+        await until(() => /Error|error/.test(log), 20000),
+        `dangling: the broken import was never reported: ${JSON.stringify(log)}`,
+      );
+      await new Promise((r) => setTimeout(r, 400));
+      assert.ok(!existsSync(join(wdir, "_v.scss")), "the deleted dependency was recreated through the dangling symlink");
     } finally {
       proc.kill();
     }
@@ -3912,7 +3979,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     }
   }
 
-  console.log("ok: cli --watch — an output that is a source by another name is declined, a real one is not");
+  console.log("ok: cli --watch — an output that is a source by another name is declined, dangling or not, and a real one is not");
 }
 
 // === Phase 3b: CLI --watch, what it SAYS ===

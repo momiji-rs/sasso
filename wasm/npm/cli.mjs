@@ -14,6 +14,7 @@ import {
   readdirSync,
   mkdirSync,
   realpathSync,
+  readlinkSync,
   rmSync,
   openSync,
   readSync,
@@ -1059,6 +1060,36 @@ function realPath(path) {
 }
 
 /**
+ * A key for a path whose FILE may be gone: the directory canonicalized,
+ * the name left alone.
+ *
+ * `realpath` cannot answer for a file that does not exist, and a purely
+ * lexical key answers differently for two spellings of one directory — on
+ * macOS `/var` is a symlink to `/private/var`, so a path built from the
+ * command line and one the importer resolved disagree. The directory is
+ * almost always still there, so canonicalize that and keep the name.
+ */
+function keyByHolder(path) {
+  const holder = realOrNull(dirname(path));
+  return holder === null ? pathKey(path) : pathKey(join(holder, basename(path)));
+}
+
+/**
+ * Where a symlink POINTS, keyed by `keyByHolder`, without following it to
+ * a file that may not be there. `null` when the path is not a symlink.
+ *
+ * One hop, because this is only consulted once `realpath` has failed,
+ * which means the chain is broken and there is nothing left to follow.
+ */
+function linkTarget(path) {
+  try {
+    return keyByHolder(resolve(dirname(path), readlinkSync(path)));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * A path's canonical form, or `null` when there is nothing there to resolve.
  *
  * `realPath` above falls back to `resolve()` for a path that does not exist,
@@ -1402,12 +1433,26 @@ function runWatch(input, output, common, opts) {
     // times and destroyed the stylesheet 3. The binary took the
     // deterministic side in #166 and this is the same rule.
     const realDest = realOrNull(output);
-    // With no destination to resolve there is nothing to be the same
-    // AS, and skipping here saves a `realpath` per dependency on every
-    // compile. It also settles the only way this comparison could lie:
-    // two files that have both vanished would otherwise answer "the same
-    // file", because neither resolves.
-    if (realDest === null) return false;
+    // Nothing to resolve is not the same as nothing to protect. An
+    // output that is a symlink to a source which has just been DELETED
+    // resolves to nothing, and a write through it recreates the source
+    // as CSS — or, on the failure path, as the error stylesheet about
+    // the very file it just recreated. Measured: `out.css -> _v.scss`,
+    // delete `_v.scss`, and `_v.scss` comes back holding
+    // `/* Error: Can't find stylesheet to import. */`.
+    //
+    // So when the destination will not resolve, ask what the link SAYS
+    // rather than where it lands. One hop and lexical, because there is
+    // nothing on disk left to follow; a chain with a dangling middle is
+    // beyond what can be answered and is left to the check above.
+    if (realDest === null) {
+      const named = linkTarget(output);
+      if (named === null) return false;
+      // Both sides through the same key, or the comparison answers on
+      // spelling: `known` holds what the importer resolved and `input`
+      // holds what was typed.
+      return named === keyByHolder(input) || [...known].some((f) => named === keyByHolder(f));
+    }
     // `real !== null` is redundant while the check above stands, and it
     // is here so that moving that check cannot quietly reintroduce the
     // lie it settles. Neither can be made to fail from a test today.

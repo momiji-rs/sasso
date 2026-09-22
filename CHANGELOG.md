@@ -35,6 +35,15 @@ Conformance is tracked separately as a ratchet against the official
     npm, after          declines
   ```
 
+  A dangling link counts too, which is the half that bites hardest:
+  `out.css -> _v.scss` and then `rm _v.scss` made the failure path write
+  the error stylesheet THROUGH the link, recreating the file it was
+  complaining about. `realpath` answers nothing for a dangling link, so
+  the guard asks what the link says instead — `readlink`, keyed by its
+  holder directory, because the file is gone but the directory is not.
+  The binary has the same defect and cannot take the same fix; #177
+  carries it with the measurement.
+
   That dart row corrects this repo's own record. `tests/cli_dart_compat.rs`
   said "dart Compiled x1, the source is DESTROYED" from a single run, and
   concluded "nobody protects it". dart does protect it — with a guard that
