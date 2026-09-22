@@ -1425,13 +1425,30 @@ function runWatch(input, output, common, opts) {
    */
   const takeSnapshots = (before) => {
     stamps = new Map([...known].map((f) => [f, before?.stamps.has(f) ? before.stamps.get(f) : mtime(f)]));
-    neighbours = before ? before.neighbours : surveyNeighbours(watchedDirs());
+    if (!before) {
+      neighbours = surveyNeighbours(watchedDirs());
+      return;
+    }
+    // What we knew before the compile, PLUS a fresh look at directories
+    // that only came into scope during it. `@use "sub/dep"` brings `sub/`
+    // into the watched set on the first compile, and carrying the older
+    // survey across unchanged makes every file in it look like an
+    // arrival: measured, three compiles where there should be one, on
+    // every idle startup.
+    //
+    // Re-surveying EVERYTHING instead would fix that and break the other
+    // half — a file deleted while the compile ran would vanish from the
+    // baseline too, and the deletion with it. Only the new directories
+    // are re-asked.
+    neighbours = new Map(before.neighbours);
+    const fresh = new Set([...watchedDirs()].filter((d) => !before.dirs.has(d)));
+    if (fresh.size) for (const [f, m] of surveyNeighbours(fresh)) neighbours.set(f, m);
   };
   /** What the sweep would have seen just before a compile started. */
-  const snapshotBefore = () => ({
-    stamps: new Map([...known].map((f) => [f, mtime(f)])),
-    neighbours: surveyNeighbours(watchedDirs()),
-  });
+  const snapshotBefore = () => {
+    const dirs = watchedDirs();
+    return { stamps: new Map([...known].map((f) => [f, mtime(f)])), neighbours: surveyNeighbours(dirs), dirs };
+  };
   const mtime = (f) => {
     try {
       return statSync(f).mtimeMs;

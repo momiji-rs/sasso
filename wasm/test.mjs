@@ -3679,6 +3679,55 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   }
 }
 
+// === Phase 3a2: an idle --watch compiles ONCE ===
+//
+// A spurious recompile is silent — identical CSS skips the write and the
+// narration — so counting `Compiled` lines cannot see one. A `@warn` in the
+// entry fires on every compile, which is what makes this countable at all.
+//
+// The case that needs it: `@use "sub/dep"` puts `sub/` in the watched set
+// only AFTER the first compile resolves it, so the sweep's pre-compile
+// baseline has never seen anything in there. Carrying that baseline across
+// unchanged makes every file in `sub/` an arrival — measured at three
+// compiles per idle startup instead of one.
+{
+  const wdir = mkdtempSync(join(tmpdir(), "sasso-watchidle-"));
+  mkdirSync(join(wdir, "sub"));
+  writeFileSync(join(wdir, "main.scss"), `@use "sub/dep" as d;\n@warn "COMPILED";\n.a { color: d.$c; }\n`);
+  writeFileSync(join(wdir, "sub", "_dep.scss"), `$c: red;\n`);
+  // Neighbours in the newly-scoped directory, so its arrival would show.
+  for (let k = 0; k < 3; k++) writeFileSync(join(wdir, "sub", `other${k}.txt`), "x\n");
+
+  const outFile = join(wdir, "out.css");
+  const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
+    cwd: wdir,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let log = "";
+  proc.stdout.on("data", (b) => (log += b));
+  proc.stderr.on("data", (b) => (log += b));
+  const compiles = () => log.split("\n").filter((l) => l.includes("COMPILED")).length;
+
+  try {
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      try {
+        if (readFileSync(outFile, "utf8").includes("red")) break;
+      } catch {
+        /* not yet */
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    // Nothing is touched from here. Several sweep intervals (50ms floor)
+    // and several coalescing windows.
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(compiles(), 1, `an idle watch compiled more than once: ${JSON.stringify(log)}`);
+    console.log("ok: cli --watch --poll — an idle watch with a subdirectory dependency compiles once");
+  } finally {
+    proc.kill();
+  }
+}
+
 // === Phase 3b: CLI --watch, what it SAYS ===
 //
 // The functional watch test above starts the child with `stdio: "ignore"`
