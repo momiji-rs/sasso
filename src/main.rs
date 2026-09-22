@@ -1869,11 +1869,13 @@ fn finish_compile_error(
 }
 
 #[cfg(test)]
-mod no_error_css_tests {
+mod disturbed_tests {
     use super::*;
 
     /// `--watch` with `--no-error-css`: the only combination that removes an
-    /// output rather than writing an error stylesheet over it.
+    /// output rather than writing an error stylesheet over it. `--watch`
+    /// alone is what the created-file guards need, and the removal guards
+    /// need both.
     fn shared() -> Shared {
         Shared {
             load_paths: Vec::new(),
@@ -1929,6 +1931,77 @@ mod no_error_css_tests {
         std::fs::remove_dir_all(&dir).ok();
         assert!(disturbed.is_empty(), "{disturbed:?}");
         assert!(stderr.is_empty(), "{stderr:?}");
+    }
+
+    /// A write that FAILED still records what it created.
+    ///
+    /// `write_css_file` writes the map first and the CSS second, so an
+    /// unwritable output leaves a brand-new `.map` behind and returns `Err`.
+    /// Recording only on the `Ok` arm leaves that creation unowned: the
+    /// directory holding it is not re-stamped and the name is not in its
+    /// `minus` set, so our own sidecar can be read back as somebody else's
+    /// arrival.
+    ///
+    /// The output is a DIRECTORY here — the one way to make the CSS write
+    /// fail that needs no permission bit, and so behaves the same for root
+    /// and in CI.
+    #[test]
+    fn a_failed_write_records_the_map_it_created() {
+        let dir = scratch("partial_write");
+        let out = dir.join("out.css");
+        std::fs::create_dir(&out).unwrap();
+        let shared = Shared {
+            file_source_map: true,
+            ..shared()
+        };
+        let unit = Unit {
+            source: Source::File(dir.join("main.scss")),
+            url: "main.scss".to_string(),
+            syntax: Syntax::Scss,
+            target: Target::File(out.clone()),
+        };
+        let outcome = compile_source(&unit, ".a { color: red; }\n", &shared);
+        let disturbed = outcome.disturbed.clone();
+        let map = append_ext(&out, "map");
+        let map_landed = map.exists();
+        let failed = outcome.status == Status::IoError;
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(failed, "the CSS write was supposed to fail: {:?}", outcome.stderr);
+        assert!(map_landed, "the map is written first, so it should be there");
+        assert_eq!(
+            disturbed,
+            vec![map],
+            "the map this compile created went unrecorded"
+        );
+    }
+
+    /// …and a write that created nothing records nothing, so the guard above
+    /// cannot be satisfied by recording unconditionally.
+    #[test]
+    fn a_failed_write_that_created_nothing_records_nothing() {
+        let dir = scratch("partial_write_nothing");
+        let out = dir.join("out.css");
+        std::fs::create_dir(&out).unwrap();
+        // The map is already there, so this compile creates neither file.
+        std::fs::write(append_ext(&out, "map"), "{}").unwrap();
+        let shared = Shared {
+            file_source_map: true,
+            ..shared()
+        };
+        let unit = Unit {
+            source: Source::File(dir.join("main.scss")),
+            url: "main.scss".to_string(),
+            syntax: Syntax::Scss,
+            target: Target::File(out.clone()),
+        };
+        let outcome = compile_source(&unit, ".a { color: red; }\n", &shared);
+        let disturbed = outcome.disturbed.clone();
+        let failed = outcome.status == Status::IoError;
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(failed, "the CSS write was supposed to fail");
+        assert!(disturbed.is_empty(), "{disturbed:?}");
     }
 
     /// …and one that did remove a file did, because that moves the
@@ -2053,56 +2126,58 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
                 // lands in the same directory, so a compile that recreates a
                 // deleted `.map` disturbs that directory just as a new CSS
                 // file would.
-                //
-                // Not demonstrable — deleting the sidecar under a watch gives
-                // exactly one compile either way, which is the right answer
-                // for other reasons. It is here because the rule this list
-                // states is "what this compile created or removed", and a
-                // created sidecar is that.
                 let existed = output.exists();
-                let map_existed = append_ext(output, "map").exists();
-                if let Err(msg) = write_css_file(output, &css, map.as_ref(), &unit.url, stdin_text, shared) {
+                let map_path = append_ext(output, "map");
+                let map_existed = map_path.exists();
+                let wrote = write_css_file(output, &css, map.as_ref(), &unit.url, stdin_text, shared);
+                // Asked of the filesystem, and asked whether or not the write
+                // returned `Ok`: a failure is not a write that did nothing.
+                // The map goes first and the CSS second, `write_file` creates
+                // the parent chain before either, and `std::fs::write` creates
+                // a file before it fills it — so a failed write can leave a
+                // map with no CSS beside it, or an empty CSS file, and an
+                // unrecorded creation is a directory change nobody owns. The
+                // rule this list states is "what this compile CREATED", not
+                // "what it finished".
+                if !existed && output.exists() {
+                    outcome.disturbed.push(output.clone());
+                }
+                if !map_existed && map_path.exists() {
+                    outcome.disturbed.push(map_path);
+                }
+                if let Err(msg) = wrote {
                     outcome.stderr.push_str(&msg);
                     outcome.stderr.push('\n');
                     outcome.status = Status::IoError;
-                } else {
-                    if !existed {
-                        outcome.disturbed.push(output.clone());
+                } else if (shared.update || shared.watch) && !shared.quiet {
+                    // dart narrates `--update` and `--watch`, and only those
+                    // two: one line per file actually WRITTEN, on stdout,
+                    // timestamped to the minute in local time (measured
+                    // 2026-09-19 and 2026-09-20). A skipped output and a
+                    // failed compile are both silent, which is why this sits
+                    // on the success arm after the write rather than beside
+                    // the freshness check.
+                    //
+                    // Under `--watch` a provisional run reaches here too, and
+                    // its whole `stdout` is dropped by `run_watch` — so one
+                    // save is one line, from the authoritative run, rather
+                    // than the two the npm CLI prints for a `@warn`.
+                    //
+                    // `outcome.stdout` is flushed in command-line order, so a
+                    // parallel build reports in argument order like dart's.
+                    // Nothing else can be in it here: `--update` with a stdout
+                    // destination is a usage error.
+                    let stamp = localtime::local_stamp(localtime::now());
+                    let source = unit
+                        .source_path()
+                        .map_or_else(|| "stdin".to_string(), |p| p.display().to_string());
+                    if let Some(stamp) = stamp {
+                        outcome.stdout.push_str(&stamp);
+                        outcome.stdout.push(' ');
                     }
-                    let map_path = append_ext(output, "map");
-                    if !map_existed && map_path.exists() {
-                        outcome.disturbed.push(map_path);
-                    }
-                    if (shared.update || shared.watch) && !shared.quiet {
-                        // dart narrates `--update` and `--watch`, and only those
-                        // two: one line per file actually WRITTEN, on stdout,
-                        // timestamped to the minute in local time (measured
-                        // 2026-09-19 and 2026-09-20). A skipped output and a
-                        // failed compile are both silent, which is why this sits
-                        // on the success arm after the write rather than beside
-                        // the freshness check.
-                        //
-                        // Under `--watch` a provisional run reaches here too, and
-                        // its whole `stdout` is dropped by `run_watch` — so one
-                        // save is one line, from the authoritative run, rather
-                        // than the two the npm CLI prints for a `@warn`.
-                        //
-                        // `outcome.stdout` is flushed in command-line order, so a
-                        // parallel build reports in argument order like dart's.
-                        // Nothing else can be in it here: `--update` with a stdout
-                        // destination is a usage error.
-                        let stamp = localtime::local_stamp(localtime::now());
-                        let source = unit
-                            .source_path()
-                            .map_or_else(|| "stdin".to_string(), |p| p.display().to_string());
-                        if let Some(stamp) = stamp {
-                            outcome.stdout.push_str(&stamp);
-                            outcome.stdout.push(' ');
-                        }
-                        outcome
-                            .stdout
-                            .push_str(&format!("Compiled {source} to {}.\n", output.display()));
-                    }
+                    outcome
+                        .stdout
+                        .push_str(&format!("Compiled {source} to {}.\n", output.display()));
                 }
             }
         },
