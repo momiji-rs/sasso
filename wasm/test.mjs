@@ -3593,6 +3593,64 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   console.log("ok: structured Exception (sassMessage + span)");
 }
 
+// === Bytes that are not UTF-8 are refused, on every engine (#179) ===
+//
+// `readFileSync(path, "utf8")` does not reject invalid UTF-8 — it puts
+// U+FFFD in and hands back a string — so the npm CLI compiled a file dart
+// refuses and said nothing:
+//
+//   dart-sass 1.104.1   Error: Invalid UTF-8.
+//   sasso binary        Error: Invalid UTF-8.
+//   npm, before         @charset "UTF-8"; .a { color: ??red; }
+//
+// BOTH engines are exercised where both exist. That is the whole lesson
+// of this bug: the dependency half was wrong only on wasm, the entry half
+// was wrong on both, and a suite that runs one engine at a time saw
+// neither until CI ran the other one (#176).
+{
+  const utf8dir = mkdtempSync(join(tmpdir(), "sasso-badutf8-"));
+  // Valid SCSS, invalid UTF-8.
+  const badBytes = Buffer.from("$c: \xff\xfered;\n", "binary");
+  writeFileSync(join(utf8dir, "entry.scss"), Buffer.from(".a { color: \xff\xfered; }\n", "binary"));
+  writeFileSync(join(utf8dir, "viadep.scss"), `@use "v" as v;\n.a { color: v.$c; }\n`);
+  writeFileSync(join(utf8dir, "_v.scss"), badBytes);
+
+  const hasNative = /^engine:\s+native/m.test(
+    spawnSync(process.execPath, [cliPath, "--engine"], { encoding: "utf8" }).stdout || "",
+  );
+  // Where the addon is absent (the wasm CI job) there is one engine to
+  // try; where it is present, both.
+  const engines = hasNative ? ["native", "wasm"] : [""];
+
+  for (const engine of engines) {
+    const env = engine ? { ...process.env, SASSO_ENGINE: engine } : process.env;
+    const name = engine || "default";
+    for (const [what, file] of [
+      ["the entry", "entry.scss"],
+      ["a dependency", "viadep.scss"],
+    ]) {
+      const r = spawnSync(process.execPath, [cliPath, "--no-source-map", join(utf8dir, file)], {
+        encoding: "utf8",
+        env,
+      });
+      // Non-zero, not 65: this CLI exits 1 for every failure, which is
+      // #91 and not this bug. Asserting 65 here would fail for the right
+      // reason on the wrong ticket.
+      assert.notEqual(r.status, 0, `${name}/${what}: it succeeded: ${JSON.stringify(r.stdout)}`);
+      assert.ok(
+        !r.stdout.includes("�"),
+        `${name}/${what}: replacement characters reached the output: ${JSON.stringify(r.stdout)}`,
+      );
+      assert.ok(
+        /UTF-8/.test(r.stderr),
+        `${name}/${what}: nothing was said about the encoding: ${JSON.stringify(r.stderr)}`,
+      );
+    }
+  }
+  rmSync(utf8dir, { recursive: true, force: true });
+  console.log(`ok: invalid UTF-8 is refused, entry and dependency, on ${engines.length === 2 ? "both engines" : "the engine present here"}`);
+}
+
 // === Phase 3: CLI --watch (recompiles on dependency change) ===
 {
   const waitFor = async (pred, timeoutMs) => {

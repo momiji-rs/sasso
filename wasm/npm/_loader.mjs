@@ -41,6 +41,7 @@ import {
   normalizeImporter,
   syntaxCode,
   syntaxForPath,
+  decodeUtf8,
 } from "./_importer.mjs";
 import { deserializeArgs, serializeValue, setEngine } from "./_value.mjs";
 import { normalizeSilenced, ensureSilenceSupported } from "./_deprecations.mjs";
@@ -111,6 +112,19 @@ function toFileUrl(pathOrUrl) {
     return new URL(pathOrUrl);
   }
   return pathToFileURL(String(pathOrUrl));
+}
+
+/**
+ * The entry stylesheet, refusing bytes that are not UTF-8.
+ *
+ * `Invalid UTF-8.` rather than the importer's `Cannot read …` wording,
+ * because that is what the binary says for an ENTRY it cannot decode and
+ * what dart says for one — see `read_source` in `src/main.rs`.
+ */
+function readEntry(fsPath) {
+  const source = decodeUtf8(readFileSync(fsPath));
+  if (source === null) throw new Exception("Error: Invalid UTF-8.");
+  return source;
 }
 
 /** Coerce a path or `file:` URL to a filesystem path for `readFileSync`. */
@@ -920,7 +934,7 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
 
   function compile(path, options = {}) {
     const fsPath = toFsPath(path);
-    const source = readFileSync(fsPath, "utf8");
+    const source = readEntry(fsPath);
     // The entry keeps the path it was NAMED by (absolute and normalized, but
     // symlinks intact), like every other load — see `canonicalHrefFor`.
     const entryPath = resolvePath(fsPath);
@@ -963,7 +977,7 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
   function compileAsync(path, options = {}) {
     return withEngine(async (engine) => {
       const fsPath = toFsPath(path);
-      const source = readFileSync(fsPath, "utf8");
+      const source = readEntry(fsPath);
       const entryPath = resolvePath(fsPath);
       const entryHref = toFileUrl(entryPath).href;
       const syntax = options.syntax != null ? syntaxCode(options.syntax) : syntaxForPath(entryPath);
