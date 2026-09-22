@@ -2109,7 +2109,16 @@ async function main() {
       if (e instanceof Exception) {
         const writeError = reportFailure(output, opts, e.message);
         if (writeError) writeStderrSync(`${writeError}\n`);
-        fail(e.message, EXIT_COMPILE);
+      // A failed error-CSS WRITE upgrades this to an I/O failure: the
+      // output could not be produced, and dart answers 66 for that
+      // (measured 2026-09-23, `bad.scss:adir` -> dart 66, binary 66).
+      //
+      // A failed REMOVAL under `--no-error-css` does NOT. There was no
+      // output to produce, and the cleanup failing does not change what
+      // went wrong with the stylesheet — dart stays at 65 there, and
+      // says nothing about the removal at all. The binary upgrades and
+      // is wrong about it; #182.
+        fail(e.message, writeError && opts.errorCss !== false ? EXIT_IO : EXIT_COMPILE);
       }
       // Not a compile error — an unreadable file, say. dart leaves the
       // previous output exactly as it was, and answers 66.
@@ -2589,6 +2598,16 @@ function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics, compiled
       if (e instanceof Exception) {
         const writeError = reportFailure(output, opts, e.message);
         if (writeError) note(i, `${writeError}\n`);
+      // A failed error-CSS WRITE upgrades this to an I/O failure: the
+      // output could not be produced, and dart answers 66 for that
+      // (measured 2026-09-23, `bad.scss:adir` -> dart 66, binary 66).
+      //
+      // A failed REMOVAL under `--no-error-css` does NOT. There was no
+      // output to produce, and the cleanup failing does not change what
+      // went wrong with the stylesheet — dart stays at 65 there, and
+      // says nothing about the removal at all. The binary upgrades and
+      // is wrong about it; #182.
+        if (writeError && opts.errorCss !== false) worst = Math.max(worst, EXIT_IO);
       }
       if (opts.stopOnError || jobs.length === 1) {
         if (ctl) Atomics.store(ctl, 1, 1);

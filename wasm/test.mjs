@@ -3669,6 +3669,51 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     );
   }
 
+  // A compile error whose ERROR-CSS WRITE also fails is an I/O failure:
+  // the output could not be produced. Measured 2026-09-23,
+  // `bad.scss:adir` — dart 66, binary 66.
+  assert.equal(run("bad.scss:adir"), EXIT_IO, "a compile error whose error CSS cannot be written exits 66");
+
+  // …and a failed REMOVAL under --no-error-css is NOT. There was no
+  // output to produce, and the cleanup failing does not change what went
+  // wrong with the stylesheet: dart stays at 65 and says nothing about
+  // the removal at all.
+  //
+  // This is the case that makes the pair worth having. "Use the write
+  // result for the code" passes the one above and fails this one — the
+  // binary does exactly that and answers 66 here, which is a divergence
+  // from dart of its own (#182).
+  assert.equal(
+    run("--no-error-css", "bad.scss:adir"),
+    EXIT_COMPILE,
+    "a compile error whose stale-output removal fails still exits 65",
+  );
+
+  // The write half again through --stdin, which has its own copy of the
+  // rule. The output is a path UNDER a regular file, because `--stdin`
+  // with a directory output is a usage error before anything compiles
+  // (64 on both front ends) — measured, along with dart answering 66 for
+  // this shape too.
+  //
+  // Its removal half is not reachable: `rmSync` is called with `force`,
+  // so a destination that is not there is not a failure, and the one
+  // destination whose removal WOULD fail is the directory the parser
+  // already refused. Said rather than faked.
+  {
+    writeFileSync(join(xdir, "afile"), "x\n");
+    const viaStdin = (...args) =>
+      spawnSync(process.execPath, [cliPath, "--no-source-map", "--stdin", ...args], {
+        cwd: xdir,
+        encoding: "utf8",
+        input: ".bad { a: 1px + #fff; }\n",
+      }).status;
+    assert.equal(
+      viaStdin("-o", join("afile", "out.css")),
+      EXIT_IO,
+      "--stdin: error CSS that cannot be written exits 66",
+    );
+  }
+
   // A directory INPUT the filesystem will not list is 66 too. It is its
   // own code path — the walk, not a compile — and without this the only
   // thing that noticed the code changing there was an unrelated timing

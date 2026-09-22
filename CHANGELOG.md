@@ -41,6 +41,12 @@ Conformance is tracked separately as a ratchet against the official
   already told the three causes apart for the MESSAGE and answered 1 for
   all of them anyway.
 
+  A compile error whose ERROR-CSS WRITE also fails is an I/O failure —
+  the output could not be produced, and dart answers 66. A failed
+  REMOVAL under `--no-error-css` is not: there was no output to produce,
+  and dart stays at 65 and says nothing about the removal at all. The
+  binary upgrades there and diverges from dart; #182 has it.
+
   Twenty existing cases asserted `status === 1`. They are classified now
   — by what each one does, not by what the code returns — and the one
   disagreement that produced was real: `--loop` on a broken stylesheet
