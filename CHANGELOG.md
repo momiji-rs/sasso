@@ -13,6 +13,46 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **The npm CLI exited 1 for every kind of failure** (#91). dart-sass and
+  the native CLI both use the `sysexits` codes and agree with each other;
+  a build script that switches on the code to tell "your stylesheet is
+  wrong" from "I could not write where you told me" got neither from the
+  package advertised as a drop-in.
+
+  Measured 2026-09-22 against dart-sass 1.104.1 and the binary:
+
+  ```
+                             dart   binary   npm before   npm after
+    compile error             65      65         1           65
+    missing import            65      65         1           65
+    input does not exist      66      66         1           66
+    output is a directory     66      66         1           66
+    usage error               64      64         1           64
+    a batch with both         66      66         1           66
+  ```
+
+  The mixed batch answered the issue's open question: **66 wins in either
+  command-line order**, so it is severity that decides and not recency —
+  the same rule `worse()` spells out in `src/main.rs`. `worst` is a plain
+  numeric maximum here because 66 > 65 > 0 is already that order.
+
+  Four paths had to learn it, not one: the batch loop, the worker pool
+  (which aggregates separately), `--loop`, and `--stdin`. The last two
+  already told the three causes apart for the MESSAGE and answered 1 for
+  all of them anyway.
+
+  A compile error whose ERROR-CSS WRITE also fails is an I/O failure —
+  the output could not be produced, and dart answers 66. A failed
+  REMOVAL under `--no-error-css` is not: there was no output to produce,
+  and dart stays at 65 and says nothing about the removal at all. The
+  binary upgrades there and diverges from dart; #182 has it.
+
+  Twenty existing cases asserted `status === 1`. They are classified now
+  — by what each one does, not by what the code returns — and the one
+  disagreement that produced was real: `--loop` on a broken stylesheet
+  was answering 64 where the binary answers 65.
+
+
 - **The npm package compiled stylesheets that are not valid UTF-8 into
   replacement characters, and said nothing** (#179). `readFileSync(path,
   "utf8")` does not reject invalid UTF-8 — it substitutes U+FFFD and

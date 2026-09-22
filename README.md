@@ -253,8 +253,9 @@ outright. Diagnostics are reported in command-line order. Supported dart-sass
 flags: `--[no-]source-map`, `--source-map-urls`, `--[no-]embed-sources`,
 `--[no-]embed-source-map`, `--[no-]error-css`, `--[no-]charset`, `-q/--quiet`,
 `--quiet-deps`, `--stop-on-error`, `--[no-]unicode`, `--[no-]color` (accepted;
-sasso never colors), `--indented`, `--stdin`. Exit codes match too (64 usage,
-65 compile error, 66 unreadable input). Not supported by the binary:
+sasso never colors), `--indented`, `--stdin`. Exit codes match on both CLIs (64
+usage, 65 compile error, 66 unreadable input or unwritable output; the worse
+of the two when one batch has both). Not supported by the binary:
 `--pkg-importer` and the deprecation-selection flags. `--update` and
 `-w/--watch` are on both CLIs (#86): `--update` compares the output against
 the entry *and* every stylesheet the entry loads, as dart-sass does, and
