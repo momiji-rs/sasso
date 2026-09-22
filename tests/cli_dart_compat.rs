@@ -3132,17 +3132,18 @@ fn watch_declines_to_write_over_a_source() {
 /// comparison sees only the names.
 ///
 /// This is a DELIBERATE divergence from dart, which is why it is here with
-/// the measurement rather than folded into the case above. 2.5 seconds of
+/// the measurement rather than folded into the case above.
 /// `--watch main.scss out.css` with `out.css -> main.scss`:
 ///
-///   dart     Compiled x1   the source is DESTROYED
-///   npm      Compiled x1   the source is DESTROYED
-///   binary   Compiled x23  the source is DESTROYED   (before)
+///   dart     declines 26 times in 29, and DESTROYS the stylesheet 3
+///   npm      declines                                          (#168)
+///   binary   Compiled x23  the source is DESTROYED             (before)
 ///
-/// Nobody protects it. We do two things differently: the loop was ours
-/// alone and is plainly a defect, and destroying a stylesheet with no
-/// warning is not worth matching for its own sake. #168 carries the npm
-/// half.
+/// The dart row said "Compiled x1, DESTROYED" here until 2026-09-22, from
+/// a single run. It has a guard and the guard is RACY: 29 runs, three of
+/// them lost the file. So the divergence is not that dart allows this and
+/// we do not — it is that dart decides it by a coin toss and we decide it
+/// every time. #168 carried the npm half.
 #[test]
 fn watch_declines_to_write_over_a_source_reached_through_a_symlink() {
     use std::time::Duration;

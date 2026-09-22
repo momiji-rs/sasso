@@ -3842,6 +3842,79 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   }
 }
 
+// === Phase 3a4: the output is a source by another name (#168) ===
+//
+// `out.css -> main.scss` and then `--watch main.scss out.css`. The
+// lexical guard compares path strings and a symlink is the same file
+// under a different one, so the stylesheet was replaced by its own CSS.
+//
+// dart has a guard here too and it is RACY: measured 2026-09-22, 29 runs
+// of exactly this, dart declined 26 times and destroyed the stylesheet 3.
+// So matching dart would mean destroying the file one time in ten. The
+// binary took the deterministic side in #166; this is the same rule.
+//
+// Both shapes, because they take different paths through the guard: the
+// entry is compared directly and a dependency comes out of `known`.
+{
+  for (const target of ["main.scss", "_v.scss"]) {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchlink-"));
+    const MAIN = `@use "v" as v;\n.a { color: v.$c; }\n`;
+    const DEP = `$c: red;\n`;
+    writeFileSync(join(wdir, "main.scss"), MAIN);
+    writeFileSync(join(wdir, "_v.scss"), DEP);
+    symlinkSync(join(wdir, target), join(wdir, "out.css"));
+
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    try {
+      // Long enough for a compile to have happened and been written.
+      await new Promise((r) => setTimeout(r, 1500));
+      assert.equal(readFileSync(join(wdir, "main.scss"), "utf8"), MAIN, `${target}: the entry was overwritten`);
+      assert.equal(readFileSync(join(wdir, "_v.scss"), "utf8"), DEP, `${target}: the dependency was overwritten`);
+      // Silent, because dart is silent when it declines.
+      assert.ok(!log.includes("Compiled"), `${target}: it narrated a write it should not have made: ${JSON.stringify(log)}`);
+    } finally {
+      proc.kill();
+    }
+  }
+
+  // …and the ordinary case is untouched by all of this: a real output,
+  // reached through a symlinked DIRECTORY, is still written. Without
+  // this the guard could be satisfied by refusing to write anything.
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchlinkok-"));
+    mkdirSync(join(wdir, "real"));
+    writeFileSync(join(wdir, "real", "main.scss"), `.a { color: red; }\n`);
+    symlinkSync(join(wdir, "real"), join(wdir, "link"));
+    const outFile = join(wdir, "link", "out.css");
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", join(wdir, "link", "main.scss"), outFile], {
+      stdio: "ignore",
+    });
+    try {
+      const deadline = Date.now() + 20000;
+      let wrote = false;
+      while (Date.now() < deadline && !wrote) {
+        try {
+          wrote = readFileSync(outFile, "utf8").includes("red");
+        } catch {
+          /* not yet */
+        }
+        if (!wrote) await new Promise((r) => setTimeout(r, 25));
+      }
+      assert.ok(wrote, "a real output under a symlinked directory was not written");
+    } finally {
+      proc.kill();
+    }
+  }
+
+  console.log("ok: cli --watch — an output that is a source by another name is declined, a real one is not");
+}
+
 // === Phase 3b: CLI --watch, what it SAYS ===
 //
 // The functional watch test above starts the child with `stdio: "ignore"`

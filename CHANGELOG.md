@@ -13,6 +13,36 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **`--watch` in the npm CLI overwrote a stylesheet reached through a
+  symlink** (#168). `out.css -> main.scss` and then
+  `sasso --watch main.scss out.css` replaced the stylesheet with its own
+  CSS. Both CLIs already decline the lexical form of this — `--watch
+  main.scss main.scss` writes nothing and says nothing — and a symlink is
+  the same situation spelled differently, which a path-string comparison
+  cannot see.
+
+  `aliasesASource` asks the filesystem as well now, exactly as the
+  binary's `aliases_a_source` does: `realpath` both sides, and only when
+  the destination exists, since a path that is not there cannot alias
+  anything.
+
+  Measured 2026-09-22, `out.css -> main.scss` under `--watch`:
+
+  ```
+    dart-sass 1.104.1   declines 26 runs in 29, DESTROYS the file in 3
+    sasso binary        declines                              (#166)
+    npm, before         DESTROYS every time
+    npm, after          declines
+  ```
+
+  That dart row corrects this repo's own record. `tests/cli_dart_compat.rs`
+  said "dart Compiled x1, the source is DESTROYED" from a single run, and
+  concluded "nobody protects it". dart does protect it — with a guard that
+  loses about one time in ten. So the divergence is not that dart permits
+  this and we refuse: it is that dart decides it by a coin toss and we
+  decide it every time.
+
+
 - **`--watch` in the npm CLI printed every diagnostic twice per save**
   (#165). A burst is a provisional run plus an authoritative catch-up, and
   both reported. A provisional FAILURE was already silent, for the reason

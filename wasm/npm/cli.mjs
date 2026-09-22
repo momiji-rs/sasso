@@ -1059,6 +1059,23 @@ function realPath(path) {
 }
 
 /**
+ * A path's canonical form, or `null` when there is nothing there to resolve.
+ *
+ * `realPath` above falls back to `resolve()` for a path that does not exist,
+ * which is right for the walker and wrong here: two paths that do not exist
+ * would then compare equal on their spelling alone, which is the lexical
+ * question `pathKey` already answers. Identity through symlinks is only a
+ * question about files that ARE there.
+ */
+function realOrNull(path) {
+  try {
+    return pathKey(realpathSync(path));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Every compilable stylesheet under `dir`, relative to it: `.scss`, `.sass` and
  * `.css` (exact lowercase suffixes) that are not partials, in sorted order.
  * Symlinked directories are followed — dart does — but each directory is
@@ -1369,7 +1386,36 @@ function runWatch(input, output, common, opts) {
   const loadPathDirs = (common.loadPaths || []).map((d) => resolve(d));
   const aliasesASource = () => {
     const dest = pathKey(output);
-    return dest === pathKey(input) || known.has(dest);
+    if (dest === pathKey(input) || known.has(dest)) return true;
+    // …and through any symlink, because two names for one file is the
+    // other way to reach it. `out.css -> main.scss` passes the comparison
+    // above and then overwrites the stylesheet with its own CSS.
+    //
+    // A second opinion rather than the rule: `realpathSync` answers only
+    // for a path that EXISTS, and an output that is not there yet cannot
+    // alias anything — which is also why the whole thing is skipped when
+    // the destination does not resolve, rather than paying a `realpath`
+    // per dependency on every compile for nothing.
+    //
+    // dart has a guard here too and it is racy: measured 2026-09-22, 29
+    // runs of `out.css -> main.scss` under `--watch`, dart declined 26
+    // times and destroyed the stylesheet 3. The binary took the
+    // deterministic side in #166 and this is the same rule.
+    const realDest = realOrNull(output);
+    // With no destination to resolve there is nothing to be the same
+    // AS, and skipping here saves a `realpath` per dependency on every
+    // compile. It also settles the only way this comparison could lie:
+    // two files that have both vanished would otherwise answer "the same
+    // file", because neither resolves.
+    if (realDest === null) return false;
+    // `real !== null` is redundant while the check above stands, and it
+    // is here so that moving that check cannot quietly reintroduce the
+    // lie it settles. Neither can be made to fail from a test today.
+    const same = (f) => {
+      const real = realOrNull(f);
+      return real !== null && real === realDest;
+    };
+    return same(input) || [...known].some(same);
   };
   // One per absent load path, keyed so re-arming replaces rather than adds
   // — see `_probe.mjs` for what happened when it did not.
