@@ -38,6 +38,7 @@
     "_coalesce.mjs",
     "_probe.mjs",
     "_watchers.mjs",
+    "_poller.mjs",
     "_errorcss.mjs",
     "cli.mjs",
     "sasso.mjs",

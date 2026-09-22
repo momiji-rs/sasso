@@ -35,6 +35,7 @@ import { DEPRECATION_IDS } from "./_deprecations.mjs";
 import { triggersRecompile } from "./_watchfilter.mjs";
 import { coalesce } from "./_coalesce.mjs";
 import { makeProbe } from "./_probe.mjs";
+import { makePoller } from "./_poller.mjs";
 import { makeWatchers } from "./_watchers.mjs";
 import { errorCss } from "./_errorcss.mjs";
 // The prebuilt-addon rules, shared with native.mjs: which engine this platform
@@ -337,9 +338,17 @@ function pickBinary(opts) {
   // `--watch` stays here, and since #86 that is a CHOICE rather than the
   // binary lacking a watcher. It has one, and it polls, because a native
   // watcher would be a runtime dependency in a crate whose `[dependencies]`
-  // is empty. Measured on one save, macOS: this CLI's `fs.watch` answers in
-  // 18-20 ms, the binary's poll in 13-55 ms, dart-sass in 47-51 ms. Handing
-  // off would trade the fastest of the three for the middle one.
+  // is empty.
+  //
+  // Measured on macOS, one SETTLED save per process, twelve fresh
+  // processes, median: this CLI 34 ms, the binary 45 ms, dart-sass 1.104.1
+  // 13196 ms. Handing off would trade the fastest of the three for the
+  // second.
+  //
+  // The previous version of this comment said 18-20/13-55/47-51 ms
+  // "measured on one save", and one save is the whole error: the number it
+  // caught was a catch-up compile reading the file, not an event arriving.
+  // The real event latency was a ~1s median with a 7s tail (#164).
   if (opts.watch) return compileInProcess("--watch is faster in-process than the binary's poll");
   // `--update` is no longer on that list: the binary has it, and walks the
   // same dependency graph this CLI does. It is still held back from the
@@ -580,12 +589,18 @@ function parseArgs(argv) {
     } else if (a === "-w" || a === "--watch") {
       opts.watch = true;
     } else if (a === "--poll" || a === "--no-poll") {
-      // dart chooses between a native watcher and repeated stats with this.
-      // NEITHER of our CLIs can honour it, for opposite reasons: node gives
-      // this one `fs.watch` and it always uses it, and the binary has no
-      // dependency to give it one so it always polls. Accepted so a build
-      // script written for dart runs, validated below so the flag is not
-      // silently meaningless, and otherwise a no-op.
+      // dart chooses between a native watcher and repeated stats with
+      // this, and so do we now. The default is BOTH: `fs.watch` for
+      // latency and a sweep beside it for the guarantee, because on macOS
+      // the watcher delivers a median of 552ms and drops events outright
+      // (#164, and the table in `_poller.mjs`).
+      //
+      //   --poll      sweep only, no native watcher — dart's meaning
+      //   --no-poll   native watcher only, which is what this CLI did
+      //               before #164 and what Linux alone can afford
+      //
+      // The binary has no `[dependencies]` to give it a native watcher,
+      // so it polls either way and the flag stays a no-op there.
       opts.poll = a === "--poll";
     } else if (a === "--indented") {
       opts.indented = true;
@@ -1286,6 +1301,11 @@ function isFresh(output, input, deps) {
 // all involved files (so editor atomic-saves are caught) and debounces bursts.
 function runWatch(input, output, common, opts) {
   if (!output) fail("error: --watch requires an output file (sasso --watch in.scss out.css)");
+  // `--poll` is the native watcher OFF, `--no-poll` is the sweep off, and
+  // by default both run: see the flag's own comment, and `_poller.mjs` for
+  // why one of them cannot be trusted alone.
+  const polling = opts.poll !== false;
+  const nativeWatch = opts.poll !== true;
   const watchers = makeWatchers({
     watch,
     exists: existsSync,
@@ -1387,10 +1407,31 @@ function runWatch(input, output, common, opts) {
     return false;
   };
   const watchedDirs = () => new Set([...[...known].map((f) => dirname(f)), ...loadPathDirs]);
-  const takeSnapshots = () => {
-    stamps = new Map([...known].map((f) => [f, mtime(f)]));
-    neighbours = surveyNeighbours(watchedDirs());
+  /**
+   * Re-baseline the sweep.
+   *
+   * `before` is what the filesystem looked like when the compile STARTED,
+   * and it wins wherever it has an answer. Stamping after the compile
+   * instead adopts a save made while it was running as the baseline, and
+   * no later sweep can see that save — measured before this, writing the
+   * instant the first output appeared: 7 of 40 saves waited longer than
+   * half a second for the native watcher, one of them 7.7s. It is the
+   * same rule as the binary's `Snapshot::follow`, which keeps the
+   * earliest observation of a path for exactly this reason.
+   *
+   * A stamp that is older than what the compile actually read costs one
+   * extra sweep hit, and that compile produces identical CSS and is not
+   * written or narrated. Losing a save costs the save.
+   */
+  const takeSnapshots = (before) => {
+    stamps = new Map([...known].map((f) => [f, before?.stamps.has(f) ? before.stamps.get(f) : mtime(f)]));
+    neighbours = before ? before.neighbours : surveyNeighbours(watchedDirs());
   };
+  /** What the sweep would have seen just before a compile started. */
+  const snapshotBefore = () => ({
+    stamps: new Map([...known].map((f) => [f, mtime(f)])),
+    neighbours: surveyNeighbours(watchedDirs()),
+  });
   const mtime = (f) => {
     try {
       return statSync(f).mtimeMs;
@@ -1400,7 +1441,7 @@ function runWatch(input, output, common, opts) {
   };
 
   /** Re-arm the watchers. `loadedUrls` omitted = keep the last known set. */
-  const rewatch = (loadedUrls) => {
+  const rewatch = (loadedUrls, before) => {
     if (loadedUrls) {
       const files = new Set([pathKey(input)]);
       for (const u of loadedUrls) {
@@ -1412,7 +1453,7 @@ function runWatch(input, output, common, opts) {
       }
       known = files;
     }
-    if (sawNameless) takeSnapshots();
+    if (sawNameless || polling) takeSnapshots(before);
     probes.closeAll();
 
     // A load path that does not exist YET cannot be watched — `fs.watch`
@@ -1435,7 +1476,7 @@ function runWatch(input, output, common, opts) {
     // re-arm a watcher that fails, and say so when one cannot be
     // recovered. All of that lives in `_watchers.mjs`, where a fake
     // `watch` can produce the failures this machine will not.
-    watchers.sync(dirs);
+    if (nativeWatch) watchers.sync(dirs);
   };
 
   /** One event from one watched directory. */
@@ -1476,12 +1517,14 @@ function runWatch(input, output, common, opts) {
    * the terminal — one window later.
    */
   const recompile = (provisional) => {
+    // BEFORE the compile reads a single file — see `takeSnapshots`.
+    const before = polling || sawNameless ? snapshotBefore() : undefined;
     try {
       const result = compile(input, common);
       // Watch before emitting: once the output file is visible, dependency
       // watchers are guaranteed live (a change saved right after the output
       // appears must not fall between emit and watcher registration).
-      rewatch(result.loadedUrls);
+      rewatch(result.loadedUrls, before);
       // Never write over a file this compile READ. `sasso a.scss a.scss`
       // and `sasso main.scss _v.scss` both replace a source with its own
       // CSS — measured, and dart does that too for a one-shot compile, so
@@ -1536,7 +1579,7 @@ function runWatch(input, output, common, opts) {
       // and throwing away what we knew is what broke recovery — and accept
       // anything in those directories until a compile succeeds again.
       failing = true;
-      rewatch();
+      rewatch(undefined, before);
       return false;
     }
     return true;
@@ -1569,7 +1612,28 @@ function runWatch(input, output, common, opts) {
    */
   const schedule = coalesce({ windowMs: 50, run: recompile });
 
+  // The sweep asks the two questions the event filter already asks, and
+  // asks them of the filesystem instead of waiting to be told: did a file
+  // we loaded move, and did anything else in a watched directory. Both
+  // exclude our own output, or the watch would answer its own write.
+  //
+  // Re-baselining here rather than leaving it to the compile is what stops
+  // one change being reported on every tick from now on: `schedule` may
+  // coalesce this into a run that has not happened yet.
+  const poller = makePoller({
+    sweep: () => {
+      const moved = [...known].some((f) => stamps.get(f) !== mtime(f)) || anythingElseChanged();
+      if (moved) takeSnapshots();
+      return moved;
+    },
+    onChange: () => schedule(),
+  });
+
   recompile(false);
+  // The compile has already baselined the sweep from BEFORE it read
+  // anything, which is what makes a save during that first compile
+  // visible; re-stamping here would throw exactly that away.
+  if (polling) poller.start();
   // dart's wording, and on stdout beside the compile lines. `--quiet`
   // silences those but NOT this: measured 2026-09-19, `sass --quiet --watch`
   // still prints the banner, which is the only sign the process is alive.
