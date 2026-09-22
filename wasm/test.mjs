@@ -9,7 +9,7 @@
 // asyncify refactors must preserve (docs/HANDOFF_ASYNC_IMPORTER_PERF.md).
 // Run after build.sh: `node wasm/test.mjs`.
 import assert from "node:assert/strict";
-import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, copyFileSync, existsSync, statSync, symlinkSync, renameSync, rmSync, openSync, closeSync, chmodSync, realpathSync } from "node:fs";
+import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, copyFileSync, existsSync, statSync, lstatSync, symlinkSync, renameSync, rmSync, openSync, closeSync, chmodSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -3840,6 +3840,537 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   } finally {
     proc.kill();
   }
+}
+
+// === Phase 3a4: the output is a source by another name (#168) ===
+//
+// `out.css -> main.scss` and then `--watch main.scss out.css`. The
+// lexical guard compares path strings and a symlink is the same file
+// under a different one, so the stylesheet was replaced by its own CSS.
+//
+// dart has a guard here too and it is RACY: measured 2026-09-22, 29 runs
+// of exactly this, dart declined 26 times and destroyed the stylesheet 3.
+// So matching dart would mean destroying the file one time in ten. The
+// binary took the deterministic side in #166; this is the same rule.
+//
+// Both shapes, because they take different paths through the guard: the
+// entry is compared directly and a dependency comes out of `known`.
+{
+  for (const target of ["main.scss", "_v.scss"]) {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchlink-"));
+    const MAIN = `@use "v" as v;\n.a { color: v.$c; }\n`;
+    const DEP = `$c: red;\n`;
+    writeFileSync(join(wdir, "main.scss"), MAIN);
+    writeFileSync(join(wdir, "_v.scss"), DEP);
+    symlinkSync(join(wdir, target), join(wdir, "out.css"));
+
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
+    try {
+      // The banner is the synchronisation point. A fixed sleep is not
+      // one: a watch that never started would satisfy every assertion
+      // below — "it wrote nothing" is trivially true of a process that
+      // did nothing — and this case would pass while testing nothing.
+      assert.ok(
+        await until(() => log.includes("watching for changes"), 20000),
+        `${target}: the watch never started, so the guard was never reached: ${JSON.stringify(log)}`,
+      );
+      // The banner is printed AFTER the first compile, so by here the
+      // decision this case is about has already been made. The pause is
+      // for the burst behind it, not for the compile.
+      await new Promise((r) => setTimeout(r, 800));
+      assert.equal(readFileSync(join(wdir, "main.scss"), "utf8"), MAIN, `${target}: the entry was overwritten`);
+      assert.equal(readFileSync(join(wdir, "_v.scss"), "utf8"), DEP, `${target}: the dependency was overwritten`);
+      // Silent, because dart is silent when it declines.
+      assert.ok(!log.includes("Compiled"), `${target}: it narrated a write it should not have made: ${JSON.stringify(log)}`);
+    } finally {
+      proc.kill();
+    }
+  }
+
+  // The link still points at a source when that source is DELETED.
+  //
+  // `realpath` answers nothing for a dangling link, and "nothing" must
+  // not read as "not a source": the failure path writes the error
+  // stylesheet through the link and RECREATES the file it is complaining
+  // about. Measured before this — `_v.scss` came back holding
+  // `/* Error: Can't find stylesheet to import. */`.
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchdangle-"));
+    writeFileSync(join(wdir, "main.scss"), `@use "v" as v;
+.a { color: v.$c; }
+`);
+    writeFileSync(join(wdir, "_v.scss"), `$c: red;
+`);
+    symlinkSync(join(wdir, "_v.scss"), join(wdir, "out.css"));
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
+    try {
+      assert.ok(
+        await until(() => log.includes("watching for changes"), 20000),
+        `dangling: the watch never started: ${JSON.stringify(log)}`,
+      );
+      rmSync(join(wdir, "_v.scss"));
+      // Wait for the watch to NOTICE, so the assertion is about what it
+      // did rather than about it not having looked yet.
+      assert.ok(
+        await until(() => /Error|error/.test(log), 20000),
+        `dangling: the broken import was never reported: ${JSON.stringify(log)}`,
+      );
+      await new Promise((r) => setTimeout(r, 400));
+      assert.ok(!existsSync(join(wdir, "_v.scss")), "the deleted dependency was recreated through the dangling symlink");
+    } finally {
+      proc.kill();
+    }
+  }
+
+  // The same, through a CHAIN, and with the dependency missing from the
+  // very first moment.
+  //
+  // `out.css -> middle.scss -> _v.scss` answers `middle.scss` after one
+  // `readlink`, which matches no source — and the write then follows the
+  // rest of the chain and recreates `_v.scss` anyway.
+  //
+  // The startup shape is not the same question: the first compile throws
+  // before it reports what it loaded, so `known` holds the entry alone
+  // and no amount of comparing can recognise `_v.scss`. What settles it
+  // is the failure path refusing to follow a link that goes nowhere.
+  for (const shape of ["chain", "startup"]) {
+    const wdir = mkdtempSync(join(tmpdir(), `sasso-watchdangle-${shape}-`));
+    writeFileSync(join(wdir, "main.scss"), `@use "v" as v;\n.a { color: v.$c; }\n`);
+    if (shape === "chain") {
+      writeFileSync(join(wdir, "_v.scss"), `$c: red;\n`);
+      symlinkSync(join(wdir, "_v.scss"), join(wdir, "middle.scss"));
+      symlinkSync(join(wdir, "middle.scss"), join(wdir, "out.css"));
+    } else {
+      symlinkSync(join(wdir, "_v.scss"), join(wdir, "out.css")); // dangling already
+    }
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
+    try {
+      assert.ok(
+        await until(() => log.includes("watching for changes"), 20000),
+        `${shape}: the watch never started: ${JSON.stringify(log)}`,
+      );
+      if (shape === "chain") rmSync(join(wdir, "_v.scss"));
+      assert.ok(
+        await until(() => /error/i.test(log), 20000),
+        `${shape}: the broken import was never reported: ${JSON.stringify(log)}`,
+      );
+      await new Promise((r) => setTimeout(r, 400));
+      assert.ok(!existsSync(join(wdir, "_v.scss")), `${shape}: the missing source was created through the link`);
+    } finally {
+      proc.kill();
+    }
+  }
+
+  // …and the two shapes the refusal must NOT break. A failing compile
+  // still writes its error stylesheet into a tree that was never there —
+  // dart does, and it is the one thing the browser would have had — and a
+  // SUCCEEDING compile still creates the target of a dangling link,
+  // because `out.css -> dist/out.css` before a first build is an ordinary
+  // way to arrange things.
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchtree-"));
+    writeFileSync(join(wdir, "main.scss"), ".a { color: ; }\n"); // broken
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "dist/css/out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const out = join(wdir, "dist", "css", "out.css");
+    try {
+      const deadline = Date.now() + 20000;
+      let wrote = false;
+      while (Date.now() < deadline && !wrote) {
+        try {
+          wrote = readFileSync(out, "utf8").startsWith("/* Error:");
+        } catch {
+          /* not yet */
+        }
+        if (!wrote) await new Promise((r) => setTimeout(r, 25));
+      }
+      assert.ok(wrote, `the error stylesheet was not written into a tree that did not exist: ${JSON.stringify(log)}`);
+    } finally {
+      proc.kill();
+    }
+  }
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchmake-"));
+    writeFileSync(join(wdir, "main.scss"), ".a { color: red; }\n");
+    mkdirSync(join(wdir, "dist"));
+    symlinkSync(join(wdir, "dist", "out.css"), join(wdir, "out.css")); // dangling
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: "ignore",
+    });
+    const target = join(wdir, "dist", "out.css");
+    try {
+      const deadline = Date.now() + 20000;
+      let made = false;
+      while (Date.now() < deadline && !made) {
+        try {
+          made = readFileSync(target, "utf8").includes("red");
+        } catch {
+          /* not yet */
+        }
+        if (!made) await new Promise((r) => setTimeout(r, 25));
+      }
+      assert.ok(made, "a successful compile did not create the target of a dangling output link");
+    } finally {
+      proc.kill();
+    }
+  }
+
+  // A symlinked output gets its error stylesheet once the watch has
+  // WRITTEN it — and not before.
+  //
+  // That is the whole rule, and it is narrower than "never write through
+  // a symlink": a link this watch has written through is demonstrably an
+  // output, whatever it points at. Before the first successful build it
+  // is only a link, and `aliasesASource` cannot always tell what is on
+  // the other end — a dependency that exists and fails to LOAD never
+  // reaches `known`, because the compile throws before it says what it
+  // loaded.
+  //
+  // Both halves are here because either alone is satisfiable by a rule
+  // that is wrong: "always refuse" passes the first, "always allow"
+  // passes the second.
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchlivelink-"));
+    const GOOD = ".a { color: red; }\n";
+    const BROKEN = ".a { color: ; }\n";
+    writeFileSync(join(wdir, "main.scss"), BROKEN);
+    mkdirSync(join(wdir, "dist"));
+    writeFileSync(join(wdir, "dist", "out.css"), "/* stale */\n"); // the target EXISTS
+    symlinkSync(join(wdir, "dist", "out.css"), join(wdir, "out.css"));
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const target = join(wdir, "dist", "out.css");
+    const css = () => {
+      try {
+        return readFileSync(target, "utf8");
+      } catch {
+        return "";
+      }
+    };
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
+    try {
+      // Nothing written yet, so the stale target is left exactly alone.
+      assert.ok(await until(() => /error/i.test(log), 20000), `livelink: the break was never reported: ${JSON.stringify(log)}`);
+      await new Promise((r) => setTimeout(r, 500));
+      assert.equal(css(), "/* stale */\n", "a symlinked output was written before the watch had ever written it");
+
+      // One successful build, and the link is demonstrably an output.
+      writeFileSync(join(wdir, "main.scss"), GOOD);
+      assert.ok(await until(() => css().includes("red"), 20000), "livelink: the fix never landed");
+      await new Promise((r) => setTimeout(r, 400));
+
+      // Now a failure DOES leave the error stylesheet there, as dart does.
+      writeFileSync(join(wdir, "main.scss"), BROKEN);
+      assert.ok(
+        await until(() => css().startsWith("/* Error:"), 20000),
+        `a symlinked output the watch had written was refused its error stylesheet: ${JSON.stringify(css())}`,
+      );
+
+      // …and a SECOND consecutive failure behaves like the first. What
+      // the watch has written is a fact about the run, not something a
+      // failure undoes — `onDisk` is cleared by one, and sharing that
+      // reset would silence every failure after the first.
+      await new Promise((r) => setTimeout(r, 400));
+      writeFileSync(target, "/* wiped */\n");
+      writeFileSync(join(wdir, "main.scss"), ".b { color: ; }\n"); // a different break
+      assert.ok(
+        await until(() => css().startsWith("/* Error:"), 20000),
+        `the second failure in a row was refused its error stylesheet: ${JSON.stringify(css())}`,
+      );
+    } finally {
+      proc.kill();
+    }
+  }
+
+  // The dependency EXISTS and fails to LOAD, so it never reaches
+  // `known` — the compile throws before it reports what it loaded — and
+  // the link to it resolves perfectly well, so nothing about the link
+  // looks wrong either.
+  //
+  // A parse error rather than a permission bit, for the reason #159
+  // recorded: the file has to stay WRITABLE for the bug to be reachable
+  // at all, so a `chmod 000` dependency would pass for the wrong reason.
+  //
+  // And rather than invalid UTF-8, which was the first choice here and
+  // is ENGINE-DEPENDENT: the native addon refuses to read such a file
+  // ("stream did not contain valid UTF-8") while wasm reads it lossily
+  // and compiles, so the case simply did not fail on the wasm path and
+  // the test timed out waiting for an error that was never coming. CI
+  // caught that, this machine did not — the addon loads here and not
+  // there. See #179.
+  //
+  // The error that reaches the write does not name the dependency either
+  // — it is `Undefined variable` in `main.scss`, the second failure, not
+  // the parse error in `_v.scss`. So the span is no help and this is
+  // settled by "the watch has never written this output" instead.
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchbadload-"));
+    writeFileSync(join(wdir, "main.scss"), `@use "v" as v;\n.a { color: v.$c; }\n`);
+    const dep = join(wdir, "_v.scss");
+    const bytes = Buffer.from("$c: ;\n");
+    writeFileSync(dep, bytes);
+    symlinkSync(dep, join(wdir, "out.css"));
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
+    try {
+      assert.ok(await until(() => /error/i.test(log), 20000), `badload: nothing was reported: ${JSON.stringify(log)}`);
+      await new Promise((r) => setTimeout(r, 500));
+      assert.ok(
+        readFileSync(dep).equals(bytes),
+        "a dependency that failed to LOAD was overwritten by the error stylesheet about it",
+      );
+    } finally {
+      proc.kill();
+    }
+  }
+
+  // Refusing the WRITE is not refusing the branch. The first version of
+  // this skipped the whole failure path for a broken link and took two
+  // unrelated things with it.
+  //
+  // `onDisk` is the serious one: the watch remembers the CSS it last
+  // wrote so a catch-up does not write it again. Forgetting to forget it
+  // means "break the file, then fix it back to exactly what it was"
+  // matches the remembered value, skips the write, and the output never
+  // comes back — #159, measured again here.
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchondisk-"));
+    const GOOD = ".a { color: red; }\n";
+    writeFileSync(join(wdir, "main.scss"), GOOD);
+    mkdirSync(join(wdir, "dist"));
+    const target = join(wdir, "dist", "out.css");
+    symlinkSync(target, join(wdir, "out.css"));
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
+    const css = () => {
+      try {
+        return readFileSync(target, "utf8");
+      } catch {
+        return "";
+      }
+    };
+    try {
+      assert.ok(await until(() => css().includes("red"), 20000), "onDisk: the first compile never landed");
+      await new Promise((r) => setTimeout(r, 400));
+      rmSync(target); // the link now dangles
+      writeFileSync(join(wdir, "main.scss"), ".a { color: ; }\n");
+      assert.ok(await until(() => /error/i.test(log), 20000), `onDisk: the break was never reported: ${JSON.stringify(log)}`);
+      await new Promise((r) => setTimeout(r, 400));
+      writeFileSync(join(wdir, "main.scss"), GOOD); // back to EXACTLY the old bytes
+      assert.ok(
+        await until(() => css().includes("red"), 20000),
+        "fixing the source back to what it was left the output missing for good",
+      );
+    } finally {
+      proc.kill();
+    }
+  }
+
+  // …and `--no-error-css` still removes the output even when the watch
+  // has never written it, which is the case that separates "refuse the
+  // WRITE" from "skip the branch": the second takes the removal with it.
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchunlink0-"));
+    writeFileSync(join(wdir, "main.scss"), ".a { color: ; }\n"); // broken from the start
+    mkdirSync(join(wdir, "dist"));
+    writeFileSync(join(wdir, "dist", "out.css"), "/* stale */\n");
+    symlinkSync(join(wdir, "dist", "out.css"), join(wdir, "out.css"));
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--no-error-css", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
+    try {
+      assert.ok(await until(() => /error/i.test(log), 20000), `unlink0: nothing was reported: ${JSON.stringify(log)}`);
+      await new Promise((r) => setTimeout(r, 500));
+      let stillThere = true;
+      try {
+        lstatSync(join(wdir, "out.css"));
+      } catch {
+        stillThere = false;
+      }
+      assert.ok(!stillThere, "--no-error-css left an output link the watch had never written");
+    } finally {
+      proc.kill();
+    }
+  }
+
+  // …and the same after it HAS written it, where the link dangles.
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchunlink-"));
+    writeFileSync(join(wdir, "main.scss"), ".a { color: red; }\n");
+    mkdirSync(join(wdir, "dist"));
+    const target = join(wdir, "dist", "out.css");
+    symlinkSync(target, join(wdir, "out.css"));
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--no-error-css", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
+    try {
+      assert.ok(
+        await until(() => {
+          try {
+            return readFileSync(target, "utf8").includes("red");
+          } catch {
+            return false;
+          }
+        }, 20000),
+        "unlink: the first compile never landed",
+      );
+      await new Promise((r) => setTimeout(r, 400));
+      rmSync(target); // the link now dangles
+      writeFileSync(join(wdir, "main.scss"), ".a { color: ; }\n");
+      assert.ok(await until(() => /error/i.test(log), 20000), `unlink: the break was never reported: ${JSON.stringify(log)}`);
+      await new Promise((r) => setTimeout(r, 400));
+      let stillThere = true;
+      try {
+        lstatSync(join(wdir, "out.css"));
+      } catch {
+        stillThere = false;
+      }
+      assert.ok(!stillThere, "--no-error-css left a dangling output link in place");
+    } finally {
+      proc.kill();
+    }
+  }
+
+  // …and the ordinary case is untouched by all of this: a real output,
+  // reached through a symlinked DIRECTORY, is still written. Without
+  // this the guard could be satisfied by refusing to write anything.
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchlinkok-"));
+    mkdirSync(join(wdir, "real"));
+    writeFileSync(join(wdir, "real", "main.scss"), `.a { color: red; }\n`);
+    symlinkSync(join(wdir, "real"), join(wdir, "link"));
+    const outFile = join(wdir, "link", "out.css");
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", join(wdir, "link", "main.scss"), outFile], {
+      stdio: "ignore",
+    });
+    try {
+      const deadline = Date.now() + 20000;
+      let wrote = false;
+      while (Date.now() < deadline && !wrote) {
+        try {
+          wrote = readFileSync(outFile, "utf8").includes("red");
+        } catch {
+          /* not yet */
+        }
+        if (!wrote) await new Promise((r) => setTimeout(r, 25));
+      }
+      assert.ok(wrote, "a real output under a symlinked directory was not written");
+    } finally {
+      proc.kill();
+    }
+  }
+
+  console.log("ok: cli --watch — an output that is a source by another name is declined, dangling or not, and a real one is not");
 }
 
 // === Phase 3b: CLI --watch, what it SAYS ===

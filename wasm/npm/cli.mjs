@@ -14,6 +14,7 @@ import {
   readdirSync,
   mkdirSync,
   realpathSync,
+  readlinkSync,
   rmSync,
   openSync,
   readSync,
@@ -997,7 +998,7 @@ function emit(result, outPath, wantMap, opts, stdinText) {
  * so "on by default" and "asked for" are not the same state, and
  * `undefined` is the default rather than `true`.
  */
-function reportFailure(outPath, opts, message) {
+function reportFailure(outPath, opts, message, mayCreate = true) {
   if (opts.noCss) return undefined;
   if (!outPath) {
     // No file: only an EXPLICIT --error-css puts the stylesheet on
@@ -1007,6 +1008,11 @@ function reportFailure(outPath, opts, message) {
   }
   try {
     if (opts.errorCss !== false) {
+      // A broken symlink is not a destination — see `leadsNowhere`. Only
+      // the WRITE is refused: everything else this function and its
+      // caller do is still right, and skipping the lot was a bug of its
+      // own (the removal below, and the caller's `onDisk = null`).
+      if (!mayCreate) return undefined;
       // Same as `emit`: the destination tree may not exist yet, and a
       // FIRST compile that fails is exactly when it does not. dart and
       // the binary both write 547 bytes of error CSS into `dist/css/`
@@ -1016,6 +1022,9 @@ function reportFailure(outPath, opts, message) {
       mkdirSync(dirname(outPath), { recursive: true });
       writeFileSync(outPath, errorCss(message));
     } else {
+      // Unlinks the LINK, not what it points at, so a dangling output is
+      // removed here exactly as a real one is. `--no-error-css` means the
+      // stale output goes, and a broken link is as stale as it gets.
       rmSync(outPath, { force: true });
     }
     return undefined;
@@ -1055,6 +1064,33 @@ function realPath(path) {
     return realpathSync(path);
   } catch {
     return resolve(path);
+  }
+}
+
+/** Is this path a symlink, whatever it points at? */
+function isSymlink(path) {
+  try {
+    readlinkSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A path's canonical form, or `null` when there is nothing there to resolve.
+ *
+ * `realPath` above falls back to `resolve()` for a path that does not exist,
+ * which is right for the walker and wrong here: two paths that do not exist
+ * would then compare equal on their spelling alone, which is the lexical
+ * question `pathKey` already answers. Identity through symlinks is only a
+ * question about files that ARE there.
+ */
+function realOrNull(path) {
+  try {
+    return pathKey(realpathSync(path));
+  } catch {
+    return null;
   }
 }
 
@@ -1340,6 +1376,21 @@ function runWatch(input, output, common, opts) {
   // usually the same string as the last one's — tried, and it silenced
   // every save after the first.
   let burstWrote = false;
+  // Has this watch ever successfully written the output? Never reset,
+  // unlike `onDisk`, which a failure clears.
+  //
+  // It is what decides whether the error stylesheet may go through a
+  // SYMLINKED output. A link we have written through is ours; one we
+  // have not could be pointing at anything, and `aliasesASource` cannot
+  // always tell — a dependency that EXISTS but fails to load never
+  // reaches `known`, because the compile throws before it reports what
+  // it loaded. Measured: `out.css -> _v.scss` with `_v.scss` holding
+  // invalid UTF-8, and `_v.scss` came back holding the error stylesheet.
+  //
+  // The span does not help either, which is worth recording: the error
+  // that reaches the write is `Undefined variable` in `main.scss`, not
+  // the read failure in `_v.scss`.
+  let everWrote = false;
   const artifacts = (result) =>
     `${result.css}\u0000${result.sourceMap ? JSON.stringify(result.sourceMap) : ""}`;
   // The last set of files a compile actually loaded, seeded with the entry.
@@ -1369,7 +1420,44 @@ function runWatch(input, output, common, opts) {
   const loadPathDirs = (common.loadPaths || []).map((d) => resolve(d));
   const aliasesASource = () => {
     const dest = pathKey(output);
-    return dest === pathKey(input) || known.has(dest);
+    if (dest === pathKey(input) || known.has(dest)) return true;
+    // …and through any symlink, because two names for one file is the
+    // other way to reach it. `out.css -> main.scss` passes the comparison
+    // above and then overwrites the stylesheet with its own CSS.
+    //
+    // A second opinion rather than the rule: `realpathSync` answers only
+    // for a path that EXISTS, and an output that is not there yet cannot
+    // alias anything — which is also why the whole thing is skipped when
+    // the destination does not resolve, rather than paying a `realpath`
+    // per dependency on every compile for nothing.
+    //
+    // dart has a guard here too and it is racy: measured 2026-09-22, 29
+    // runs of `out.css -> main.scss` under `--watch`, dart declined 26
+    // times and destroyed the stylesheet 3. The binary took the
+    // deterministic side in #166 and this is the same rule.
+    const realDest = realOrNull(output);
+    // A destination that will not resolve is not this question's to
+    // answer. It is a symlink to something that is not there, and what
+    // it NAMES cannot always be recognised — when the watch starts with
+    // a dependency already missing, the first compile throws before it
+    // reports what it loaded, so `known` holds the entry and nothing
+    // else. `leadsNowhere` settles that case for every shape at once, by
+    // refusing to follow such a link at all on the path that would
+    // create the file.
+    //
+    // An earlier version compared the link's target against `known`
+    // here. It worked for one hop and one shape, missed the chain and
+    // the startup case, and is dead weight now: removing it changes no
+    // test, which is how it was found.
+    if (realDest === null) return false;
+    // `real !== null` is redundant while the check above stands, and it
+    // is here so that moving that check cannot quietly reintroduce the
+    // lie it settles. Neither can be made to fail from a test today.
+    const same = (f) => {
+      const real = realOrNull(f);
+      return real !== null && real === realDest;
+    };
+    return same(input) || [...known].some(same);
   };
   // One per absent load path, keyed so re-arming replaces rather than adds
   // — see `_probe.mjs` for what happened when it did not.
@@ -1660,6 +1748,7 @@ function runWatch(input, output, common, opts) {
       else {
         onDisk = produced;
         burstWrote = true;
+        everWrote = true;
         // A provisional run narrates nothing, exactly as the binary's
         // does: its whole stdout is dropped there. The catch-up 50ms
         // behind it says the line instead, which is what puts the
@@ -1677,8 +1766,33 @@ function runWatch(input, output, common, opts) {
       // mistake with a worse outcome — and it is only unreachable today
       // because an aliased watch never recompiles, which is one filter
       // change away from being false.
+      //
+      // …and not THROUGH a broken symlink either, which is a different
+      // question and one `aliasesASource` cannot always answer. When the
+      // watch starts with a dependency already missing, the first compile
+      // throws before it reports what it loaded, so `known` holds the
+      // entry and nothing else — and `out.css -> _v.scss` with `_v.scss`
+      // absent names a file this watch has never heard of. Measured: the
+      // error stylesheet went through the link and CREATED `_v.scss`,
+      // holding the error about `_v.scss`.
+      //
+      // The rule that settles it without guessing: this path may create
+      // the OUTPUT, which is what `reportFailure`'s `mkdirSync` is for
+      // and what dart does, but it may not follow a link that goes
+      // nowhere in order to create something else. The cost is a setup
+      // where the output is a symlink to a path that does not exist yet
+      // — there the first failing build writes no error stylesheet, and
+      // the error still reaches stderr. The success path still creates
+      // it, so the setup starts working the moment a build succeeds.
+      //
+      // It is `mayCreate` and not a skip of this whole branch, because
+      // the rest of it is unrelated and both halves mattered: under
+      // `--no-error-css` the removal still has to unlink the link, and
+      // `onDisk` still has to be forgotten or "fix the typo back to what
+      // it was" leaves the output missing forever (#159, measured again
+      // here).
       if (!aliasesASource() && e instanceof Exception) {
-        const writeError = reportFailure(output, opts, e.message);
+        const writeError = reportFailure(output, opts, e.message, everWrote || !isSymlink(output));
         if (writeError) process.stderr.write(`${writeError}\n`);
         // The destination is no longer the CSS we last wrote — it is the
         // error stylesheet, or gone. Forgetting that is how "fix the typo

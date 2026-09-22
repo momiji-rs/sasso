@@ -13,6 +13,69 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **`--watch` in the npm CLI overwrote a stylesheet reached through a
+  symlink** (#168). `out.css -> main.scss` and then
+  `sasso --watch main.scss out.css` replaced the stylesheet with its own
+  CSS. Both CLIs already decline the lexical form of this — `--watch
+  main.scss main.scss` writes nothing and says nothing — and a symlink is
+  the same situation spelled differently, which a path-string comparison
+  cannot see.
+
+  `aliasesASource` asks the filesystem as well now, exactly as the
+  binary's `aliases_a_source` does: `realpath` both sides, and only when
+  the destination exists, since a path that is not there cannot alias
+  anything.
+
+  Measured 2026-09-22, `out.css -> main.scss` under `--watch`:
+
+  ```
+    dart-sass 1.104.1   declines 26 runs in 29, DESTROYS the file in 3
+    sasso binary        declines                              (#166)
+    npm, before         DESTROYS every time
+    npm, after          declines
+  ```
+
+  A link that leads NOWHERE is the half that bites hardest, and it is a
+  different question. `out.css -> _v.scss` and then `rm _v.scss` made the
+  failure path write the error stylesheet THROUGH the link, recreating
+  the file it was complaining about — in three shapes: the deletion, a
+  chain (`out.css -> middle.scss -> _v.scss`), and a watch that starts
+  with the dependency already missing. The last cannot be answered by
+  comparing paths at all: the first compile throws before it reports what
+  it loaded, so there is nothing to compare against.
+
+  A fourth shape has nothing to do with dangling links at all: a
+  dependency that EXISTS and fails to load — invalid UTF-8, a parse error
+  — never reaches `known` either, because the compile throws before it
+  reports what it loaded, and the link to it resolves perfectly well. The
+  error's own span is no help: what reaches the write is `Undefined
+  variable` in the entry, not the read failure in the dependency.
+
+  One rule settles all four, and it is about the output rather than about
+  links: **the error stylesheet goes through a SYMLINKED output only once
+  this watch has written that output itself.** A link we have written
+  through is demonstrably an output, whatever it points at; one we have
+  not could be anything, and nothing available at that moment can tell.
+  A plain path is unaffected, so a failing first compile still writes its
+  error stylesheet into a `dist/css/` that never existed, as dart does.
+
+  The cost is one case: a symlinked output whose FIRST build fails gets
+  no error stylesheet. The error still reaches stderr, and everything
+  after the first successful build behaves exactly as before — including
+  a second failure in a row, since what the watch has written is a fact
+  about the run and not something a failure undoes.
+
+  The binary has the same defect and cannot take the same fix; #177
+  carries it with the measurement.
+
+  That dart row corrects this repo's own record. `tests/cli_dart_compat.rs`
+  said "dart Compiled x1, the source is DESTROYED" from a single run, and
+  concluded "nobody protects it". dart does protect it — with a guard that
+  loses about one time in ten. So the divergence is not that dart permits
+  this and we refuse: it is that dart decides it by a coin toss and we
+  decide it every time.
+
+
 - **`--watch` in the npm CLI printed every diagnostic twice per save**
   (#165). A burst is a provisional run plus an authoritative catch-up, and
   both reported. A provisional FAILURE was already silent, for the reason
