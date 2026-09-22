@@ -39,6 +39,7 @@
     "_probe.mjs",
     "_watchers.mjs",
     "_poller.mjs",
+    "_baseline.mjs",
     "_errorcss.mjs",
     "cli.mjs",
     "sasso.mjs",

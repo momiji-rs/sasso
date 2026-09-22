@@ -36,6 +36,7 @@ import { triggersRecompile } from "./_watchfilter.mjs";
 import { coalesce } from "./_coalesce.mjs";
 import { makeProbe } from "./_probe.mjs";
 import { makePoller } from "./_poller.mjs";
+import { baselineFor } from "./_baseline.mjs";
 import { makeWatchers } from "./_watchers.mjs";
 import { errorCss } from "./_errorcss.mjs";
 // The prebuilt-addon rules, shared with native.mjs: which engine this platform
@@ -1424,7 +1425,12 @@ function runWatch(input, output, common, opts) {
    * written or narrated. Losing a save costs the save.
    */
   const takeSnapshots = (before) => {
-    stamps = new Map([...known].map((f) => [f, before?.stamps.has(f) ? before.stamps.get(f) : mtime(f)]));
+    // A path `before` already knew keeps that reading; one the compile
+    // DISCOVERED has only a post-compile mtime, which `baselineFor`
+    // refuses to trust if it moved after the compile began.
+    stamps = new Map(
+      [...known].map((f) => [f, before?.stamps.has(f) ? before.stamps.get(f) : baselineFor(mtime(f), before?.startedAt)]),
+    );
     if (!before) {
       neighbours = surveyNeighbours(watchedDirs());
       return;
@@ -1442,12 +1448,22 @@ function runWatch(input, output, common, opts) {
     // are re-asked.
     neighbours = new Map(before.neighbours);
     const fresh = new Set([...watchedDirs()].filter((d) => !before.dirs.has(d)));
-    if (fresh.size) for (const [f, m] of surveyNeighbours(fresh)) neighbours.set(f, m);
+    // The same rule, because it is the same situation one level up: a
+    // directory that only came into scope during the compile is surveyed
+    // after it, so anything in there that moved meanwhile would otherwise
+    // become its own baseline.
+    if (fresh.size) {
+      for (const [f, m] of surveyNeighbours(fresh)) neighbours.set(f, baselineFor(m, before.startedAt));
+    }
   };
   /** What the sweep would have seen just before a compile started. */
   const snapshotBefore = () => {
     const dirs = watchedDirs();
-    return { stamps: new Map([...known].map((f) => [f, mtime(f)])), neighbours: surveyNeighbours(dirs), dirs };
+    // Read before anything else here: a file whose mtime is at or past it
+    // moved after this compile began, so what the compile read cannot be
+    // assumed to be what is on disk now.
+    const startedAt = Date.now();
+    return { startedAt, stamps: new Map([...known].map((f) => [f, mtime(f)])), neighbours: surveyNeighbours(dirs), dirs };
   };
   const mtime = (f) => {
     try {

@@ -4576,6 +4576,44 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
 // loaded CI machine stretching those gaps — the first version of the
 // burst test asserted `< 8` and did not notice coalescing being removed
 // entirely. With a fake clock there is no gap to stretch.
+// === What the sweep may treat as "what the compile read" (#164) ===
+//
+// The end-to-end case is a race — a save has to land between the
+// compile's read of a file and the snapshot taken after it — so it is
+// MEASURED rather than pinned here, the same call `_coalesce.mjs` makes
+// about its own property. A 900k-rule entry so the compile takes seconds,
+// `sub/_dep.scss` saved five seconds in, `--poll` so nothing but the
+// sweep can answer:
+//
+//   trusting the post-compile mtime    6 saves lost out of 6
+//   this rule                          0 lost out of 6
+//
+// What is pinned is the rule.
+{
+  const { baselineFor } = await import("./npm/_baseline.mjs");
+
+  // No compile in progress: there is nothing to distrust.
+  assert.equal(baselineFor(1000, undefined), 1000, "baseline: with no compile, the reading stands");
+  assert.equal(baselineFor(null, undefined), null, "baseline: …including for a file that is not there");
+
+  // Older than the compile: the compile read THIS, so it is the baseline.
+  assert.equal(baselineFor(999, 1000), 999, "baseline: a file older than the compile is trusted");
+  assert.equal(baselineFor(0, 1000), 0, "baseline: however much older");
+
+  // At or after it: the compile may have read the bytes before this save,
+  // so the reading cannot be the baseline — `null`, which the sweep reads
+  // as a difference and answers with one catch-up compile.
+  assert.equal(baselineFor(1000, 1000), null, "baseline: the same millisecond is not trusted");
+  assert.equal(baselineFor(1001, 1000), null, "baseline: a file that moved after the compile began is not trusted");
+
+  // A file that is gone is `null` either way, and that is not the same
+  // statement — but it lands on the same value, and the sweep treats a
+  // missing file as unchanged only while it stays missing.
+  assert.equal(baselineFor(null, 1000), null, "baseline: an absent file has no reading to trust");
+
+  console.log("ok: baseline — a reading taken after the compile began is not what the compile read");
+}
+
 // === The poll beside the watcher (#164) ===
 //
 // `fs.watch` is the fast path, and on macOS it cannot be trusted on its
