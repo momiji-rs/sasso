@@ -451,6 +451,12 @@ for (const [name, mod] of [["size", size], ["speed", speed]]) {
 
 // === Phase 3: CLI (bin) smoke test ===
 const cliPath = fileURLToPath(new URL("./npm/cli.mjs", import.meta.url));
+// dart-sass's `sysexits` codes, which the binary already follows and this
+// CLI now does too (#91). Named here because "exits non-zero" was what
+// twenty of these cases used to say, and the code is the point.
+const EXIT_USAGE = 64;
+const EXIT_COMPILE = 65;
+const EXIT_IO = 66;
 const cli = (args, input) =>
   execFileSync(process.execPath, [cliPath, ...args], { input, encoding: "utf8" });
 
@@ -1168,20 +1174,20 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     [cliPath, "--no-source-map", "-j", "1", "--stop-on-error", `${bad}:${join(dir, "s1.css")}`, `${join(dir, "src", "one.scss")}:${second}`],
     { encoding: "utf8" },
   );
-  assert.equal(stop.status, 1, "cli: --stop-on-error exits non-zero");
+  assert.equal(stop.status, EXIT_COMPILE, "cli: --stop-on-error exits 65 for a broken stylesheet");
   assert.ok(!existsSync(second), "cli: --stop-on-error -j 1 skips the rest");
   const stopParallel = spawnSync(
     process.execPath,
     [cliPath, "--no-source-map", "--stop-on-error", `${bad}:${join(dir, "s3.css")}`, `${join(dir, "src", "one.scss")}:${join(dir, "s4.css")}`],
     { encoding: "utf8" },
   );
-  assert.equal(stopParallel.status, 1, "cli: --stop-on-error exits non-zero in parallel too");
+  assert.equal(stopParallel.status, EXIT_COMPILE, "cli: --stop-on-error exits 65 in parallel too");
   const go = spawnSync(
     process.execPath,
     [cliPath, "--no-source-map", `${bad}:${join(dir, "s2.css")}`, `${join(dir, "src", "one.scss")}:${second}`],
     { encoding: "utf8" },
   );
-  assert.equal(go.status, 1, "cli: a failed job still exits non-zero without --stop-on-error");
+  assert.equal(go.status, EXIT_COMPILE, "cli: a failed job still exits 65 without --stop-on-error");
   assert.ok(existsSync(second), "cli: without --stop-on-error the rest still compiles");
   console.log("ok: cli — directory pairs, --no-css, --stop-on-error");
 }
@@ -1276,7 +1282,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   // Printing a map to stdout is an error unless it is embedded (dart's rules).
   for (const args of [["--source-map"], ["--embed-sources"], ["--source-map-urls=relative"], ["--source-map-urls=absolute"]]) {
     const r = spawnSync(process.execPath, [cliPath, ...args, join(dir, "in.scss")], { encoding: "utf8" });
-    assert.equal(r.status, 1, `cli: ${args[0]} to stdout is rejected`);
+    assert.equal(r.status, EXIT_USAGE, `cli: ${args[0]} to stdout is rejected`);
     assert.match(r.stderr, /stdout/, `cli: ${args[0]} to stdout explains why`);
   }
   console.log("ok: cli — source maps: relative sources, --source-map-urls, footers, stdout rules");
@@ -1296,7 +1302,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   cli(["--no-source-map", `--output=${join(dir, "eq.css")}`, src]);
   assert.ok(existsSync(join(dir, "eq.css")), "cli: --output=<file>");
   const bothForms = spawnSync(process.execPath, [cliPath, "-o", viaFlag, `${src}:${viaPos}`], { encoding: "utf8" });
-  assert.equal(bothForms.status, 1, "cli: --output with an in:out pair is rejected");
+  assert.equal(bothForms.status, EXIT_USAGE, "cli: --output with an in:out pair is rejected");
   // Repeating the flag is an assignment in the native parser, not an error:
   // the last one wins. (Naming the output twice in DIFFERENT ways — `-o` plus
   // a second positional — is what it rejects.)
@@ -1305,7 +1311,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   assert.ok(!existsSync(first), "cli: a repeated --output does not write the earlier one");
   assert.ok(existsSync(second), "cli: … it writes the last one");
   const twoWays = spawnSync(process.execPath, [cliPath, "-o", first, src, second], { encoding: "utf8" });
-  assert.equal(twoWays.status, 1, "cli: but --output plus a positional output is still rejected");
+  assert.equal(twoWays.status, EXIT_USAGE, "cli: but --output plus a positional output is still rejected");
 
   // A failed compile REPLACES the output with a stylesheet describing the
   // error, as dart does by default. This asserted the opposite until
@@ -1316,7 +1322,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   assert.ok(existsSync(stale), "cli: the first build wrote an output");
   writeFileSync(src, ".a{b:}\n");
   const failed = spawnSync(process.execPath, [cliPath, "--no-source-map", src, stale], { encoding: "utf8" });
-  assert.equal(failed.status, 1, "cli: the second build fails");
+  assert.equal(failed.status, EXIT_COMPILE, "cli: the second build fails");
   assert.match(
     readFileSync(stale, "utf8"),
     /^\/\* Error: /,
@@ -1440,7 +1446,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     });
   const rejects = (args, wanted) => {
     const r = run(args);
-    assert.equal(r.status, 1, `cli: ${args.join(" ")} is rejected`);
+    assert.equal(r.status, EXIT_USAGE, `cli: ${args.join(" ")} is rejected`);
     assert.ok(r.stderr.includes(wanted), `cli: ${args.join(" ")} says "${wanted}" (got: ${r.stderr.split("\n")[0]})`);
   };
 
@@ -1476,7 +1482,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   assert.equal(run([`empty:${join(dir, "e1")}`]).status, 0, "cli: an empty directory pair succeeds");
   assert.equal(run([`partials:${join(dir, "e2")}`]).status, 0, "cli: a directory of only partials succeeds");
   const noInput = run([]);
-  assert.equal(noInput.status, 1, "cli: no input at all is an error");
+  assert.equal(noInput.status, EXIT_USAGE, "cli: no input at all is an error");
   assert.match(noInput.stderr, /no input file/, "cli: and says so");
 
   // `-` is standard input, in both the positional and the pair form.
@@ -1503,12 +1509,12 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   rejects(["in.scss", "adir"], 'Directory "adir" may not be a positional arg.');
   rejects(["-o", "adir", "in.scss"], 'Directory "adir" may not be a positional arg.');
   const stdinDir = run(["--stdin", "adir"], ".a{b:1}\n");
-  assert.equal(stdinDir.status, 1, "cli: --stdin with a directory output is rejected");
+  assert.equal(stdinDir.status, EXIT_USAGE, "cli: --stdin with a directory output is rejected");
   assert.match(stdinDir.stderr, /may not be a positional arg\./, "cli: … with the native CLI's message");
   // A pair destination that is a directory only fails on the write, as it does
   // natively — but it fails as an ERROR, not as a raw stack trace.
   const pairDir = run(["in.scss:adir"]);
-  assert.equal(pairDir.status, 1, "cli: a directory as a pair destination exits non-zero");
+  assert.equal(pairDir.status, EXIT_IO, "cli: a directory as a pair destination exits 66");
   assert.match(pairDir.stderr, /^error: cannot write adir: /m, "cli: … reporting the write, not throwing");
   assert.ok(!/at \w+ \(node:/.test(pairDir.stderr), "cli: … with no Node stack trace");
   // --indented is documented for stdin, but dart applies it to FILE inputs too
@@ -1519,7 +1525,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   assert.equal(indented.status, 0, `cli: --indented parses a .scss file as Sass (stderr: ${indented.stderr})`);
   assert.match(indented.stdout, /b: 1/, "cli: … and compiles it");
   const notIndented = run(["indented.scss"]);
-  assert.equal(notIndented.status, 1, "cli: without --indented the extension decides, and this file is not SCSS");
+  assert.equal(notIndented.status, EXIT_COMPILE, "cli: without --indented the extension decides, and this file is not SCSS");
   // Short options with an ATTACHED value (`-Ilib`, `-j4`). dart's own parser
   // takes them — `sass -Ilib in.scss` compiles, measured against 1.104.1 on
   // 2026-09-17 — so this CLI takes them too, and is pinned here because the
@@ -1677,7 +1683,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   const badLoop = join(dir, "bad.scss");
   writeFileSync(badLoop, ".a{b:}\n");
   const failed = spawnSync(process.execPath, [cliPath, "--loop", "3", badLoop], { encoding: "utf8" });
-  assert.equal(failed.status, 1, "cli: --loop on a broken stylesheet exits non-zero");
+  assert.equal(failed.status, EXIT_COMPILE, "cli: --loop on a broken stylesheet exits 65");
   assert.match(failed.stderr, /^Error: /m, "cli: … with the compile error");
   assert.ok(!/compiles in/.test(failed.stderr), "cli: … and no throughput line");
   const quietLoop = spawnSync(process.execPath, [cliPath, "--loop", "2", "--no-css", src], { encoding: "utf8" });
@@ -1689,7 +1695,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     [["--source-map", src], "--loop does not generate source maps"],
   ]) {
     const r = spawnSync(process.execPath, [cliPath, "--loop", "2", ...args], { encoding: "utf8" });
-    assert.equal(r.status, 1, `cli: --loop ${args.join(" ")} is rejected`);
+    assert.equal(r.status, EXIT_USAGE, `cli: --loop ${args.join(" ")} is rejected`);
     assert.ok(r.stderr.includes(wanted), `cli: --loop ${args.join(" ")} says "${wanted}"`);
   }
   console.log("ok: cli — --loop: warm pass, silent timing, stdout only");
@@ -1767,7 +1773,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     SASSO_ENGINE: "native",
     SASSO_NATIVE_BINARY: join(dir, "no-such-addon.node"),
   });
-  assert.equal(demanded.status, 1, "cli: SASSO_ENGINE=native with an unloadable addon exits non-zero");
+  assert.equal(demanded.status, EXIT_USAGE, "cli: SASSO_ENGINE=native with an unloadable addon exits 64");
   assert.match(demanded.stderr, /SASSO_ENGINE=native/, "cli: … naming the engine that was demanded");
   const fellBack = join(dir, "fallback");
   check("the default engine falls back to wasm", fellBack, compileAll(fellBack, [], {
@@ -1820,7 +1826,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
 
     // And a DEMANDED engine still fails instead of reporting, even here.
     const demandedReport = engineOf({ SASSO_ENGINE: "native", SASSO_NATIVE_BINARY: blind });
-    assert.equal(demandedReport.status, 1, "cli: --engine does not paper over SASSO_ENGINE=native failing");
+    assert.equal(demandedReport.status, EXIT_USAGE, "cli: --engine does not paper over SASSO_ENGINE=native failing");
 
     // Surface two: a compile that fell back says so on stderr, ONCE — every
     // worker loads its own engine, and one warning per core would bury the
@@ -2744,7 +2750,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
 
     for (let attempt = 0; attempt < 3; attempt++) {
       const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 60000 });
-      assert.equal(r.status, 1, "cli: the batch with one bad job exits non-zero");
+      assert.equal(r.status, EXIT_COMPILE, "cli: the batch with one bad job exits 65");
       const seq = (r.stderr.match(/mark-\d|^Error: /gm) || []).map((m) => (m === "Error: " ? "E" : m));
       assert.deepEqual(
         seq,
@@ -2919,7 +2925,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     writeFileSync(join(tdir, "bad.scss"), `.bad{a:}\n`);
     args.push(`${join(tdir, "bad.scss")}:${join(tdir, "bad.css")}`);
     const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 120000 });
-    assert.equal(r.status, 1, "cli: the batch with one bad job exits 1");
+    assert.equal(r.status, EXIT_COMPILE, "cli: the batch with one bad job exits 65");
     const seen = (r.stderr.match(/WARNING: mark-\d+/g) || []).length;
     assert.equal(seen, 400, `cli: every warning survived the non-zero exit through a pipe (saw ${seen})`);
 
@@ -2932,7 +2938,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       timeout: 120000,
       maxBuffer: 64 * 1024 * 1024,
     });
-    assert.equal(one.status, 1, "cli: the huge broken stylesheet fails");
+    assert.equal(one.status, EXIT_COMPILE, "cli: the huge broken stylesheet fails");
     assert.ok(
       one.stderr.length > 200_000,
       `cli: a diagnostic larger than the pipe buffer is not cut short (got ${one.stderr.length} bytes)`,
@@ -2963,7 +2969,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
         timeout: 120000,
         maxBuffer: 64 * 1024 * 1024,
       });
-      assert.equal(d.status, 1, `cli: ${label} reports the evaluation error`);
+      assert.equal(d.status, EXIT_COMPILE, `cli: ${label} reports the evaluation error`);
       assert.match(d.stderr, /Undefined operation/, `cli: ${label} — the error reached stderr`);
       assert.ok(
         d.stderr.includes(`kept ${bigWarning}`),
@@ -3053,7 +3059,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   // A failure inside the pool is still reported and still exits non-zero.
   writeFileSync(join(dir, "src", "s7.scss"), ".s7{a:}\n");
   const broken = compileAll(join(dir, "broken"), ["-j", "4"], {});
-  assert.equal(broken.status, 1, "cli: a job that fails in a worker exits non-zero");
+  assert.equal(broken.status, EXIT_COMPILE, "cli: a job that fails in a worker exits 65");
   assert.match(broken.stderr, /Error: /, "cli: … and its diagnostic reaches stderr");
   console.log("ok: cli — engine selection (wasm/native agree) and the worker pool");
 }
@@ -3605,6 +3611,93 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   assert.ok(caught.message.startsWith("Error:"), "error: message is the rendered block");
   assert.ok(caught.sassMessage.length > 0 && !caught.sassMessage.includes("\n"), "error: sassMessage is a raw one-liner");
   console.log("ok: structured Exception (sassMessage + span)");
+}
+
+// === Exit codes say WHICH kind of failure (#91) ===
+//
+// dart-sass and the native CLI both use the `sysexits` codes, and they
+// agree with each other. This CLI exited 1 for everything, so a build
+// script that switches on the code to tell "your stylesheet is wrong"
+// from "I could not write where you told me" got neither from the
+// package advertised as a drop-in.
+//
+// Measured 2026-09-22 against dart-sass 1.104.1 and the binary:
+//
+//                            dart   binary   npm before   npm after
+//   compile error             65      65         1           65
+//   input does not exist      66      66         1           66
+//   output is a directory     66      66         1           66
+//   usage error               64      64         1           64
+//   a batch with both         66      66         1           66
+//
+// The mixed batch is the one worth pinning: 66 wins in EITHER
+// command-line order, so it is severity that decides and not recency.
+// That is the same rule `worse()` spells out in `src/main.rs`, and it is
+// why `worst` is a numeric maximum — 66 > 65 > 0 is the order already.
+{
+  const xdir = mkdtempSync(join(tmpdir(), "sasso-exitcodes-"));
+  writeFileSync(join(xdir, "good.scss"), ".a { color: red; }\n");
+  writeFileSync(join(xdir, "bad.scss"), ".bad { a: 1px + #fff; }\n");
+  mkdirSync(join(xdir, "adir"));
+
+  const run = (...args) =>
+    spawnSync(process.execPath, [cliPath, "--no-source-map", ...args], { cwd: xdir, encoding: "utf8" }).status;
+
+  assert.equal(run("good.scss:ok.css"), 0, "a compile that works exits 0");
+  assert.equal(run("bad.scss:o.css"), 65, "a compile error exits 65");
+  assert.equal(run("nosuch.scss:o.css"), 66, "an input that is not there exits 66");
+  assert.equal(run("good.scss:adir"), 66, "an output that cannot be written exits 66");
+  assert.equal(run("--frobnicate", "good.scss"), 64, "an unknown flag exits 64");
+  assert.equal(run(), 64, "no input at all exits 64");
+
+  // Both causes in one batch, both orders, in-thread and across workers.
+  for (const jobs of [["-j", "1"], ["-j", "4"]]) {
+    assert.equal(
+      run(...jobs, "bad.scss:m1.css", "good.scss:adir"),
+      66,
+      `a batch with both causes exits 66 (${jobs.join(" ")})`,
+    );
+    assert.equal(
+      run(...jobs, "good.scss:adir", "bad.scss:m2.css"),
+      66,
+      `…in either order (${jobs.join(" ")})`,
+    );
+    assert.equal(
+      run(...jobs, "good.scss:m3.css", "bad.scss:m4.css"),
+      65,
+      `a batch with only a compile error exits 65 (${jobs.join(" ")})`,
+    );
+  }
+
+  // A directory INPUT the filesystem will not list is 66 too. It is its
+  // own code path — the walk, not a compile — and without this the only
+  // thing that noticed the code changing there was an unrelated timing
+  // case, which is not a guard.
+  //
+  // Skipped for root, who can read it anyway, and on Windows, where
+  // `chmod` does not bite. Both would otherwise assert the opposite of
+  // what they measure.
+  if (process.platform !== "win32" && (process.getuid?.() ?? 0) !== 0) {
+    const locked = join(xdir, "locked");
+    mkdirSync(locked);
+    writeFileSync(join(locked, "a.scss"), ".a { color: red; }\n");
+    chmodSync(locked, 0o000);
+    try {
+      // The PAIR form, because two positionals with a directory are a
+      // usage error before any walk happens ("Directory … may not be a
+      // positional arg.", 64 on both front ends).
+      //
+      // dart exits 255 here — an uncaught crash, not a code — so this
+      // one pins the binary and this CLI agreeing with each other rather
+      // than agreeing with dart.
+      assert.equal(run(`${locked}:${join(xdir, "outdir")}`), EXIT_IO, "a directory that cannot be listed exits 66");
+    } finally {
+      chmodSync(locked, 0o755);
+    }
+  }
+
+  rmSync(xdir, { recursive: true, force: true });
+  console.log("ok: exit codes — 64 usage, 65 compile, 66 I/O, and I/O wins a mixed batch");
 }
 
 // === Bytes that are not UTF-8 are refused, on every engine (#179) ===

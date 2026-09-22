@@ -480,9 +480,36 @@ function packageVersion() {
   }
 }
 
-function fail(msg) {
+/**
+ * The `sysexits` codes dart-sass uses, which the native CLI already
+ * follows (`EXIT_USAGE`/`EXIT_COMPILE`/`EXIT_IO` in `src/main.rs`).
+ *
+ * Measured 2026-09-22 against dart-sass 1.104.1 and the binary, every
+ * failure shape, all three agreeing except this CLI:
+ *
+ *   compile error            dart 65   binary 65   npm 1
+ *   missing import           dart 65   binary 65   npm 1
+ *   input does not exist     dart 66   binary 66   npm 1
+ *   output is a directory    dart 66   binary 66   npm 1
+ *   usage error              dart 64   binary 64   npm 1
+ *   a batch with both        dart 66   binary 66   npm 1
+ *
+ * A build script that switches on the code to tell "your stylesheet is
+ * wrong" from "I could not write where you told me" got neither from the
+ * package advertised as a drop-in.
+ */
+const EXIT_USAGE = 64;
+const EXIT_COMPILE = 65;
+const EXIT_IO = 66;
+
+/**
+ * `code` defaults to a USAGE error because nearly every caller is one: a
+ * flag that does not exist, a combination dart refuses, a pair with two
+ * colons in it. The exceptions pass their own.
+ */
+function fail(msg, code = EXIT_USAGE) {
   writeStderrSync(String(msg).replace(/\n?$/, "\n"));
-  process.exit(1);
+  process.exit(code);
 }
 
 // One shared cell, only ever used to sleep a millisecond (see below).
@@ -1132,7 +1159,10 @@ function walkStylesheets(dir) {
     try {
       names = readdirSync(abs);
     } catch {
-      fail(`Error reading ${abs}: Cannot open file.`);
+      // Not a usage error: the command line named a real directory and
+      // the filesystem would not list it. dart and the binary both
+      // answer 66 for an input they cannot read.
+      fail(`Error reading ${abs}: Cannot open file.`, EXIT_IO);
     }
     // readdir order is unspecified; sort so that, of two names for the same
     // directory (symlinks), the same one is mirrored every run.
@@ -1949,13 +1979,15 @@ function runLoop(opts, common) {
     if (attempt.text) writeStderrSync(attempt.text);
     if (!attempt.error) return attempt.value.css;
     const e = attempt.error;
+    // The same split the batch path makes, and it already told these
+    // three apart for the MESSAGE — it just answered 1 for all of them.
     const msg =
       e instanceof Exception
         ? e.message
         : e && e.code === "ENOENT"
           ? `Error reading ${path}: Cannot open file.`
           : `error: ${e && e.message ? e.message : e}`;
-    fail(msg);
+    fail(msg, e instanceof Exception ? EXIT_COMPILE : EXIT_IO);
     return "";
   };
 
@@ -1988,8 +2020,8 @@ async function runWorker() {
   // so the batch reports in command-line order however the threads interleaved.
   const diagnostics = new Map();
   const compiled = new Map();
-  const failed = compileSlice(sharedList(shared), opts, common, ctl, stdinBytes, diagnostics, compiled);
-  parentPort.postMessage({ failed, diagnostics: [...diagnostics], compiled: [...compiled] });
+  const { failed, worst } = compileSlice(sharedList(shared), opts, common, ctl, stdinBytes, diagnostics, compiled);
+  parentPort.postMessage({ failed, worst, diagnostics: [...diagnostics], compiled: [...compiled] });
 }
 
 /** The compile options every job shares, rebuilt per thread (a logger cannot be cloned). */
@@ -2077,14 +2109,14 @@ async function main() {
       if (e instanceof Exception) {
         const writeError = reportFailure(output, opts, e.message);
         if (writeError) writeStderrSync(`${writeError}\n`);
-        fail(e.message);
+        fail(e.message, EXIT_COMPILE);
       }
       // Not a compile error — an unreadable file, say. dart leaves the
-      // previous output exactly as it was.
-      fail(`error: ${e && e.message ? e.message : e}`);
+      // previous output exactly as it was, and answers 66.
+      fail(`error: ${e && e.message ? e.message : e}`, EXIT_IO);
     }
     const writeError = emit(result, output, wantMap, opts, source);
-    if (writeError) fail(writeError);
+    if (writeError) fail(writeError, EXIT_IO);
     return;
   }
 
@@ -2115,13 +2147,17 @@ async function main() {
     return; // keep the process alive on the watchers
   }
 
-  const failed = await runJobs(jobs, opts, common);
+  const { failed, worst } = await runJobs(jobs, opts, common);
   // `process.exit` here would discard whatever of the diagnostics just flushed
   // has not reached the kernel yet — stderr on a PIPE is asynchronous, and a
   // 400-job batch lost 26 of its warnings that way (measured 2026-09-17).
   // Setting the code and returning lets Node finish the writes and exit on its
   // own; nothing else is keeping the loop alive by this point.
-  if (failed > 0) process.exitCode = 1;
+  // The cause, not just the fact — 65 for a stylesheet that is wrong, 66
+  // for something that could not be read or written, and the worse of the
+  // two when a batch has both. `worst` is 0 when nothing failed, so the
+  // assignment is safe either way; the `failed` check keeps it obvious.
+  if (failed > 0) process.exitCode = worst || EXIT_COMPILE;
 }
 
 /**
@@ -2257,10 +2293,10 @@ async function runJobs(jobs, opts, common) {
   const compiled = new Map();
 
   if (workers < 2 || collides) {
-    const failed = compileSlice(listOf(jobs), opts, common, null, stdinBytes, diagnostics, compiled);
+    const { failed, worst } = compileSlice(listOf(jobs), opts, common, null, stdinBytes, diagnostics, compiled);
     flushDiagnostics(diagnostics, jobs.length);
     flushCompiled(compiled, jobs.length);
-    return failed;
+    return { failed, worst };
   }
 
   // [0] the next job to take, [1] the stop-on-error flag.
@@ -2287,21 +2323,23 @@ async function runJobs(jobs, opts, common) {
         worker.on("error", reject);
         worker.on("exit", (code) =>
           code === 0
-            ? resolve({ failed: 0, diagnostics: [], compiled: [] })
-            : resolve({ failed: 1, diagnostics: [], compiled: [] }),
+            ? resolve({ failed: 0, worst: 0, diagnostics: [], compiled: [] })
+            : resolve({ failed: 1, worst: EXIT_IO, diagnostics: [], compiled: [] }),
         );
       });
     }),
   );
   let failed = 0;
+  let worst = 0;
   for (const result of results) {
     failed += result?.failed ?? 0;
+    worst = Math.max(worst, result?.worst ?? 0);
     for (const [i, text] of result?.diagnostics ?? []) diagnostics.set(i, text);
     for (const [i, line] of result?.compiled ?? []) compiled.set(i, line);
   }
   flushDiagnostics(diagnostics, jobs.length);
   flushCompiled(compiled, jobs.length);
-  return failed;
+  return { failed, worst };
 }
 
 /** Bytes in shared memory, so `workerData` carries a handle, not a copy. */
@@ -2440,8 +2478,15 @@ function captureStderr(fn) {
  * `jobs` is a `{ length, at(i) }` view — a plain array in this thread, shared
  * bytes in a worker. Diagnostics go into the `diagnostics` map under the job's
  * index, not to stderr, so the caller can put them back in job order.
- * Returns the number that failed; it never exits the process, so a worker can
- * report back and the parent can decide.
+ * Returns `{ failed, worst }` — how many failed, and the most severe cause
+ * as an exit code. It never exits the process, so a worker can report back
+ * and the parent can decide.
+ *
+ * `worst` is a plain numeric maximum, and that is not a coincidence: the
+ * severity order the binary spells out in `worse()` — I/O beats compile
+ * beats ok — is the order of 66, 65, 0. Measured against dart, a batch
+ * with one compile error and one unwritable output answers 66 in either
+ * command-line order, so it is severity and not recency that decides.
  */
 function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics, compiled) {
   const note = (i, text) => diagnostics.set(i, (diagnostics.get(i) ?? "") + text);
@@ -2467,6 +2512,7 @@ function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics, compiled
     return stdinText;
   };
   let failed = 0;
+  let worst = 0;
   let next = 0;
   for (;;) {
     let i;
@@ -2534,6 +2580,10 @@ function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics, compiled
       }
       note(i, String(msg).replace(/\n?$/, "\n"));
       failed++;
+      // A Sass `Exception` is the stylesheet being wrong; anything else
+      // reaching here is the entry not being readable, which is 66 —
+      // `Error reading …: Cannot open file.` on the binary.
+      worst = Math.max(worst, e instanceof Exception ? EXIT_COMPILE : EXIT_IO);
       // Only a COMPILE error touches the output; an unreadable entry
       // leaves the previous build in place, as dart does.
       if (e instanceof Exception) {
@@ -2580,13 +2630,14 @@ function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics, compiled
     if (writeError) {
       note(i, `${writeError}\n`);
       failed++;
+      worst = Math.max(worst, EXIT_IO);
       if (opts.stopOnError) {
         if (ctl) Atomics.store(ctl, 1, 1);
         break;
       }
     }
   }
-  return failed;
+  return { failed, worst };
 }
 
 // A worker thread runs the same file, telling itself apart by its workerData.
