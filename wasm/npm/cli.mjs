@@ -1060,32 +1060,25 @@ function realPath(path) {
 }
 
 /**
- * A key for a path whose FILE may be gone: the directory canonicalized,
- * the name left alone.
+ * Is this path a symlink whose chain ends at nothing?
  *
- * `realpath` cannot answer for a file that does not exist, and a purely
- * lexical key answers differently for two spellings of one directory — on
- * macOS `/var` is a symlink to `/private/var`, so a path built from the
- * command line and one the importer resolved disagree. The directory is
- * almost always still there, so canonicalize that and keep the name.
+ * Writing to it does not write to IT — it creates whatever the chain
+ * names, somewhere else entirely, and the chain may be any length. That
+ * is the whole reason this asks nothing about where the chain ends: a
+ * broken link is not a destination, however many hops it takes to find
+ * that out.
  */
-function keyByHolder(path) {
-  const holder = realOrNull(dirname(path));
-  return holder === null ? pathKey(path) : pathKey(join(holder, basename(path)));
+function leadsNowhere(path) {
+  return realOrNull(path) === null && isSymlink(path);
 }
 
-/**
- * Where a symlink POINTS, keyed by `keyByHolder`, without following it to
- * a file that may not be there. `null` when the path is not a symlink.
- *
- * One hop, because this is only consulted once `realpath` has failed,
- * which means the chain is broken and there is nothing left to follow.
- */
-function linkTarget(path) {
+/** Is this path a symlink, whatever it points at? */
+function isSymlink(path) {
   try {
-    return keyByHolder(resolve(dirname(path), readlinkSync(path)));
+    readlinkSync(path);
+    return true;
   } catch {
-    return null;
+    return false;
   }
 }
 
@@ -1433,26 +1426,20 @@ function runWatch(input, output, common, opts) {
     // times and destroyed the stylesheet 3. The binary took the
     // deterministic side in #166 and this is the same rule.
     const realDest = realOrNull(output);
-    // Nothing to resolve is not the same as nothing to protect. An
-    // output that is a symlink to a source which has just been DELETED
-    // resolves to nothing, and a write through it recreates the source
-    // as CSS — or, on the failure path, as the error stylesheet about
-    // the very file it just recreated. Measured: `out.css -> _v.scss`,
-    // delete `_v.scss`, and `_v.scss` comes back holding
-    // `/* Error: Can't find stylesheet to import. */`.
+    // A destination that will not resolve is not this question's to
+    // answer. It is a symlink to something that is not there, and what
+    // it NAMES cannot always be recognised — when the watch starts with
+    // a dependency already missing, the first compile throws before it
+    // reports what it loaded, so `known` holds the entry and nothing
+    // else. `leadsNowhere` settles that case for every shape at once, by
+    // refusing to follow such a link at all on the path that would
+    // create the file.
     //
-    // So when the destination will not resolve, ask what the link SAYS
-    // rather than where it lands. One hop and lexical, because there is
-    // nothing on disk left to follow; a chain with a dangling middle is
-    // beyond what can be answered and is left to the check above.
-    if (realDest === null) {
-      const named = linkTarget(output);
-      if (named === null) return false;
-      // Both sides through the same key, or the comparison answers on
-      // spelling: `known` holds what the importer resolved and `input`
-      // holds what was typed.
-      return named === keyByHolder(input) || [...known].some((f) => named === keyByHolder(f));
-    }
+    // An earlier version compared the link's target against `known`
+    // here. It worked for one hop and one shape, missed the chain and
+    // the startup case, and is dead weight now: removing it changes no
+    // test, which is how it was found.
+    if (realDest === null) return false;
     // `real !== null` is redundant while the check above stands, and it
     // is here so that moving that check cannot quietly reintroduce the
     // lie it settles. Neither can be made to fail from a test today.
@@ -1768,7 +1755,25 @@ function runWatch(input, output, common, opts) {
       // mistake with a worse outcome — and it is only unreachable today
       // because an aliased watch never recompiles, which is one filter
       // change away from being false.
-      if (!aliasesASource() && e instanceof Exception) {
+      //
+      // …and not through a BROKEN symlink either, which is a different
+      // question and one `aliasesASource` cannot always answer. When the
+      // watch starts with a dependency already missing, the first compile
+      // throws before it reports what it loaded, so `known` holds the
+      // entry and nothing else — and `out.css -> _v.scss` with `_v.scss`
+      // absent names a file this watch has never heard of. Measured: the
+      // error stylesheet went through the link and CREATED `_v.scss`,
+      // holding the error about `_v.scss`.
+      //
+      // The rule that settles it without guessing: this path may create
+      // the OUTPUT, which is what `reportFailure`'s `mkdirSync` is for
+      // and what dart does, but it may not follow a link that goes
+      // nowhere in order to create something else. The cost is a setup
+      // where the output is a symlink to a path that does not exist yet
+      // — there the first failing build writes no error stylesheet, and
+      // the error still reaches stderr. The success path still creates
+      // it, so the setup starts working the moment a build succeeds.
+      if (!aliasesASource() && !leadsNowhere(output) && e instanceof Exception) {
         const writeError = reportFailure(output, opts, e.message);
         if (writeError) process.stderr.write(`${writeError}\n`);
         // The destination is no longer the CSS we last wrote — it is the

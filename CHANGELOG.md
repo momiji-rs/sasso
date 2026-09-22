@@ -35,12 +35,24 @@ Conformance is tracked separately as a ratchet against the official
     npm, after          declines
   ```
 
-  A dangling link counts too, which is the half that bites hardest:
-  `out.css -> _v.scss` and then `rm _v.scss` made the failure path write
-  the error stylesheet THROUGH the link, recreating the file it was
-  complaining about. `realpath` answers nothing for a dangling link, so
-  the guard asks what the link says instead — `readlink`, keyed by its
-  holder directory, because the file is gone but the directory is not.
+  A link that leads NOWHERE is the half that bites hardest, and it is a
+  different question. `out.css -> _v.scss` and then `rm _v.scss` made the
+  failure path write the error stylesheet THROUGH the link, recreating
+  the file it was complaining about — in three shapes: the deletion, a
+  chain (`out.css -> middle.scss -> _v.scss`), and a watch that starts
+  with the dependency already missing. The last cannot be answered by
+  comparing paths at all: the first compile throws before it reports what
+  it loaded, so there is nothing to compare against.
+
+  One rule settles all three. A broken symlink is not a destination, so
+  the failure path will not follow one — it may create the OUTPUT, which
+  is what dart does and what the missing-`dist/css/` case needs, but it
+  will not follow a link that goes nowhere in order to create something
+  else. The cost is an output symlinked to a path that does not exist
+  yet: there the first FAILING build writes no error stylesheet, the
+  error still reaches stderr, and the first succeeding build creates the
+  target as before.
+
   The binary has the same defect and cannot take the same fix; #177
   carries it with the measurement.
 

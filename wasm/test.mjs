@@ -3950,6 +3950,154 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     }
   }
 
+  // The same, through a CHAIN, and with the dependency missing from the
+  // very first moment.
+  //
+  // `out.css -> middle.scss -> _v.scss` answers `middle.scss` after one
+  // `readlink`, which matches no source — and the write then follows the
+  // rest of the chain and recreates `_v.scss` anyway.
+  //
+  // The startup shape is not the same question: the first compile throws
+  // before it reports what it loaded, so `known` holds the entry alone
+  // and no amount of comparing can recognise `_v.scss`. What settles it
+  // is the failure path refusing to follow a link that goes nowhere.
+  for (const shape of ["chain", "startup"]) {
+    const wdir = mkdtempSync(join(tmpdir(), `sasso-watchdangle-${shape}-`));
+    writeFileSync(join(wdir, "main.scss"), `@use "v" as v;\n.a { color: v.$c; }\n`);
+    if (shape === "chain") {
+      writeFileSync(join(wdir, "_v.scss"), `$c: red;\n`);
+      symlinkSync(join(wdir, "_v.scss"), join(wdir, "middle.scss"));
+      symlinkSync(join(wdir, "middle.scss"), join(wdir, "out.css"));
+    } else {
+      symlinkSync(join(wdir, "_v.scss"), join(wdir, "out.css")); // dangling already
+    }
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
+    try {
+      assert.ok(
+        await until(() => log.includes("watching for changes"), 20000),
+        `${shape}: the watch never started: ${JSON.stringify(log)}`,
+      );
+      if (shape === "chain") rmSync(join(wdir, "_v.scss"));
+      assert.ok(
+        await until(() => /error/i.test(log), 20000),
+        `${shape}: the broken import was never reported: ${JSON.stringify(log)}`,
+      );
+      await new Promise((r) => setTimeout(r, 400));
+      assert.ok(!existsSync(join(wdir, "_v.scss")), `${shape}: the missing source was created through the link`);
+    } finally {
+      proc.kill();
+    }
+  }
+
+  // …and the two shapes the refusal must NOT break. A failing compile
+  // still writes its error stylesheet into a tree that was never there —
+  // dart does, and it is the one thing the browser would have had — and a
+  // SUCCEEDING compile still creates the target of a dangling link,
+  // because `out.css -> dist/out.css` before a first build is an ordinary
+  // way to arrange things.
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchtree-"));
+    writeFileSync(join(wdir, "main.scss"), ".a { color: ; }\n"); // broken
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "dist/css/out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const out = join(wdir, "dist", "css", "out.css");
+    try {
+      const deadline = Date.now() + 20000;
+      let wrote = false;
+      while (Date.now() < deadline && !wrote) {
+        try {
+          wrote = readFileSync(out, "utf8").startsWith("/* Error:");
+        } catch {
+          /* not yet */
+        }
+        if (!wrote) await new Promise((r) => setTimeout(r, 25));
+      }
+      assert.ok(wrote, `the error stylesheet was not written into a tree that did not exist: ${JSON.stringify(log)}`);
+    } finally {
+      proc.kill();
+    }
+  }
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchmake-"));
+    writeFileSync(join(wdir, "main.scss"), ".a { color: red; }\n");
+    mkdirSync(join(wdir, "dist"));
+    symlinkSync(join(wdir, "dist", "out.css"), join(wdir, "out.css")); // dangling
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: "ignore",
+    });
+    const target = join(wdir, "dist", "out.css");
+    try {
+      const deadline = Date.now() + 20000;
+      let made = false;
+      while (Date.now() < deadline && !made) {
+        try {
+          made = readFileSync(target, "utf8").includes("red");
+        } catch {
+          /* not yet */
+        }
+        if (!made) await new Promise((r) => setTimeout(r, 25));
+      }
+      assert.ok(made, "a successful compile did not create the target of a dangling output link");
+    } finally {
+      proc.kill();
+    }
+  }
+
+  // A WORKING symlink to somewhere that is not a source still gets its
+  // error stylesheet. The refusal is about links that lead nowhere, not
+  // about links — without this, "refuse every symlinked output" passes
+  // everything above while breaking an ordinary arrangement.
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchlivelink-"));
+    writeFileSync(join(wdir, "main.scss"), ".a { color: ; }\n"); // broken
+    mkdirSync(join(wdir, "dist"));
+    writeFileSync(join(wdir, "dist", "out.css"), "/* stale */\n"); // the target EXISTS
+    symlinkSync(join(wdir, "dist", "out.css"), join(wdir, "out.css"));
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const target = join(wdir, "dist", "out.css");
+    try {
+      const deadline = Date.now() + 20000;
+      let wrote = false;
+      while (Date.now() < deadline && !wrote) {
+        try {
+          wrote = readFileSync(target, "utf8").startsWith("/* Error:");
+        } catch {
+          /* not yet */
+        }
+        if (!wrote) await new Promise((r) => setTimeout(r, 25));
+      }
+      assert.ok(wrote, `a working symlinked output was refused its error stylesheet: ${JSON.stringify(log)}`);
+    } finally {
+      proc.kill();
+    }
+  }
+
   // …and the ordinary case is untouched by all of this: a real output,
   // reached through a symlinked DIRECTORY, is still written. Without
   // this the guard could be satisfied by refusing to write anything.
