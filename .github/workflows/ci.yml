@@ -81,7 +81,7 @@ jobs:
       # the command line is reported `src\entry.scss` (#151). Non-blocking and
       # printed in full, so a download hiccup does not fail the build and a
       # disagreement is visible without one.
-      - name: dart-sass frame-separator probe (informational)
+      - name: dart-sass probes (informational)
         continue-on-error: true
         shell: pwsh
         run: |
@@ -113,6 +113,28 @@ jobs:
               Write-Host "neither spelling of $f in the transcript -- read it above"
             }
           }
+          # --- does dart stamp the --update narration HERE? (#172) ----------
+          #
+          # sasso prints `[2026-09-21 21:35] Compiled …` on every platform
+          # with a readable tz database and, on Windows, `Compiled …` alone:
+          # `local_stamp` reads /etc/localtime or $TZ, and Windows has
+          # neither. The step below PINS that absence, and a pin is only
+          # honest if the thing it pins is a decision rather than a bug.
+          # Nobody had measured which. dart stamps on macOS and Linux
+          # (measured 2026-09-22); this answers the third platform.
+          Set-Content -Path probe/stamp.scss -Value 'a {b: c}'
+          Push-Location probe
+          $upd = & ../dart-sass-dist/dart-sass/sass.bat --no-source-map --update stamp.scss:stamp.css 2>&1 | Out-String
+          Pop-Location
+          Write-Host "--- dart --update, on this runner ---"
+          Write-Host $upd
+          if ($upd -match '^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]') {
+            Write-Host "dart STAMPS on Windows -- sasso's bare line is a divergence, not a decision; the pin below records a bug"
+          } elseif ($upd -match 'Compiled ') {
+            Write-Host "dart does NOT stamp on Windows -- sasso matches, and the pin below is a decision"
+          } else {
+            Write-Host "dart narrated nothing to match against -- read the transcript above"
+          }
       # `--no-fail-fast` because the first Windows run stopped at the library
       # unit tests and never reached a single integration suite, on a platform
       # where none of them had ever run. The ledger it reads names every test
@@ -130,8 +152,12 @@ jobs:
       # The one behaviour that differs by platform rather than merely needing
       # to work on it: with no tz database to read, the compile line keeps its
       # text and drops its timestamp. Asserting the ABSENCE is a pin — adding
-      # a Windows clock (#85, #86) must fail here rather than change output
-      # quietly.
+      # a Windows clock (#85, #86, both closed) must fail here rather than
+      # change output quietly.
+      #
+      # Whether it SHOULD keep dropping it is the probe's question above, and
+      # this pin stands until that answer is in: it records what sasso does,
+      # not that sasso is right. #172 tracks the decision.
       - name: --update narrates without a timestamp
         shell: pwsh
         run: |
