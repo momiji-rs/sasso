@@ -11,6 +11,42 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Fixed
+
+- **The drive-letter pair grammar was three different rules** (#172). A
+  `<source>:<destination>` operand is split at the first colon that is not a
+  drive letter's, and each front end decided that differently — the binary
+  only on Windows (`cfg!(windows)`, so a POSIX run took the false branch and
+  no test ran on Windows to take the other), the npm CLI on every platform but
+  only when a separator followed (`C:\`, not `C:`), and dart on every platform
+  with no separator required. Measured against dart-sass 1.104.1 on macOS:
+
+  ```
+    operand                 dart          binary before   npm CLI before
+    C:\in.scss              one path      pair C+\in…     one path
+    C:in.scss               one path      pair C+in…      pair C+in…
+    C:\in.scss:C:\out.css   pair          one-":" error   pair
+    in.scss:C:\out.css      pair          one-":" error   pair
+    a:b                     one path      pair a+b        pair a+b
+    a:b:c                   pair a:b+c    one-":" error   one-":" error
+  ```
+
+  All three agree now, on exit code, on what is written, and on the message.
+  Two consequences worth stating: `sasso C:\in.scss` compiles that file
+  instead of failing to read a file called `C`, and a POSIX directory named
+  with a single letter can no longer be the source of a pair — `a:b` is one
+  path, as it already was on Windows and as dart has it everywhere.
+
+  The `may only contain one ":"` message quoted the operand with `{:?}`, which
+  escapes a backslash, so the message for the operand this rule exists for came
+  out naming `C:\\in.scss…` — two backslashes where the user typed one. It
+  prints what the user typed now, as dart and the npm CLI already did.
+
+  The grammar had no test anywhere before this: no `C:\` literal existed under
+  `tests/`, and the binary's rule was `cfg!`-gated, so a POSIX run could not
+  reach it and the Windows job had nothing to run. It is platform-independent
+  now, so the cases run everywhere.
+
 ### Changed
 
 - **One `file:` URL decoder instead of two** (#163). `src/pathstyle.rs`

@@ -888,15 +888,45 @@ fn push_operand(cli: &mut Cli, arg: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Is `s`'s colon at index 1 a Windows drive letter's, rather than the
+/// separator of a `source:destination` pair?
+///
+/// Asked on EVERY platform, because dart asks it on every platform. Measured
+/// against dart-sass 1.104.1 on macOS, where sasso gated the same rule behind
+/// `cfg!(windows)` and so answered differently for the whole family (#172):
+///
+/// ```text
+///   operand                  dart 1.104.1              sasso before
+///   C:\in.scss               compiles to stdout        Error reading C:
+///   C:\in.scss:C:\out.css    writes C:\out.css         may only contain one ":"
+///   in.scss:C:\out.css       writes C:\out.css         may only contain one ":"
+///   c:\in.scss:c:\out.css    writes c:\out.css         may only contain one ":"
+///   a:b                      Error reading a:b         compiled a/ into b/
+///   a:b:c                    Error reading a:b         may only contain one ":"
+/// ```
+///
+/// The cost of parity is the `a:b` row: a POSIX directory named with one
+/// letter can no longer be the source of a pair, because `a:` is read as a
+/// drive. dart pays that cost too, and sasso already paid it on Windows — the
+/// gate made one platform disagree with both.
+///
+/// A digit is not a drive letter: `1:\in.scss:out.css` splits at index 1 and
+/// is the "one `:`" error in both.
+fn is_drive_colon(s: &str, idx: usize) -> bool {
+    idx == 1
+        && s.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && s.as_bytes().get(1) == Some(&b':')
+}
+
 /// Split a dart-style `source:destination` argument at its separating colon,
-/// or return `Ok(None)` for a plain path. On Windows the colon of a leading
-/// drive letter (`C:\in.scss`) is part of the path, not a separator.
+/// or return `Ok(None)` for a plain path. The colon of a leading drive letter
+/// (`C:\in.scss`) is part of the path, not a separator — see
+/// [`is_drive_colon`].
 fn split_pair(arg: &str) -> Result<Option<(PathBuf, PathBuf)>, String> {
     let mut from = 0;
     while let Some(off) = arg[from..].find(':') {
         let idx = from + off;
-        let is_drive_colon = cfg!(windows) && idx == 1 && arg.as_bytes()[0].is_ascii_alphabetic();
-        if is_drive_colon {
+        if is_drive_colon(arg, idx) {
             from = idx + 1;
             continue;
         }
@@ -906,21 +936,104 @@ fn split_pair(arg: &str) -> Result<Option<(PathBuf, PathBuf)>, String> {
         }
         // dart: exactly one separator; the destination may only carry a drive
         // colon of its own (`C:\out.css`).
-        let dest_drive_colon = cfg!(windows)
-            && dest.len() > 1
-            && dest.as_bytes()[1] == b':'
-            && dest.as_bytes()[0].is_ascii_alphabetic();
-        let extra = if dest_drive_colon {
+        let extra = if is_drive_colon(dest, 1) {
             dest[2..].contains(':')
         } else {
             dest.contains(':')
         };
         if extra {
-            return Err(format!("{arg:?} may only contain one \":\"."));
+            // `{arg}` in quotes, not `{arg:?}`: Debug escapes a backslash,
+            // so the message for the operand this rule EXISTS for came out
+            // as `"C:\\in.scss:out.css:x"`. dart and `cli.mjs` both print
+            // the operand as the user typed it.
+            return Err(format!("\"{arg}\" may only contain one \":\"."));
         }
         return Ok(Some((PathBuf::from(src), PathBuf::from(dest))));
     }
     Ok(None)
+}
+
+/// The drive-letter pair grammar, which had no case anywhere before #172 —
+/// no `C:\` literal existed under `tests/`, and the rule was `cfg!`-gated, so
+/// a POSIX run took the false branch and a Windows run had nothing to take.
+/// Every expectation here is measured against dart-sass 1.104.1; the table in
+/// [`is_drive_colon`] is the measurement.
+#[cfg(test)]
+mod split_pair_tests {
+    use super::split_pair;
+    use std::path::PathBuf;
+
+    /// What `split_pair` said, in a shape a table can assert.
+    fn split(arg: &str) -> Result<Option<(String, String)>, String> {
+        split_pair(arg)
+            .map(|o| o.map(|(a, b)| (a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned())))
+    }
+
+    fn pair(a: &str, b: &str) -> Result<Option<(String, String)>, String> {
+        Ok(Some((a.to_string(), b.to_string())))
+    }
+
+    #[test]
+    fn a_drive_colon_is_part_of_the_path_on_every_platform() {
+        // One pair, two drive colons.
+        assert_eq!(
+            split(r"C:\in.scss:C:\out.css"),
+            pair(r"C:\in.scss", r"C:\out.css")
+        );
+        // One path, NOT a pair — the whole point of the rule.
+        assert_eq!(split(r"C:\in.scss"), Ok(None));
+        // The destination carries the only drive.
+        assert_eq!(split(r"in.scss:C:\out.css"), pair("in.scss", r"C:\out.css"));
+        // A lowercase drive is a drive.
+        assert_eq!(
+            split(r"c:\in.scss:c:\out.css"),
+            pair(r"c:\in.scss", r"c:\out.css")
+        );
+        // A separator after the colon is not required: `C:in.scss` is
+        // drive-relative, and dart reads it as one path too.
+        assert_eq!(split("C:in.scss"), Ok(None));
+    }
+
+    #[test]
+    fn a_second_separator_is_still_an_error() {
+        let err = |a: &str| Err(format!("\"{a}\" may only contain one \":\"."));
+        assert_eq!(split(r"C:\in.scss:out.css:x"), err(r"C:\in.scss:out.css:x"));
+        assert_eq!(split("in.scss:out.css:x"), err("in.scss:out.css:x"));
+        // A digit is not a drive letter, so this splits at index 1 and the
+        // destination `\in.scss:out.css` carries the extra colon.
+        assert_eq!(split(r"1:\in.scss:out.css"), err(r"1:\in.scss:out.css"));
+    }
+
+    #[test]
+    fn a_one_letter_source_is_a_drive_not_a_pair() {
+        // The cost of parity, pinned so it cannot regress silently: `a:b` was
+        // a working POSIX pair before #172 and is one path now, because `a:`
+        // is a drive. dart-sass 1.104.1 answers `Error reading a:b`.
+        assert_eq!(split("a:b"), Ok(None));
+        // Two letters is not a drive, so this stays a pair.
+        assert_eq!(split("ab:b"), pair("ab", "b"));
+        // Past the skipped drive colon, the NEXT colon separates: dart
+        // answers `Error reading a:b`, naming `a:b` as the source.
+        assert_eq!(split("a:b:c"), pair("a:b", "c"));
+    }
+
+    #[test]
+    fn an_ordinary_pair_is_untouched() {
+        assert_eq!(split("in.scss:out.css"), pair("in.scss", "out.css"));
+        assert_eq!(split("src:css"), pair("src", "css"));
+        assert_eq!(split("in.scss"), Ok(None));
+        assert_eq!(
+            split("/abs/in.scss:/abs/out.css"),
+            pair("/abs/in.scss", "/abs/out.css")
+        );
+    }
+
+    /// `PathBuf` round-trips the spellings above without normalising them —
+    /// the backslashes are data on POSIX, and this asserts the assertions.
+    #[test]
+    fn the_table_above_is_comparing_what_it_thinks() {
+        assert_eq!(PathBuf::from(r"C:\out.css").to_string_lossy(), r"C:\out.css");
+    }
 }
 
 /// Report a usage error the way `parse_args` failures are reported.
