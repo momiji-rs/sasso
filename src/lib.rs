@@ -76,6 +76,27 @@ pub use importer::{
 };
 pub use sourcemap::SourceMap;
 
+/// The local filesystem path a `file:` URL names, or `None` when it names
+/// no local file.
+///
+/// Handles what every caller of such a thing has to: the `file://` prefix,
+/// the empty authority and `localhost` (both mean this machine), percent
+/// escapes, a Windows drive letter arriving as `/C:/`, and a UNC authority
+/// that only Windows can spell.
+///
+/// STRICT about UTF-8 — `None` rather than replacement characters — because
+/// a caller of this is about to open the path, and a name with U+FFFD
+/// substituted into it is a different name. The lossy reading belongs to
+/// whoever is about to PRINT the path, and lives beside it in `pathstyle`.
+///
+/// This exists because `napi/` had its own copy of the same rule and the
+/// two had already drifted (#161, #163): its copy accepted a `localhost`
+/// authority that this one declined, so a `file://localhost/…` entry was
+/// read happily and then printed as a URL in the frame.
+pub fn file_url_to_path(url: &str) -> Option<String> {
+    String::from_utf8(pathstyle::file_url_bytes(pathstyle::HOST, url)?).ok()
+}
+
 /// Output formatting style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputStyle {
@@ -689,4 +710,61 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
     let mut out = Vec::new();
     ev.eval_sheet(&sheet, &mut out)?;
     Ok(emit::emit(&out, options.style, options.charset))
+}
+
+/// The two readings of one `file:` URL decoder, and why they differ.
+///
+/// `pathstyle::file_url_path` produces a name to SHOW; `file_url_to_path`
+/// produces a path to OPEN. Everything else about them — the `file://`
+/// prefix, the empty and `localhost` authorities, percent escapes, a
+/// Windows drive letter, a UNC authority — is one function since #163,
+/// after two copies of it had drifted apart twice.
+///
+/// Here rather than in `pathstyle.rs` because that file is also compiled
+/// into the BINARY (see `main.rs`), where `crate::` is the bin root and
+/// has no `file_url_to_path`.
+#[cfg(test)]
+mod file_url_tests {
+    use crate::pathstyle::{file_url_path, Style, HOST};
+
+    #[test]
+    fn an_undecodable_byte_is_shown_and_not_opened() {
+        // Shown with the replacement character: a frame naming the file is
+        // still better than no frame.
+        //
+        // Both styles spelled out rather than `HOST`, which is the whole
+        // point of `Style` being a value: an assertion written against the
+        // host passes here and fails on the Windows job, where the same
+        // URL comes back `\a\u{fffd}b.scss`.
+        assert_eq!(
+            file_url_path(Style::Posix, "file:///a%FFb.scss").as_deref(),
+            Some("/a\u{fffd}b.scss")
+        );
+        assert_eq!(
+            file_url_path(Style::Windows, "file:///a%FFb.scss").as_deref(),
+            Some("\\a\u{fffd}b.scss")
+        );
+        // …and refused for opening, because a name with U+FFFD substituted
+        // into it is a different name. Host-independent: the strict reading
+        // fails at the UTF-8 step, before any separator is chosen.
+        assert_eq!(super::file_url_to_path("file:///a%FFb.scss"), None);
+    }
+
+    #[test]
+    fn and_they_agree_about_everything_decodable() {
+        for url in [
+            "file:///a/b.scss",
+            "file://localhost/a/b.scss",
+            "file:///my%20docs/a.scss",
+            "data:;base64,YQ==",
+            "file://",
+            "/a/b.scss",
+        ] {
+            assert_eq!(
+                file_url_path(HOST, url),
+                super::file_url_to_path(url),
+                "the two readings disagreed about {url}",
+            );
+        }
+    }
 }

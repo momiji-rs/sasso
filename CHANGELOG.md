@@ -13,6 +13,48 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Changed
 
+- **One `file:` URL decoder instead of two** (#163). `src/pathstyle.rs`
+  and `napi/src/lib.rs` each had their own, and the two had already
+  drifted twice:
+
+  ```
+    file://localhost/a   napi accepted it, pathstyle declined   (fixed #161)
+    file:///a%FFb        pathstyle decoded lossily, napi refused
+  ```
+
+  The first was a bug in one copy. The second is not — they want
+  different answers, because one produces a path to SHOW and the other
+  one to OPEN. So the structure is shared (`pathstyle::file_url_bytes`:
+  the `file://` prefix, the empty and `localhost` authorities, percent
+  escapes, a Windows drive letter arriving as `/C:/`, a UNC authority,
+  which separator comes out) and the UTF-8 policy is stated at each edge
+  rather than copied along with the rest.
+
+  `sasso::file_url_to_path` is the new public half, strict because its
+  caller is about to open the path. napi's copy is one line now.
+
+  One layer up, three more places decided "is this canonical an absolute
+  path" with a leading-`/` test or a hand-written list of spellings, and
+  a UNC canonical matched none of them — it has no leading `/` and no
+  colon:
+
+  ```
+    canonical                win32.isAbsolute  old JS  old Rust
+    \\server\share\a.scss    true              false   false
+    \\?\C:\w\a.scss          true              false   true
+    C:\w\a.scss              true              true    true
+    /w/a.scss                true              true    true
+  ```
+
+  A file reached through a share crossed the bridge as "no containing
+  url", so every relative `@use` beside it fell through to the load
+  paths instead of resolving next to its importer. All three ask the
+  platform now — `Path::is_absolute` in Rust, `node:path`'s `isAbsolute`
+  in JS — which is the question the core itself asked when it BUILT the
+  canonical, so the answers cannot drift apart again. Windows-only, and
+  there is no Windows prebuild of the addon yet (#172), so this is
+  correctness ahead of reach rather than a fix anyone was hitting.
+
 - **CI checks the MSRV** (#169). `Cargo.toml` promises `rust-version =
   "1.74"` and no job built against it; two APIs above it reached review
   in #166 before anyone noticed.

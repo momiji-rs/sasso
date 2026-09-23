@@ -231,6 +231,29 @@ pub(crate) fn pretty(style: Style, abs: &str, cwd: &str) -> String {
 /// decoded, because a directory called `my docs` arrives as `my%20docs` and a
 /// frame that said so would name a file nobody has.
 pub(crate) fn file_url_path(style: Style, url: &str) -> Option<String> {
+    // LOSSY, because this one produces a path to SHOW: a frame naming a
+    // file with an undecodable byte in it is still better than no frame.
+    // Whoever is about to OPEN the path wants the strict half instead —
+    // `crate::file_url_to_path`.
+    Some(String::from_utf8_lossy(&file_url_bytes(style, url)?).into_owned())
+}
+
+/// The bytes a `file:` URL names: percent-decoding done, and nothing about
+/// UTF-8 decided.
+///
+/// This is the half that kept drifting. `napi/src/lib.rs` had its own copy
+/// of it, and the two had already disagreed twice:
+///
+///   file://localhost/a   napi accepted it, this one declined   (fixed #161)
+///   file:///a%FFb        this one decoded lossily, napi refused
+///
+/// The first was a bug in one copy. The second is not — they want
+/// different answers, because one produces a path to SHOW and the other
+/// one to READ. So the structure lives here once (the `file://` prefix,
+/// the empty and `localhost` authorities, a drive letter arriving as
+/// `/C:/`, a UNC authority, which separator comes out) and the UTF-8
+/// policy is stated at each edge instead of copied with the rest.
+pub(crate) fn file_url_bytes(style: Style, url: &str) -> Option<Vec<u8>> {
     let rest = url.strip_prefix("file://")?;
     // The `localhost` authority means the local machine, exactly as the empty
     // one does. Keep the slash that introduces the path.
@@ -238,14 +261,32 @@ pub(crate) fn file_url_path(style: Style, url: &str) -> Option<String> {
         .strip_prefix("localhost/")
         .map_or(rest, |p| &rest[rest.len() - p.len() - 1..]);
     // `file:///a` (empty authority, the usual spelling) vs `file://host/share`.
-    let path = if let Some(local) = rest.strip_prefix('/') {
-        let decoded = percent_decode(local);
+    let sep = |mut b: Vec<u8>| {
+        if style == Style::Windows {
+            for c in &mut b {
+                if *c == b'/' {
+                    *c = b'\\';
+                }
+            }
+        }
+        b
+    };
+    let bytes = if let Some(local) = rest.strip_prefix('/') {
+        let decoded = percent_decode_bytes(local);
         match style {
             // A drive letter arrives as `/C:/a`, and the leading slash is the
             // URL's, not the path's.
-            Style::Windows if is_drive_start(&decoded) => decoded.replace('/', "\\"),
-            Style::Windows => format!("\\{}", decoded.replace('/', "\\")),
-            Style::Posix => format!("/{decoded}"),
+            Style::Windows if is_drive_start_bytes(&decoded) => sep(decoded),
+            Style::Windows => {
+                let mut out = vec![b'\\'];
+                out.extend(sep(decoded));
+                out
+            }
+            Style::Posix => {
+                let mut out = vec![b'/'];
+                out.extend(decoded);
+                out
+            }
         }
     } else if rest.is_empty() {
         return None;
@@ -254,9 +295,11 @@ pub(crate) fn file_url_path(style: Style, url: &str) -> Option<String> {
         if style == Style::Posix {
             return None;
         }
-        format!("\\\\{}", percent_decode(rest).replace('/', "\\"))
+        let mut out = vec![b'\\', b'\\'];
+        out.extend(sep(percent_decode_bytes(rest)));
+        out
     };
-    Some(path)
+    Some(bytes)
 }
 
 /// Whether `name` begins with a URL scheme.
@@ -276,6 +319,10 @@ fn has_scheme(name: &str) -> bool {
 }
 
 /// Whether `p` starts with a drive letter (`C:` or `C:/`).
+fn is_drive_start_bytes(p: &[u8]) -> bool {
+    matches!(p, [c, b':', ..] if c.is_ascii_alphabetic()) || matches!(p, [c, b':'] if c.is_ascii_alphabetic())
+}
+
 fn is_drive_start(p: &str) -> bool {
     let b = p.as_bytes();
     b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
@@ -285,8 +332,13 @@ fn is_drive_start(p: &str) -> bool {
 /// followed by two hex digits is a literal `%`, which is what browsers and
 /// dart's `Uri.toFilePath` both do.
 fn percent_decode(s: &str) -> String {
+    String::from_utf8_lossy(&percent_decode_bytes(s)).into_owned()
+}
+
+/// [`percent_decode`] without deciding what the bytes mean.
+fn percent_decode_bytes(s: &str) -> Vec<u8> {
     if !s.contains('%') {
-        return s.to_string();
+        return s.as_bytes().to_vec();
     }
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
@@ -308,7 +360,7 @@ fn percent_decode(s: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
 /// How a stack frame names a file, given whatever the compiler was handed:
@@ -684,6 +736,48 @@ mod tests {
         // Not a file URL at all.
         assert_eq!(file_url_path(Style::Posix, "data:;base64,YQ=="), None);
         assert_eq!(file_url_path(Style::Posix, "/a/b.scss"), None);
+        // `localhost` is this machine, exactly as the empty authority is.
+        // The napi copy of this decoder accepted it while this one did not,
+        // which is how an entry spelled that way was read happily and then
+        // printed as a URL in the frame (#161, #163).
+        assert_eq!(
+            file_url_path(Style::Posix, "file://localhost/a/b.scss").as_deref(),
+            Some("/a/b.scss")
+        );
+        assert_eq!(
+            file_url_path(Style::Windows, "file://localhost/C:/a.scss").as_deref(),
+            Some(r"C:\a.scss")
+        );
+        // Nothing after the authority is not a path.
+        assert_eq!(file_url_path(Style::Posix, "file://"), None);
+    }
+
+    /// What this decoder hands back is ROOTED, in either style.
+    ///
+    /// The napi bridge asks "is this usable as a filesystem base" and used
+    /// to answer by looking for a leading `/` — which reads `C:\a` and
+    /// `\\server\share` as relative, so on Windows a `file:///C:/…`
+    /// containing URL resolved nothing and every relative `@use` fell
+    /// through to the load paths. It asks the host now (#163).
+    ///
+    /// The host check itself cannot be exercised off its host. This can:
+    /// it pins the half that decides the answer, which is that the decoder
+    /// produces something each style calls rooted.
+    #[test]
+    fn what_it_decodes_is_rooted_in_its_own_style() {
+        for (style, url) in [
+            (Style::Posix, "file:///a/b.scss"),
+            (Style::Posix, "file://localhost/a/b.scss"),
+            (Style::Windows, "file:///C:/a/b.scss"),
+            (Style::Windows, "file://localhost/C:/a.scss"),
+            (Style::Windows, "file://server/share/a.scss"),
+        ] {
+            let p = file_url_path(style, url).expect("decodes");
+            assert!(
+                style.root_len(&p) > 0,
+                "{url:?} decoded to {p:?}, which {style:?} does not call rooted",
+            );
+        }
     }
 
     /// A directory with a space arrives percent-encoded. A frame naming

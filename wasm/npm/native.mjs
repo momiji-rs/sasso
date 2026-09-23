@@ -20,7 +20,7 @@
 
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
+import { resolve as resolvePath, isAbsolute } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import {
   isThenable,
@@ -117,7 +117,12 @@ function errMessage(e) {
   return e && e.message ? String(e.message) : String(e);
 }
 
-/** A Windows drive-letter path would false-positive a naive scheme test. */
+/**
+ * A Windows drive-letter path would false-positive a naive scheme test.
+ *
+ * Style-INDEPENDENT on purpose, unlike `isAbsolute` below: this one guards a
+ * URL parse, and `new URL("C:\\x")` builds a `c:` URL on every platform.
+ */
 function hasScheme(s) {
   return /^[a-z][a-z0-9+.-]*:/i.test(s) && !/^[A-Za-z]:[\\/]/.test(s);
 }
@@ -131,11 +136,19 @@ function toUrl(s) {
  * Containing canonical → href for user importers. Only real containers count:
  * an absolute path (→ file: URL) or a URL with a scheme; anything else (the
  * engine's synthetic entry names) means "no containing url", like wasm.
+ *
+ * "Absolute" is `node:path`'s — the platform's rule, asked of the platform.
+ * Every value reaching here was produced by the addon, whose Rust asked
+ * `Path::is_absolute` to build it, so the two agree by construction; a
+ * hand-written list of spellings would be a third copy of the rule, and the
+ * one it kept leaving out was `\\server\share`, which has neither a leading
+ * `/` nor a colon. A UNC-reached file crossed as "no containing url" and
+ * every relative `@use` beside it fell through to the load paths.
  */
 function containingHref(s) {
   if (s == null || s === "") return null;
   if (hasScheme(s)) return s;
-  if (s.startsWith("/") || /^[A-Za-z]:[\\/]/.test(s)) return pathToFileURL(s).href;
+  if (isAbsolute(s)) return pathToFileURL(s).href;
   return null;
 }
 
@@ -395,7 +408,7 @@ function makeResult(nat, origHref) {
     // would carry a file: URL there, so normalize just those.
     if (Array.isArray(map.sources)) {
       map.sources = map.sources.map((s) =>
-        typeof s === "string" && (s.startsWith("/") || /^[A-Za-z]:[\\/]/.test(s)) ? pathToFileURL(s).href : s,
+        typeof s === "string" && isAbsolute(s) ? pathToFileURL(s).href : s,
       );
     }
     result.sourceMap = map;

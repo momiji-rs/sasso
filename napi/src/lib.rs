@@ -287,10 +287,17 @@ impl<'a> NapiChain<'a> {
         // with a scheme. The evaluator's synthetic entry names ("stdin", or a
         // schemaless `url` option) must surface as `containingUrl: undefined`,
         // exactly like the wasm chain.
+        //
+        // "Absolute" through `is_absolute_path`, the same rule the other
+        // site here uses, rather than a second leading-`/` test: `\\server\share`
+        // has no leading `/` and no colon, so BOTH halves of the old line
+        // missed it and a file reached through a UNC share crossed as "no
+        // containing url" — every relative `@use` beside it then fell
+        // through to the load paths.
         let containing = ctx
             .containing_url
             .map(|c| c.as_str())
-            .filter(|s| s.starts_with('/') || s.contains(':'))
+            .filter(|s| is_absolute_path(s) || s.contains(':'))
             .map(String::from);
         let reply = match &self.user {
             UserBridge::Tsfn(tsfn) => ask(
@@ -358,43 +365,43 @@ impl<'a> NapiChain<'a> {
     }
 }
 
-/// Decode a `file:` URL into a filesystem path (empty/`localhost` authority
-/// only; percent-escapes decoded as UTF-8). `None` when it isn't one.
+/// The local filesystem path a `file:` URL names.
+///
+/// One line, because the rule lives in the `sasso` crate now. This file had
+/// its own copy of it and the two had already drifted twice (#163): this
+/// one accepted a `localhost` authority the other declined, and the two
+/// disagreed about undecodable bytes. The second disagreement was the
+/// right one and is preserved — `sasso::file_url_to_path` is the STRICT
+/// reading, which is what a path about to be opened wants.
 fn file_url_to_path(s: &str) -> Option<String> {
-    let rest = s.strip_prefix("file://")?;
-    let path = if let Some(p) = rest.strip_prefix("localhost/") {
-        &rest[rest.len() - p.len() - 1..]
-    } else if rest.starts_with('/') {
-        rest
-    } else {
-        return None; // non-empty authority — not a local file URL
-    };
-    let mut bytes = Vec::with_capacity(path.len());
-    let raw = path.as_bytes();
-    let mut i = 0;
-    while i < raw.len() {
-        if raw[i] == b'%' && i + 2 < raw.len() {
-            let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
-            if let (Some(h), Some(l)) = (hex(raw[i + 1]), hex(raw[i + 2])) {
-                bytes.push(h * 16 + l);
-                i += 3;
-                continue;
-            }
-        }
-        bytes.push(raw[i]);
-        i += 1;
-    }
-    String::from_utf8(bytes).ok()
+    sasso::file_url_to_path(s)
+}
+
+/// Is this canonical a native absolute path?
+///
+/// The HOST's rule, asked of the host — not a leading `/`, and not a hand-
+/// written list of spellings. It is the same question `absolute_normalized`
+/// in the core asked when it BUILT this canonical, so the two cannot
+/// disagree about a value the core produced: `/a`, `C:\a`, `\\server\share\a`,
+/// `\\?\C:\a`.
+///
+/// A leading-`/` test read the last three as relative. Windows-only, and
+/// there is no Windows prebuild of this addon and no job that runs it
+/// (#172), so nothing here is reachable today — written the way that is
+/// correct anyway, rather than the way that happens to work where it is
+/// exercised.
+fn is_absolute_path(s: &str) -> bool {
+    std::path::Path::new(s).is_absolute()
 }
 
 /// A containing canonical usable as an fs base: an absolute path as-is, or a
 /// `file:` URL decoded to one. Everything else (custom schemes, synthetic
 /// entry names like "stdin") has no fs base.
 fn containing_fs_path(s: &str) -> Option<String> {
-    if s.starts_with('/') {
+    if is_absolute_path(s) {
         return Some(s.to_string());
     }
-    file_url_to_path(s).filter(|p| p.starts_with('/'))
+    file_url_to_path(s).filter(|p| is_absolute_path(p))
 }
 
 fn syntax_from(code: u32) -> Syntax {
