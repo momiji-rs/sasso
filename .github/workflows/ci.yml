@@ -113,25 +113,33 @@ jobs:
               Write-Host "neither spelling of $f in the transcript -- read it above"
             }
           }
-          # --- does dart stamp the --update narration HERE? (#172) ----------
+          # --- does dart stamp the --update narration HERE? (#189) ----------
           #
-          # sasso prints `[2026-09-21 21:35] Compiled …` on every platform
-          # with a readable tz database and, on Windows, `Compiled …` alone:
-          # `local_stamp` reads /etc/localtime or $TZ, and Windows has
-          # neither. The step below PINS that absence, and a pin is only
-          # honest if the thing it pins is a decision rather than a bug.
-          # Nobody had measured which. dart stamps on macOS and Linux
-          # (measured 2026-09-22); this answers the third platform.
+          # ANSWERED, 2026-09-23, by this step's first run: it does.
+          #
+          #   [2026-09-23 04:21:49] Compiled stamp.scss to stamp.css.
+          #
+          # sasso prints `Compiled …` alone here — `local_stamp` reads
+          # /etc/localtime or $TZ and Windows has neither — so the pin below
+          # is recording a DIVERGENCE, not a decision. #189 carries it.
+          #
+          # Kept running because dart is the thing being tracked, not us: if
+          # a future dart stops stamping, the fix in #189 becomes wrong and
+          # this is what says so. The match is deliberately loose after the
+          # minutes — the native build prints `HH:MM:SS` and the dart2js npm
+          # build prints `HH:MM` (#190), and requiring `]` right after the
+          # minutes is what made this step's first run report the OPPOSITE of
+          # what it had just printed.
           Set-Content -Path probe/stamp.scss -Value 'a {b: c}'
           Push-Location probe
           $upd = & ../dart-sass-dist/dart-sass/sass.bat --no-source-map --update stamp.scss:stamp.css 2>&1 | Out-String
           Pop-Location
           Write-Host "--- dart --update, on this runner ---"
           Write-Host $upd
-          if ($upd -match '^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]') {
-            Write-Host "dart STAMPS on Windows -- sasso's bare line is a divergence, not a decision; the pin below records a bug"
+          if ($upd -match '\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}') {
+            Write-Host "dart STAMPS on Windows, as of the 2026-09-23 measurement -- the pin below records the divergence in #189"
           } elseif ($upd -match 'Compiled ') {
-            Write-Host "dart does NOT stamp on Windows -- sasso matches, and the pin below is a decision"
+            Write-Host "dart NO LONGER stamps on Windows -- this changed since 2026-09-23; #189's fix would now be wrong"
           } else {
             Write-Host "dart narrated nothing to match against -- read the transcript above"
           }
@@ -151,14 +159,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cargo test failed" }
       # The one behaviour that differs by platform rather than merely needing
       # to work on it: with no tz database to read, the compile line keeps its
-      # text and drops its timestamp. Asserting the ABSENCE is a pin — adding
-      # a Windows clock (#85, #86, both closed) must fail here rather than
-      # change output quietly.
+      # text and drops its timestamp. Asserting the ABSENCE is a pin — giving
+      # Windows a clock must fail here rather than change output quietly.
       #
-      # Whether it SHOULD keep dropping it is the probe's question above, and
-      # this pin stands until that answer is in: it records what sasso does,
-      # not that sasso is right. #172 tracks the decision.
-      - name: --update narrates without a timestamp
+      # It pins a KNOWN DIVERGENCE, not a decision. The probe above measured
+      # dart on this very runner on 2026-09-23 and dart stamps; sasso does
+      # not. #189 carries the fix, and this pin is what will fail when it
+      # lands — which is the point of it.
+      - name: --update narrates without a timestamp (pins #189)
         shell: pwsh
         run: |
           Set-Content -Path one.scss -Value 'a {b: c}'
