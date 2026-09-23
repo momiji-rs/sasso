@@ -1853,10 +1853,27 @@ fn finish_compile_error(
                 }
             } else if let Err(e) = std::fs::remove_file(output) {
                 if e.kind() != std::io::ErrorKind::NotFound {
+                    // Said, but not made the verdict. `--no-error-css`
+                    // means there is no output to produce, so a cleanup
+                    // that fails does not change what went wrong with the
+                    // stylesheet — and the run is still worth 65.
+                    //
+                    // Measured 2026-09-23 against dart 1.104.1, a stale
+                    // output whose holding directory is read-only:
+                    //
+                    //   dart     65   says nothing about the removal
+                    //   binary   66   says it                 (before)
+                    //   npm      65   says it                 (#181)
+                    //
+                    // dart does ATTEMPT it — with a writable directory
+                    // all three remove the stale file and all three exit
+                    // 65 — so this is dart swallowing the failure rather
+                    // than never trying. Telling someone their stale
+                    // output could not be removed is useful and stays;
+                    // making it the run's answer is what diverged.
                     outcome
                         .stderr
                         .push_str(&format!("error: cannot remove {}: {e}\n", output.display()));
-                    outcome.status = Status::IoError;
                 }
             } else {
                 // A removal moves the directory's mtime exactly as a

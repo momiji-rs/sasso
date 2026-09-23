@@ -3416,3 +3416,67 @@ fn watch_sees_a_file_arrive_at_the_output_path() {
         std::panic::resume_unwind(e);
     }
 }
+
+/// `--no-error-css` could not remove the stale output: SAID, not adjudicated.
+///
+/// The exit code answers what went wrong. Under `--no-error-css` there is no
+/// output to produce, so a cleanup that fails does not change the verdict on
+/// the stylesheet — and dart agrees, twice over. Measured 2026-09-23 against
+/// 1.104.1, a stale output whose holding directory is read-only:
+///
+///   dart     65   says nothing about the removal
+///   binary   66   says it                          (before this)
+///   npm      65   says it                          (#181)
+///
+/// dart does ATTEMPT the removal rather than skipping it — with a writable
+/// directory all three delete the stale file and all three exit 65 — so this
+/// was dart swallowing the failure, not declining to try.
+///
+/// The message stays. Telling someone their stale output is still there is
+/// worth saying; it is making it the run's answer that diverged.
+///
+/// Read-only DIRECTORY rather than a read-only file: `unlink` asks the
+/// directory for permission, not the file, so `chmod 000 out.css` removes
+/// perfectly well and would pass this test for the wrong reason.
+#[cfg(unix)]
+#[test]
+fn a_failed_no_error_css_removal_is_reported_but_not_the_verdict() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = scratch("no_error_css_removal");
+    write(&dir, "bad.scss", ".bad { a: 1px + #fff; }\n");
+    std::fs::create_dir_all(dir.join("out")).unwrap();
+    std::fs::write(dir.join("out/o.css"), "/* stale */\n").unwrap();
+    std::fs::set_permissions(dir.join("out"), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let r = sasso(&dir, &["--no-source-map", "--no-error-css", "bad.scss:out/o.css"]);
+
+    // Everything the assertions need, taken before the tree goes. A
+    // failing assertion must not leave a scratch directory behind — this
+    // one measured six of them in `$TMPDIR` before the cleanup — and the
+    // permissions have to be put back first or `remove_dir_all` cannot
+    // get into `out/`.
+    let survived = dir.join("out/o.css").exists();
+    std::fs::set_permissions(dir.join("out"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(
+        r.code, 65,
+        "a cleanup that failed became the verdict: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("Undefined operation"),
+        "the compile error is still the story: {}",
+        r.stderr,
+    );
+    assert!(
+        r.stderr.contains("cannot remove"),
+        "the removal failure is still reported: {}",
+        r.stderr,
+    );
+    assert!(
+        survived,
+        "the stale output is still there, which is the thing being reported",
+    );
+}

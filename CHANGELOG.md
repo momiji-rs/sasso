@@ -40,6 +40,29 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **The binary made a failed `--no-error-css` removal the run's verdict**
+  (#182). `--no-error-css` means there is no output to produce, so a
+  cleanup that fails does not change what went wrong with the stylesheet.
+  The message stays; the exit code goes back to 65.
+
+  Measured 2026-09-23 against dart-sass 1.104.1, a stale output whose
+  holding directory is read-only:
+
+  ```
+    dart     65   says nothing about the removal
+    binary   66   says it                          (before)
+    npm      65   says it                          (#181)
+  ```
+
+  dart does ATTEMPT the removal rather than skipping it — with a writable
+  directory all three delete the stale file and all three exit 65 — so
+  this was dart swallowing the failure, not declining to try. Telling
+  someone their stale output is still there is worth saying; making it
+  the run's answer is what diverged.
+
+
+### Fixed
+
 - **The npm CLI exited 1 for every kind of failure** (#91). dart-sass and
   the native CLI both use the `sysexits` codes and agree with each other;
   a build script that switches on the code to tell "your stylesheet is
