@@ -287,10 +287,17 @@ impl<'a> NapiChain<'a> {
         // with a scheme. The evaluator's synthetic entry names ("stdin", or a
         // schemaless `url` option) must surface as `containingUrl: undefined`,
         // exactly like the wasm chain.
+        //
+        // "Absolute" through `is_absolute_path`, the same rule the other
+        // site here uses, rather than a second leading-`/` test: `\\server\share`
+        // has no leading `/` and no colon, so BOTH halves of the old line
+        // missed it and a file reached through a UNC share crossed as "no
+        // containing url" — every relative `@use` beside it then fell
+        // through to the load paths.
         let containing = ctx
             .containing_url
             .map(|c| c.as_str())
-            .filter(|s| s.starts_with('/') || s.contains(':'))
+            .filter(|s| is_absolute_path(s) || s.contains(':'))
             .map(String::from);
         let reply = match &self.user {
             UserBridge::Tsfn(tsfn) => ask(
@@ -370,24 +377,31 @@ fn file_url_to_path(s: &str) -> Option<String> {
     sasso::file_url_to_path(s)
 }
 
+/// Is this canonical a native absolute path?
+///
+/// The HOST's rule, asked of the host — not a leading `/`, and not a hand-
+/// written list of spellings. It is the same question `absolute_normalized`
+/// in the core asked when it BUILT this canonical, so the two cannot
+/// disagree about a value the core produced: `/a`, `C:\a`, `\\server\share\a`,
+/// `\\?\C:\a`.
+///
+/// A leading-`/` test read the last three as relative. Windows-only, and
+/// there is no Windows prebuild of this addon and no job that runs it
+/// (#172), so nothing here is reachable today — written the way that is
+/// correct anyway, rather than the way that happens to work where it is
+/// exercised.
+fn is_absolute_path(s: &str) -> bool {
+    std::path::Path::new(s).is_absolute()
+}
+
 /// A containing canonical usable as an fs base: an absolute path as-is, or a
 /// `file:` URL decoded to one. Everything else (custom schemes, synthetic
 /// entry names like "stdin") has no fs base.
 fn containing_fs_path(s: &str) -> Option<String> {
-    // The HOST's rule for "absolute", not a leading `/`. The decoder hands
-    // back native spellings now — `C:\a` and `\\server\share` on Windows —
-    // and a `/` test reads both as relative, so a `file:///C:/…` containing
-    // URL answered `None` there and every relative `@use` fell through to
-    // the load paths instead of resolving beside its importer.
-    //
-    // Unreachable today: there is no Windows prebuild for this addon and no
-    // job that runs it (#172). Written the way that is correct anyway,
-    // rather than the way that happens to work where it is exercised.
-    let absolute = |p: &str| std::path::Path::new(p).is_absolute();
-    if absolute(s) {
+    if is_absolute_path(s) {
         return Some(s.to_string());
     }
-    file_url_to_path(s).filter(|p| absolute(p))
+    file_url_to_path(s).filter(|p| is_absolute_path(p))
 }
 
 fn syntax_from(code: u32) -> Syntax {

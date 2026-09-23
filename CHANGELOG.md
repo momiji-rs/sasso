@@ -33,6 +33,28 @@ Conformance is tracked separately as a ratchet against the official
   `sasso::file_url_to_path` is the new public half, strict because its
   caller is about to open the path. napi's copy is one line now.
 
+  One layer up, three more places decided "is this canonical an absolute
+  path" with a leading-`/` test or a hand-written list of spellings, and
+  a UNC canonical matched none of them — it has no leading `/` and no
+  colon:
+
+  ```
+    canonical                win32.isAbsolute  old JS  old Rust
+    \\server\share\a.scss    true              false   false
+    \\?\C:\w\a.scss          true              false   true
+    C:\w\a.scss              true              true    true
+    /w/a.scss                true              true    true
+  ```
+
+  A file reached through a share crossed the bridge as "no containing
+  url", so every relative `@use` beside it fell through to the load
+  paths instead of resolving next to its importer. All three ask the
+  platform now — `Path::is_absolute` in Rust, `node:path`'s `isAbsolute`
+  in JS — which is the question the core itself asked when it BUILT the
+  canonical, so the answers cannot drift apart again. Windows-only, and
+  there is no Windows prebuild of the addon yet (#172), so this is
+  correctness ahead of reach rather than a fix anyone was hitting.
+
 - **CI checks the MSRV** (#169). `Cargo.toml` promises `rust-version =
   "1.74"` and no job built against it; two APIs above it reached review
   in #166 before anyone noticed.
