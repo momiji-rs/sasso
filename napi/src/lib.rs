@@ -359,32 +359,16 @@ impl<'a> NapiChain<'a> {
 }
 
 /// Decode a `file:` URL into a filesystem path (empty/`localhost` authority
-/// only; percent-escapes decoded as UTF-8). `None` when it isn't one.
+/// The local filesystem path a `file:` URL names.
+///
+/// One line, because the rule lives in the `sasso` crate now. This file had
+/// its own copy of it and the two had already drifted twice (#163): this
+/// one accepted a `localhost` authority the other declined, and the two
+/// disagreed about undecodable bytes. The second disagreement was the
+/// right one and is preserved — `sasso::file_url_to_path` is the STRICT
+/// reading, which is what a path about to be opened wants.
 fn file_url_to_path(s: &str) -> Option<String> {
-    let rest = s.strip_prefix("file://")?;
-    let path = if let Some(p) = rest.strip_prefix("localhost/") {
-        &rest[rest.len() - p.len() - 1..]
-    } else if rest.starts_with('/') {
-        rest
-    } else {
-        return None; // non-empty authority — not a local file URL
-    };
-    let mut bytes = Vec::with_capacity(path.len());
-    let raw = path.as_bytes();
-    let mut i = 0;
-    while i < raw.len() {
-        if raw[i] == b'%' && i + 2 < raw.len() {
-            let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
-            if let (Some(h), Some(l)) = (hex(raw[i + 1]), hex(raw[i + 2])) {
-                bytes.push(h * 16 + l);
-                i += 3;
-                continue;
-            }
-        }
-        bytes.push(raw[i]);
-        i += 1;
-    }
-    String::from_utf8(bytes).ok()
+    sasso::file_url_to_path(s)
 }
 
 /// A containing canonical usable as an fs base: an absolute path as-is, or a
