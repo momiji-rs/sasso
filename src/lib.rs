@@ -725,18 +725,28 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
 /// has no `file_url_to_path`.
 #[cfg(test)]
 mod file_url_tests {
-    use crate::pathstyle::{file_url_path, HOST};
+    use crate::pathstyle::{file_url_path, Style, HOST};
 
     #[test]
     fn an_undecodable_byte_is_shown_and_not_opened() {
         // Shown with the replacement character: a frame naming the file is
         // still better than no frame.
+        //
+        // Both styles spelled out rather than `HOST`, which is the whole
+        // point of `Style` being a value: an assertion written against the
+        // host passes here and fails on the Windows job, where the same
+        // URL comes back `\a\u{fffd}b.scss`.
         assert_eq!(
-            file_url_path(HOST, "file:///a%FFb.scss").as_deref(),
+            file_url_path(Style::Posix, "file:///a%FFb.scss").as_deref(),
             Some("/a\u{fffd}b.scss")
         );
+        assert_eq!(
+            file_url_path(Style::Windows, "file:///a%FFb.scss").as_deref(),
+            Some("\\a\u{fffd}b.scss")
+        );
         // …and refused for opening, because a name with U+FFFD substituted
-        // into it is a different name.
+        // into it is a different name. Host-independent: the strict reading
+        // fails at the UTF-8 step, before any separator is chosen.
         assert_eq!(super::file_url_to_path("file:///a%FFb.scss"), None);
     }
 

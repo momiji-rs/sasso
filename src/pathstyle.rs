@@ -752,6 +752,34 @@ mod tests {
         assert_eq!(file_url_path(Style::Posix, "file://"), None);
     }
 
+    /// What this decoder hands back is ROOTED, in either style.
+    ///
+    /// The napi bridge asks "is this usable as a filesystem base" and used
+    /// to answer by looking for a leading `/` — which reads `C:\a` and
+    /// `\\server\share` as relative, so on Windows a `file:///C:/…`
+    /// containing URL resolved nothing and every relative `@use` fell
+    /// through to the load paths. It asks the host now (#163).
+    ///
+    /// The host check itself cannot be exercised off its host. This can:
+    /// it pins the half that decides the answer, which is that the decoder
+    /// produces something each style calls rooted.
+    #[test]
+    fn what_it_decodes_is_rooted_in_its_own_style() {
+        for (style, url) in [
+            (Style::Posix, "file:///a/b.scss"),
+            (Style::Posix, "file://localhost/a/b.scss"),
+            (Style::Windows, "file:///C:/a/b.scss"),
+            (Style::Windows, "file://localhost/C:/a.scss"),
+            (Style::Windows, "file://server/share/a.scss"),
+        ] {
+            let p = file_url_path(style, url).expect("decodes");
+            assert!(
+                style.root_len(&p) > 0,
+                "{url:?} decoded to {p:?}, which {style:?} does not call rooted",
+            );
+        }
+    }
+
     /// A directory with a space arrives percent-encoded. A frame naming
     /// `my%20docs` names a file nobody has.
     #[test]

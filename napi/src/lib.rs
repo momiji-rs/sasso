@@ -374,10 +374,20 @@ fn file_url_to_path(s: &str) -> Option<String> {
 /// `file:` URL decoded to one. Everything else (custom schemes, synthetic
 /// entry names like "stdin") has no fs base.
 fn containing_fs_path(s: &str) -> Option<String> {
-    if s.starts_with('/') {
+    // The HOST's rule for "absolute", not a leading `/`. The decoder hands
+    // back native spellings now — `C:\a` and `\\server\share` on Windows —
+    // and a `/` test reads both as relative, so a `file:///C:/…` containing
+    // URL answered `None` there and every relative `@use` fell through to
+    // the load paths instead of resolving beside its importer.
+    //
+    // Unreachable today: there is no Windows prebuild for this addon and no
+    // job that runs it (#172). Written the way that is correct anyway,
+    // rather than the way that happens to work where it is exercised.
+    let absolute = |p: &str| std::path::Path::new(p).is_absolute();
+    if absolute(s) {
         return Some(s.to_string());
     }
-    file_url_to_path(s).filter(|p| p.starts_with('/'))
+    file_url_to_path(s).filter(|p| absolute(p))
 }
 
 fn syntax_from(code: u32) -> Syntax {
