@@ -54,10 +54,15 @@ Conformance is tracked separately as a ratchet against the official
   file inside the destination, and would a second run mirror the output tree
   into itself") therefore had no case at all.
 
-  It is three named rules taking a `pathstyle::Style` now — `path_inside`,
-  `same_path`, `dest_nested_in_src` — so both platforms' answers are asserted
-  on either. Behaviour is unchanged; the POSIX column is measured against
-  dart-sass 1.104.1 on macOS, with a stylesheet already in the destination:
+  The fold is a value now: `path_key_in(style, path)` is the one
+  style-dependent step, and the two rules built on it — `key_inside` and
+  `dest_nested_in_src` — are pure comparisons of its output, so a test keys
+  with `Style::Windows` and asks the Windows question on any host. Keeping the
+  keying out of the comparisons is also what lets the directory walk key the
+  destination once rather than once per file.
+
+  Behaviour is unchanged; the POSIX column is measured against dart-sass
+  1.104.1 on macOS, with a stylesheet already in the destination:
 
   ```
     sass Src:src/css  ->  src/css/a.css AND src/css/css/old.css

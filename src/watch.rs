@@ -757,10 +757,14 @@ mod tests {
                 "a precise mtime ({subsec} ns) should not read the file"
             );
         } else {
-            // Not a silent pass: say which branch ran, so a platform where
-            // this side is ALWAYS taken shows up as a test that never
-            // asserts rather than as a green tick.
-            println!("subsecond {subsec} ns is coarse by this rule; the precise branch did not run");
+            // The other half of the same rule, so neither branch is a way
+            // through this test that checks nothing: a clock this coarse is
+            // exactly when the contents MUST be read, which is what the two
+            // saves above rely on.
+            assert_ne!(
+                precise.digest, 0,
+                "a coarse mtime ({subsec} ns) should have read the file"
+            );
         }
         std::fs::remove_dir_all(&dir).ok();
     }
