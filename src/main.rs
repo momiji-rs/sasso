@@ -1283,8 +1283,8 @@ fn expand_dir(src: &Path, dest: &Path, indented: bool, units: &mut Vec<Unit>) ->
     }
     files.sort();
     let cwd = std::env::current_dir().unwrap_or_default();
-    let src_abs = path_key(&normalize_path(&cwd.join(src)));
-    let dest_abs = path_key(&normalize_path(&cwd.join(dest)));
+    let src_abs = normalize_path(&cwd.join(src));
+    let dest_abs = normalize_path(&cwd.join(dest));
     // dart-sass 1.104.1 skips every source file INSIDE the output directory
     // when that directory is nested in the source tree: `.:css` run twice
     // would otherwise mirror `css/` into `css/css/`. Nesting is strict — a
@@ -1292,18 +1292,18 @@ fn expand_dir(src: &Path, dest: &Path, indented: bool, units: &mut Vec<Unit>) ->
     // `dir:dir`) still compiles every file — and it is the destination that
     // counts, not an intermediate directory: `.:css/deep` skips only what is
     // under `css/deep`, and still compiles `css/stale.scss`.
-    let nested = dest_abs != src_abs && dest_abs.starts_with(&src_abs);
+    let nested = dest_nested_in_src(pathstyle::HOST, &src_abs, &dest_abs);
     for path in files {
         let rel = path.strip_prefix(src).unwrap_or(&path).with_extension("css");
         let out = dest.join(rel);
-        let path_abs = path_key(&normalize_path(&cwd.join(&path)));
-        if nested && path_abs.starts_with(&dest_abs) {
+        let path_abs = normalize_path(&cwd.join(&path));
+        if nested && path_inside(pathstyle::HOST, &dest_abs, &path_abs) {
             continue;
         }
         // dart skips a CSS file whose destination is itself (`sasso dir`, or
         // `dir:dir`, with a `plain.css` inside): it would only be rewritten in
         // place.
-        if path_key(&normalize_path(&cwd.join(&out))) == path_abs {
+        if same_path(pathstyle::HOST, &normalize_path(&cwd.join(&out)), &path_abs) {
             continue;
         }
         units.push(Unit {
@@ -2943,9 +2943,6 @@ fn adjust_sources(
         .collect()
 }
 
-/// Lexically normalize a path: resolve `.`/`..` components without touching the
-/// filesystem (so it works for paths that may not exist yet), like dart's URL
-/// normalization. Keeps it absolute if it started absolute.
 /// A path reduced to the key the two directory-relationship tests compare —
 /// "is this file inside the destination" and "is its destination itself".
 ///
@@ -2955,17 +2952,147 @@ fn adjust_sources(
 /// else the path is compared as written, again like dart — which case-folds
 /// for no other style, not even on a case-insensitive macOS volume. The key
 /// is lexical either way: no `realpath`, so a symlink is not resolved.
-#[cfg(windows)]
-fn path_key(p: &Path) -> PathBuf {
-    PathBuf::from(p.to_string_lossy().to_lowercase())
+fn path_key_in(style: pathstyle::Style, p: &Path) -> PathBuf {
+    match style {
+        pathstyle::Style::Windows => PathBuf::from(p.to_string_lossy().to_lowercase()),
+        pathstyle::Style::Posix => p.to_path_buf(),
+    }
 }
 
-/// See the Windows variant above: elsewhere the path is its own key.
-#[cfg(not(windows))]
+/// [`path_key_in`] under this platform's rules.
 fn path_key(p: &Path) -> PathBuf {
-    p.to_path_buf()
+    path_key_in(pathstyle::HOST, p)
 }
 
+/// Is `p` `dir` itself, or inside it?
+///
+/// `starts_with` compares whole components, so `src2` is not inside `src`.
+fn path_inside(style: pathstyle::Style, dir_abs: &Path, p_abs: &Path) -> bool {
+    path_key_in(style, p_abs).starts_with(path_key_in(style, dir_abs))
+}
+
+/// Do these two absolute paths name one file?
+fn same_path(style: pathstyle::Style, a_abs: &Path, b_abs: &Path) -> bool {
+    path_key_in(style, a_abs) == path_key_in(style, b_abs)
+}
+
+/// Is the destination nested STRICTLY inside the source tree — the case where
+/// a second run would mirror the output directory into itself?
+///
+/// Equal is not nested: `sasso dir` is `dir:dir`, and it still compiles every
+/// file. Both arguments must already be absolute and normalized.
+fn dest_nested_in_src(style: pathstyle::Style, src_abs: &Path, dest_abs: &Path) -> bool {
+    !same_path(style, src_abs, dest_abs) && path_inside(style, src_abs, dest_abs)
+}
+
+/// The two directory-relationship rules, asked of BOTH styles.
+///
+/// Item 2 of #172: the case-folding half of `path_key` was covered for
+/// diagnostic path spelling (`pathstyle`, 29 tests) and for the watch
+/// snapshot's directory key, but not for the use it was filed about — "is
+/// this file inside the destination". It was `#[cfg(windows)]`-gated, so a
+/// POSIX run compiled the other body and had nothing to check.
+///
+/// The POSIX column is measured against dart-sass 1.104.1 on macOS, with a
+/// stylesheet already sitting in the destination:
+///
+/// ```text
+///   sass Src:src/css   ->  src/css/a.css AND src/css/css/old.css
+///   sass src:src/css   ->  src/css/a.css only
+/// ```
+///
+/// The first is the proof that dart does NOT fold case off Windows, even on
+/// a case-insensitive volume where `Src/` and `src/` are one directory on
+/// disk: it read the two spellings as two trees, called the destination not
+/// nested, and mirrored the destination into itself.
+#[cfg(test)]
+mod dir_pair_tests {
+    use super::{dest_nested_in_src, path_inside, same_path};
+    use crate::pathstyle::Style;
+    use std::path::Path;
+
+    /// `Src:src/css` — one directory under two spellings.
+    #[test]
+    fn case_decides_nesting_only_under_the_windows_rules() {
+        let src = Path::new("/w/Src");
+        let dest = Path::new("/w/src/css");
+        // Windows: `Src` IS `src`, so the destination is inside the source
+        // and a second run would mirror `css/` into `css/css/`.
+        assert!(dest_nested_in_src(Style::Windows, src, dest));
+        // POSIX: two names, two directories, nothing nested — which is what
+        // dart answers on macOS too.
+        assert!(!dest_nested_in_src(Style::Posix, src, dest));
+    }
+
+    /// The same fold, for the per-file question the loop asks.
+    #[test]
+    fn a_file_is_inside_the_destination_by_the_same_rules() {
+        let dest = Path::new("/w/src/CSS");
+        let file = Path::new("/w/src/css/old.scss");
+        assert!(path_inside(Style::Windows, dest, file));
+        assert!(!path_inside(Style::Posix, dest, file));
+    }
+
+    /// …and for "is this file its own destination".
+    #[test]
+    fn a_file_is_its_own_destination_by_the_same_rules() {
+        let out = Path::new("/w/DIR/plain.css");
+        let file = Path::new("/w/dir/plain.css");
+        assert!(same_path(Style::Windows, out, file));
+        assert!(!same_path(Style::Posix, out, file));
+    }
+
+    /// Equal is not nested, or `sasso dir` (which is `dir:dir`) would skip
+    /// every file it was asked to compile.
+    #[test]
+    fn a_destination_equal_to_the_source_is_not_nested() {
+        for style in [Style::Posix, Style::Windows] {
+            assert!(!dest_nested_in_src(
+                style,
+                Path::new("/w/dir"),
+                Path::new("/w/dir")
+            ));
+        }
+        // …and under Windows, not even spelled differently.
+        assert!(!dest_nested_in_src(
+            Style::Windows,
+            Path::new("/w/Dir"),
+            Path::new("/w/dir")
+        ));
+    }
+
+    /// Nesting is by whole components: a sibling whose name merely starts
+    /// with the source's is not inside it. Without this, `.:cssx` would skip
+    /// everything under a directory it never writes to.
+    #[test]
+    fn a_prefix_of_a_name_is_not_a_parent() {
+        for style in [Style::Posix, Style::Windows] {
+            assert!(!dest_nested_in_src(
+                style,
+                Path::new("/w/src"),
+                Path::new("/w/src2")
+            ));
+            assert!(!path_inside(
+                style,
+                Path::new("/w/src"),
+                Path::new("/w/src2/a.scss")
+            ));
+        }
+    }
+
+    /// It is the DESTINATION that bounds the skip, not an intermediate
+    /// directory: `.:css/deep` still compiles `css/stale.scss`.
+    #[test]
+    fn only_what_is_under_the_destination_is_skipped() {
+        let dest = Path::new("/w/css/deep");
+        assert!(path_inside(Style::Posix, dest, Path::new("/w/css/deep/old.scss")));
+        assert!(!path_inside(Style::Posix, dest, Path::new("/w/css/stale.scss")));
+    }
+}
+
+/// Lexically normalize a path: resolve `.`/`..` components without touching the
+/// filesystem (so it works for paths that may not exist yet), like dart's URL
+/// normalization. Keeps it absolute if it started absolute.
 fn normalize_path(p: &Path) -> PathBuf {
     use std::path::Component;
     let mut out: Vec<Component<'_>> = Vec::new();

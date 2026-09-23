@@ -47,6 +47,26 @@ Conformance is tracked separately as a ratchet against the official
   reach it and the Windows job had nothing to run. It is platform-independent
   now, so the cases run everywhere.
 
+- **The nested-destination rule is checkable off Windows** (#172). `path_key`
+  folds case on Windows — where dart lowercases each part of a canonical, so
+  `Src` and `src` name one directory — and it was `#[cfg(windows)]`-gated, so
+  the fold existed only in a build no test ran. The rule it serves ("is this
+  file inside the destination, and would a second run mirror the output tree
+  into itself") therefore had no case at all.
+
+  It is three named rules taking a `pathstyle::Style` now — `path_inside`,
+  `same_path`, `dest_nested_in_src` — so both platforms' answers are asserted
+  on either. Behaviour is unchanged; the POSIX column is measured against
+  dart-sass 1.104.1 on macOS, with a stylesheet already in the destination:
+
+  ```
+    sass Src:src/css  ->  src/css/a.css AND src/css/css/old.css
+    sass src:src/css  ->  src/css/a.css only
+  ```
+
+  The first row is the proof that dart does not fold off Windows even on a
+  case-insensitive volume, where `Src/` and `src/` are one directory on disk.
+
 ### Changed
 
 - **One `file:` URL decoder instead of two** (#163). `src/pathstyle.rs`
