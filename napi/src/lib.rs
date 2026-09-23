@@ -358,7 +358,6 @@ impl<'a> NapiChain<'a> {
     }
 }
 
-/// Decode a `file:` URL into a filesystem path (empty/`localhost` authority
 /// The local filesystem path a `file:` URL names.
 ///
 /// One line, because the rule lives in the `sasso` crate now. This file had

@@ -33,9 +33,6 @@ Conformance is tracked separately as a ratchet against the official
   `sasso::file_url_to_path` is the new public half, strict because its
   caller is about to open the path. napi's copy is one line now.
 
-
-### Changed
-
 - **CI checks the MSRV** (#169). `Cargo.toml` promises `rust-version =
   "1.74"` and no job built against it; two APIs above it reached review
   in #166 before anyone noticed.
