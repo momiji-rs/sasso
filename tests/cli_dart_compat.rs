@@ -3451,9 +3451,14 @@ fn a_failed_no_error_css_removal_is_reported_but_not_the_verdict() {
 
     let r = sasso(&dir, &["--no-source-map", "--no-error-css", "bad.scss:out/o.css"]);
 
-    // Put it back before asserting, or a failure leaves an undeletable
-    // scratch directory behind for every later run.
+    // Everything the assertions need, taken before the tree goes. A
+    // failing assertion must not leave a scratch directory behind — this
+    // one measured six of them in `$TMPDIR` before the cleanup — and the
+    // permissions have to be put back first or `remove_dir_all` cannot
+    // get into `out/`.
+    let survived = dir.join("out/o.css").exists();
     std::fs::set_permissions(dir.join("out"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
 
     assert_eq!(
         r.code, 65,
@@ -3471,7 +3476,7 @@ fn a_failed_no_error_css_removal_is_reported_but_not_the_verdict() {
         r.stderr,
     );
     assert!(
-        dir.join("out/o.css").exists(),
+        survived,
         "the stale output is still there, which is the thing being reported",
     );
 }
