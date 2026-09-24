@@ -13,6 +13,30 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **The third `file:` URL decoder is gone** (#188). #163 unified the copies in
+  `src/pathstyle.rs` and `napi/src/lib.rs` after they had drifted twice; a
+  third lived in `src/main.rs` with its own `percent_decode` beside it, and it
+  had drifted the same way. It declined a `localhost` authority — the exact
+  disagreement #161 fixed between the other two — and declined a UNC form that
+  `pathstyle` resolves on Windows and correctly refuses on POSIX.
+
+  `url_to_path` calls `sasso::file_url_to_path` now, which deletes ~30 lines
+  and the duplicate decoder with them.
+
+  Nothing user-visible changes: the arm is unreachable today. `FsImporter`'s
+  canonical form IS the absolute filesystem path, so every canonical the
+  binary sees takes the earlier path arm — measured by instrumenting both and
+  running the CLI suite, 11 hits on the path arm and 0 on the `file:` one.
+  That is precisely why it now has tests of its own: dead-but-defensive code
+  nobody checks is how this copy drifted from the other two unnoticed.
+
+  The doc comment also claimed "the only caller". There are two, and they read
+  `None` in opposite directions — `--update`'s freshness test treats it as
+  "rebuild" (safe: one extra write), while the watch's pre-read stamp records
+  nothing for that file (not safe: a save landing mid-read is not seen). Both
+  are written down now, with the note that the second is latent rather than
+  live for the same reason.
+
 - **The binary stamps `--update`/`--watch` on Windows too** (#189). dart prints
   a timestamp on all three platforms; sasso printed one on two. `local_stamp`
   learns the local offset by reading `/etc/localtime`, and Windows has no TZif
