@@ -10,6 +10,18 @@
 //! beyond the formulas themselves, which is why they are worth copying
 //! rather than reinventing with `if` statements.
 
+// Half of this module exists for the POSIX TZ-string reader, which only a
+// machine with a tz database needs (`posix` is `#[cfg(unix)]`). Off POSIX
+// the stamp's offset comes from the platform instead, so `civil_from_unix`
+// is the only entry point a lib or bin build reaches and the other four read
+// as dead.
+//
+// Allowed rather than `#[cfg(unix)]`-gated, because they are NOT dead in a
+// test build on any platform: the calendar tests below are pure, need no tz
+// database, and are exactly the kind that should run everywhere — gating the
+// functions would take the tests with them.
+#![cfg_attr(not(unix), allow(dead_code))]
+
 /// A civil date and time, with no zone attached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Civil {

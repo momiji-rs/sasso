@@ -41,8 +41,14 @@ overhaul, so it diverges from current dart-sass on, e.g., fractional color
 channels (`rgb(63.75, 127.5, 191.25)` vs rounded hex) and emits hex where
 dart-sass now keeps `rgb()`/`hsl()` forms. `sasso` targets **current**
 dart-sass exactly, with a span-first parser, a modern color model, and a
-zero-dependency, sandbox-friendly core. See
+zero-dependency, sandbox-friendly core.¹ See
 [`docs/GRASS_LANDSCAPE.md`](docs/GRASS_LANDSCAPE.md) for the full analysis.
+
+¹ Exactly one dependency exists, only on Windows, and only for the CLI's
+`--update`/`--watch` timestamp: `std` exposes no local time on any platform,
+and Windows has no tz database to read. A POSIX, wasm or wasip1 build still
+resolves to nothing at all. See `Cargo.toml` for why a safe-API crate beats a
+second `unsafe` exemption here.
 
 ## Features (this slice)
 
@@ -410,8 +416,10 @@ methodology, per-file numbers and the correctness diff are in
 
 ## WebAssembly
 
-Because the library is zero-dependency and pure `std`, it compiles to
-`wasm32-unknown-unknown` and `wasm32-wasip1` out of the box (built in CI). The
+Because the library is zero-dependency and pure `std` on every target that
+is not Windows — and the one Windows dependency is the CLI's clock, not the
+library — it compiles to `wasm32-unknown-unknown` and `wasm32-wasip1` out of
+the box (built in CI). The
 deployable `.wasm` cdylib ships in two variants, published to npm as
 [`sasso`](https://www.npmjs.com/package/sasso):
 

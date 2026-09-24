@@ -631,7 +631,7 @@ assert.ok(
   writeFileSync(join(d, "two.scss"), "x {y: z}\n");
   const run = (...args) =>
     spawnSync(process.execPath, [cliPath, "--no-source-map", ...args], { encoding: "utf8", cwd: d });
-  const STAMP = /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] /;
+  const STAMP = /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] /;
 
   const first = run("--update", "one.scss:one.css");
   assert.equal(first.status, 0, `cli: ${first.stderr}`);
@@ -642,7 +642,7 @@ assert.ok(
   assert.ok(!first.stderr.includes("Compiled"), `cli: the line belongs on stdout: ${first.stderr}`);
   // A stamp, when present, must be well formed — this CLI gets local time
   // from JS `Date`, so unlike the binary it has one everywhere.
-  assert.match(first.stdout, STAMP, "cli: a [YYYY-MM-DD HH:MM] stamp");
+  assert.match(first.stdout, STAMP, "cli: a [YYYY-MM-DD HH:MM:SS] stamp");
   assert.match(first.stdout, /Compiled one\.scss to one\.css\.\n$/, "cli: dart's wording");
 
   const again = run("--update", "one.scss:one.css");
@@ -4787,7 +4787,9 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     return { stdout, stderr };
   };
 
-  const STAMPED = /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] Compiled .*one\.scss to .*one\.css\.$/;
+  // Seconds, like the binary: dart's native build prints them and its
+  // dart2js build drops them by a truncation bug (#190).
+  const STAMPED = /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] Compiled .*one\.scss to .*one\.css\.$/;
   const loud = await capture([]);
   const lines = loud.stdout.split("\n");
   assert.ok(STAMPED.test(lines[0]), `cli --watch: the first compile is stamped: ${lines[0]}`);

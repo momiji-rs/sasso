@@ -2498,7 +2498,7 @@ fn update_without_a_destination_is_a_usage_error() {
 /// test is a row of that table, and each row is a way the first attempt
 /// could have been wrong:
 ///
-///   written          `[YYYY-MM-DD HH:MM] Compiled <src> to <dest>.`
+///   written          `[YYYY-MM-DD HH:MM:SS] Compiled <src> to <dest>.`
 ///   skipped          silent — so a no-op `--update` says nothing at all
 ///   failed           silent — the error is the output, not a compile line
 ///   --quiet          suppressed
@@ -2539,7 +2539,7 @@ fn update_narrates_each_written_file() {
     // a stamp is either absent or well-formed — never malformed, never
     // wrong-shaped, never swallowing the message.
     if line.starts_with('[') {
-        assert!(stamp(line), "a stamp must be [YYYY-MM-DD HH:MM]: {line:?}");
+        assert!(stamp(line), "a stamp must be [YYYY-MM-DD HH:MM:SS]: {line:?}");
     } else {
         assert!(
             line.starts_with("Compiled"),
@@ -2630,18 +2630,21 @@ fn update_narrates_a_stdin_source_as_stdin() {
     );
 }
 
-/// `[YYYY-MM-DD HH:MM] ` at the start of a line, without pulling in a regex
-/// engine for one shape. A wrong-but-plausible stamp is caught by
+/// `[YYYY-MM-DD HH:MM:SS] ` at the start of a line, without pulling in a
+/// regex engine for one shape. A wrong-but-plausible stamp is caught by
 /// `src/localtime`'s own tests against the tz database; what matters here is
 /// that a stamp is present and correctly shaped.
+///
+/// Seconds included: dart's native build prints them and its dart2js build
+/// truncates them away by accident (#190, and `local_stamp`'s docs).
 fn regex_lite_stamp(line: &str) -> bool {
     let b = line.as_bytes();
-    // `[2026-09-19 13:29] ` — the bracket closes at 17, the space follows.
-    if b.len() < 19 || b[0] != b'[' || b[17] != b']' || b[18] != b' ' {
+    // `[2026-09-19 13:29:07] ` — the bracket closes at 20, the space follows.
+    if b.len() < 22 || b[0] != b'[' || b[20] != b']' || b[21] != b' ' {
         return false;
     }
-    let digits = [1, 2, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16];
-    let punct = [(5, b'-'), (8, b'-'), (11, b' '), (14, b':')];
+    let digits = [1, 2, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16, 18, 19];
+    let punct = [(5, b'-'), (8, b'-'), (11, b' '), (14, b':'), (17, b':')];
     digits.iter().all(|&i| b[i].is_ascii_digit()) && punct.iter().all(|&(i, c)| b[i] == c)
 }
 

@@ -52,8 +52,71 @@ path = "src/main.rs"
 # (a hand-rolled arg parser) are std-only.
 [dependencies]
 
+# The one exception, and only on Windows: the local UTC offset for the
+# `--update`/`--watch` timestamp. dart prints one on every platform (measured
+# on the `windows-latest` runner, #189) and sasso printed none here, because
+# `src/localtime` learns the offset by reading `/etc/localtime` and Windows
+# has no TZif file to read.
+#
+# `std` exposes no local time on any platform, so the offset has to come from
+# either FFI or a crate. FFI would need `#[allow(unsafe_code)]` — this crate
+# allows that in exactly one audited module (`arena`, checked under Miri), and
+# a Win32 call cannot be checked under Miri at all. A crate keeps that count
+# at one.
+#
+# `windows-sys` is NOT the way to do that: it declares the `extern "system"`
+# functions but every call site still needs an `unsafe` block, so it buys a
+# dependency AND the exemption. What is needed is a crate with a SAFE
+# local-time API, and there are three. Measured 2026-09-23:
+#
+#   candidate   lockfile   1.74 + windows   ours unsafe   shipped weight
+#   chrono          37     builds           no            none
+#   time            13     FAILS            no            none
+#   jiff            21     builds           no            ~427 KB
+#   windows-sys     11     builds           YES           none
+#
+# LOCKFILE entries, not `cargo tree`: a lockfile is target-independent, so it
+# records every dependency a crate declares for every platform, including ones
+# we never build. `cargo tree -e normal --target x86_64-pc-windows-msvc` says
+# chrono costs 3 crates, which is true of a Windows BUILD and wrong about the
+# file every platform carries. The napi workspace's staleness check caught that.
+#
+# `time` is the smallest and cannot be used: `time-core` ships an edition-2024
+# manifest, which Cargo 1.74 refuses to parse, so it breaks the MSRV promise on
+# the one platform that would resolve it — and the MSRV job would not have
+# noticed, because it resolves this dependency on no platform at all. (It does
+# now; see the `msrv` job.)
+#
+# `jiff` embeds the whole tz database on Windows, which has no system copy —
+# jiff's own docs say so. That is the ~427 KB this module's header already
+# weighed and rejected for one log line, and unlike a lockfile entry it is
+# weight in every shipped binary.
+#
+# So: chrono, whose cost is 37 lines of lockfile metadata and nothing in the
+# binary, because `clock` resolves to the Windows API here. The 37 are mostly
+# iana-time-zone's other platforms (wasm-bindgen, js-sys, core-foundation-sys,
+# android_system_properties) — crates this build never compiles.
+#
+# OPTIONAL, behind a default-on feature, because `localtime` is a module of
+# the BINARY and the library never refers to it — but a target dependency
+# belongs to the package, so without this a Windows EMBEDDER would carry it in
+# their graph for a clock they never call. `default-features = false` gives
+# them the zero-dependency build the README promises; the binary, and anyone
+# who just runs `cargo install sasso`, keeps its stamp.
+[target.'cfg(windows)'.dependencies]
+chrono = { version = "0.4", default-features = false, features = [
+  "clock",
+  "std",
+], optional = true }
+
 [features]
-default = []
+default = ["cli-clock"]
+
+# The CLI's local-time stamp. A no-op everywhere but Windows, where it is the
+# only thing that pulls a dependency (see the target section above). Turning
+# it off there returns the binary to printing `Compiled a.scss to a.css.`
+# with no `[…]` prefix, which is what it did before #189.
+cli-clock = ["dep:chrono"]
 
 [profile.release]
 # `panic = "abort"` is set EXPLICITLY, the way `ffi/` sets `unwind` and `wasm/`

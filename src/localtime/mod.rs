@@ -4,7 +4,7 @@
 //! dart-sass stamps it with the local time:
 //!
 //! ```text
-//! [2026-09-19 12:58] Compiled src/one.scss to out/one.css.
+//! [2026-09-19 12:58:07] Compiled src/one.scss to out/one.css.
 //! ```
 //!
 //! `std` gives UTC seconds and nothing else — no calendar, no timezone — so
@@ -73,11 +73,11 @@
 //! tzdata on the host, and give the same answer in five years when these
 //! zones' rules have moved on.
 
-// All four are `#[cfg(unix)]`, along with everything that uses them: on a
-// platform with no tz database to read, a calendar and a TZif parser are
-// dead code, and `-D warnings` is right to say so. The whole module
-// collapses to `now()` and a `local_stamp` that returns None.
-#[cfg(unix)]
+// `civil` is wanted everywhere a stamp is printed — it turns "UTC seconds
+// plus an offset" into a date, and that arithmetic is the same whoever
+// supplied the offset. The other three read the tz database, which only a
+// POSIX machine has, and on any other target they would be dead code that
+// `-D warnings` is right to reject.
 pub(crate) mod civil;
 #[cfg(unix)]
 pub(crate) mod posix;
@@ -122,28 +122,88 @@ pub(crate) fn local_offset_at(unix_secs: i64) -> Option<i64> {
     }
 }
 
-/// No tz database exists to read here, so there is no time to report.
+/// The same question on Windows, asked of the platform instead of a file.
 ///
-/// `None` rather than a UTC stamp: unlike a bare container, a Windows
-/// machine HAS a local zone and we simply cannot see it without FFI or an
-/// embedded copy of the whole database (~427 KB, the way `jiff` does it).
-/// Claiming UTC would be confidently wrong; printing the line without its
-/// bracket is merely less. See #85.
-#[cfg(not(unix))]
-pub(crate) fn local_stamp(_unix_secs: i64) -> Option<String> {
+/// A safe-API crate rather than our own FFI, and chrono rather than the three
+/// smaller-looking alternatives: the
+/// `[target.'cfg(windows)'.dependencies]` comment in `Cargo.toml` has the
+/// measured table and why each of the others is disqualified. `clock`
+/// resolves to the Windows API here, so nothing is embedded in the binary.
+///
+/// `None` if the instant falls outside chrono's range, which a stamp of
+/// `now()` never does — but it is the caller's existing "print no time rather
+/// than a wrong one" path, so it costs nothing to stay honest about it.
+#[cfg(all(windows, feature = "cli-clock"))]
+pub(crate) fn local_offset_at(unix_secs: i64) -> Option<i64> {
+    use chrono::{DateTime, Local, Offset};
+    let utc = DateTime::from_timestamp(unix_secs, 0)?;
+    Some(i64::from(
+        utc.with_timezone(&Local).offset().fix().local_minus_utc(),
+    ))
+}
+
+/// Everything else: the two wasm targets, and a Windows build that opted out
+/// of `cli-clock`.
+///
+/// No clock to ask and no file to read, so the caller prints the line without
+/// its bracket — the behaviour the whole module had on Windows before #189.
+/// A wasm build has no business reading a host clock anyway.
+#[cfg(not(any(unix, all(windows, feature = "cli-clock"))))]
+pub(crate) fn local_offset_at(_unix_secs: i64) -> Option<i64> {
     None
 }
 
-/// dart-sass's stamp for `unix_secs`: `[YYYY-MM-DD HH:MM]`, local time to
-/// the minute. `None` when the local offset cannot be determined, which the
+/// dart-sass's stamp for `unix_secs`: `[YYYY-MM-DD HH:MM:SS]`, local time to
+/// the second. `None` when the local offset cannot be determined, which the
 /// caller renders as no stamp at all rather than as a wrong one.
-#[cfg(unix)]
+///
+/// # Why seconds, when `sass` from npm prints none
+///
+/// dart-sass builds the stamp by stripping a fixed SEVEN characters off
+/// `DateTime.now().toString()` (`sass.dart.js` around the `"Compiled "`
+/// line):
+///
+/// ```js
+///   nowStr = DateTime.now().toString();
+///   timestamp = nowStr.substring(0, nowStr.length - 7);
+/// ```
+///
+/// Seven is `.` plus six microsecond digits, which is what the Dart VM
+/// prints. dart2js prints three fractional digits, so on the npm build the
+/// slice eats `:SS` as well:
+///
+/// ```text
+///   VM       2026-09-22 23:36:00.123456   len 26   -> 2026-09-22 23:36:00
+///   dart2js  2026-09-22 23:36:00.123      len 23   -> 2026-09-22 23:36
+/// ```
+///
+/// So the two distributions of ONE dart version disagree, and the shorter
+/// one is a truncation bug rather than a format: the code intends to drop a
+/// fractional part and keep the seconds. Measured on macOS, same machine,
+/// same second (#190):
+///
+/// ```text
+///   dart native (macos-arm64 release)   [2026-09-22 23:36:00]
+///   dart npm    (dart2js)               [2026-09-22 23:36]
+/// ```
+///
+/// sasso matched the npm build, because every dart measurement in this repo
+/// is taken against it. It matches dart's INTENT now, which is also what a
+/// Windows user sees, and what `brew install sass` gives you.
 pub(crate) fn local_stamp(unix_secs: i64) -> Option<String> {
-    let c = civil::civil_from_unix(unix_secs + local_offset_at(unix_secs)?);
-    Some(format!(
-        "[{:04}-{:02}-{:02} {:02}:{:02}]",
-        c.year, c.month, c.day, c.hour, c.minute
-    ))
+    Some(format_stamp(&civil::civil_from_unix(
+        unix_secs + local_offset_at(unix_secs)?,
+    )))
+}
+
+/// The bracket itself, split out so the fixture test below asserts against
+/// THIS rather than against a second `format!` written to match it. The two
+/// had to agree by inspection before; now there is only one.
+fn format_stamp(c: &civil::Civil) -> String {
+    format!(
+        "[{:04}-{:02}-{:02} {:02}:{:02}:{:02}]",
+        c.year, c.month, c.day, c.hour, c.minute, c.second
+    )
 }
 
 /// Seconds since the Unix epoch, or 0 if the system clock predates it.
@@ -172,11 +232,8 @@ mod tests {
         assert_eq!(off, 10 * 3600 + 1800);
         let c = civil::civil_from_unix(secs + off);
         assert_eq!(
-            format!(
-                "[{:04}-{:02}-{:02} {:02}:{:02}]",
-                c.year, c.month, c.day, c.hour, c.minute
-            ),
-            "[2026-07-15 22:30]",
+            format_stamp(&c),
+            "[2026-07-15 22:30:00]",
             "a half-hour zone must not be rounded to the hour"
         );
     }
@@ -188,12 +245,12 @@ mod tests {
         match local_stamp(now()) {
             None => {}
             Some(s) => {
-                assert_eq!(s.len(), 18, "[YYYY-MM-DD HH:MM] is 18 chars: {s:?}");
+                assert_eq!(s.len(), 21, "[YYYY-MM-DD HH:MM:SS] is 21 chars: {s:?}");
                 assert!(s.starts_with('[') && s.ends_with(']'), "{s:?}");
                 let inner = &s[1..s.len() - 1];
                 let (date, time) = inner.split_once(' ').expect("one space");
                 assert_eq!(date.split('-').count(), 3, "{s:?}");
-                assert_eq!(time.split(':').count(), 2, "minute resolution: {s:?}");
+                assert_eq!(time.split(':').count(), 3, "second resolution: {s:?}");
                 assert!(inner
                     .chars()
                     .all(|c| c.is_ascii_digit() || c == '-' || c == ':' || c == ' '));

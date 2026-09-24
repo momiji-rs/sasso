@@ -13,6 +13,92 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **The binary stamps `--update`/`--watch` on Windows too** (#189). dart prints
+  a timestamp on all three platforms; sasso printed one on two. `local_stamp`
+  learns the local offset by reading `/etc/localtime`, and Windows has no TZif
+  file, so the line came out bare:
+
+  ```
+    dart    [2026-09-23 04:21:49] Compiled stamp.scss to stamp.css.
+    sasso                         Compiled one.scss to one.css.
+  ```
+
+  `std` exposes no local time on any platform, so the offset has to come from
+  FFI or a crate. FFI would need a second `#[allow(unsafe_code)]` — this crate
+  allows one, in `arena`, audited under Miri, and a Win32 call cannot be
+  checked under Miri at all. So: one dependency, Windows only, optional, and
+  behind a default-on `cli-clock` feature.
+
+  Measured by LOCKFILE entries, which is what every platform carries (a
+  lockfile is target-independent, so `cargo tree --target` understates it):
+
+  ```
+    candidate   lockfile   1.74 + windows   ours unsafe   shipped weight
+    chrono          37     builds           no            none
+    time            13     FAILS            no            none
+    jiff            21     builds           no            ~427 KB
+    windows-sys     11     builds           YES           none
+  ```
+
+  `time` is the smallest and unusable: `time-core` ships an edition-2024
+  manifest that Cargo 1.74 cannot parse, so it breaks the MSRV promise on the
+  one platform that resolves it. `jiff` embeds the whole tz database on
+  Windows, which has no system copy — the ~427 KB `src/localtime`'s header had
+  already weighed and rejected, and unlike lockfile metadata it is weight in
+  every shipped binary. `windows-sys` still needs an `unsafe` block at each
+  call site, so it buys a dependency *and* the exemption.
+
+  chrono's 37 are mostly `iana-time-zone`'s other platforms (wasm-bindgen,
+  js-sys, core-foundation-sys) — crates a Windows build never compiles; on
+  Windows `clock` resolves to the platform API, so nothing is embedded.
+
+  `localtime` is a module of the BINARY and the library never refers to it, so
+  a Windows embedder who wants the zero-dependency build asks for
+  `default-features = false` and gets exactly that, at the cost of the stamp.
+  Every other target resolves nothing either way.
+
+  The platform seam stays where the module already put it: only
+  `local_offset_at` differs now, and `local_stamp`, the formatter and the
+  calendar are one implementation for every target. The Windows CI step that
+  pinned the ABSENCE of a stamp — and that was written so a clock would have
+  to fail it — now asserts its presence and its shape, which is the only
+  place the Windows path is ever executed. The MSRV job cross-checks the
+  Windows target from ubuntu, because a host-only check resolves chrono on no
+  platform at all.
+
+- **The `--update`/`--watch` stamp keeps its seconds** (#190). Both front ends
+  printed `[2026-09-23 22:57]`; dart prints `[2026-09-23 22:57:40]`. We had
+  been matching the wrong one of dart's two builds — and the one we matched is
+  wrong by accident. dart-sass builds the stamp by stripping a fixed seven
+  characters off `DateTime.now().toString()`:
+
+  ```js
+    nowStr = DateTime.now().toString();
+    timestamp = nowStr.substring(0, nowStr.length - 7);
+  ```
+
+  Seven is `.` plus six microsecond digits, which is what the Dart VM prints.
+  dart2js prints three, so on the npm build the slice eats `:SS` too:
+
+  ```
+    VM       2026-09-22 23:36:00.123456   len 26   ->  2026-09-22 23:36:00
+    dart2js  2026-09-22 23:36:00.123      len 23   ->  2026-09-22 23:36
+  ```
+
+  So one dart version has two answers, and the shorter is a truncation bug
+  rather than a format: the code means to drop a fractional part and keep the
+  seconds. Every dart measurement in this project is taken against the npm
+  build, which is why this went unnoticed — the native build had never been
+  compared. Both sasso front ends now match dart's intent, which is also what
+  `brew install sass` and every Windows user see:
+
+  ```
+    dart native    [2026-09-23 22:57:40] Compiled one.scss to one.css.
+    dart npm       [2026-09-23 22:57]    Compiled one.scss to one.css.
+    sasso binary   [2026-09-23 22:57:40] Compiled one.scss to one.css.
+    sasso npm      [2026-09-23 22:57:40] Compiled one.scss to one.css.
+  ```
+
 - **The drive-letter pair grammar was three different rules** (#172). A
   `<source>:<destination>` operand is split at the first colon that is not a
   drive letter's, and each front end decided that differently — the binary

@@ -65,6 +65,21 @@ jobs:
       # an edition bump passes it and fails a real 1.74 build.
       - name: cargo check on the oldest supported toolchain
         run: cargo check --lib --bins
+      # The Windows target too, from HERE rather than from the Windows job:
+      # `cargo check --target` needs no linker and no Windows runner, so this
+      # costs ubuntu minutes instead of 2x-billed ones.
+      #
+      # It is the only place the MSRV promise is tested for the one dependency
+      # this crate has. `chrono` is Windows-only (see Cargo.toml), so the check
+      # above resolves it on no platform at all, and a future `chrono` 0.4.x
+      # raising its own MSRV would break `cargo install sasso` on Windows at
+      # 1.74 with nothing in CI noticing. Verified locally on 2026-09-23
+      # against chrono 0.4.45 before this was added, so it starts out green for
+      # a reason rather than by luck.
+      - name: cargo check for Windows on the oldest supported toolchain
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          cargo check --lib --bins --target x86_64-pc-windows-msvc
 
   windows:
     name: windows (build + test)
@@ -157,16 +172,21 @@ jobs:
           Write-Host "skipping $($skips.Count / 2) known failures"
           cargo test --release --no-fail-fast -- @skips
           if ($LASTEXITCODE -ne 0) { throw "cargo test failed" }
-      # The one behaviour that differs by platform rather than merely needing
-      # to work on it: with no tz database to read, the compile line keeps its
-      # text and drops its timestamp. Asserting the ABSENCE is a pin — giving
-      # Windows a clock must fail here rather than change output quietly.
+      # This step used to pin the ABSENCE of a timestamp here, because
+      # `local_stamp` read /etc/localtime and Windows has no TZif file. The
+      # probe above then measured dart on this very runner and dart stamps, so
+      # the absence was a divergence rather than a decision (#189) — and this
+      # step is what failed when the fix landed, which is what it was for.
       #
-      # It pins a KNOWN DIVERGENCE, not a decision. The probe above measured
-      # dart on this very runner on 2026-09-23 and dart stamps; sasso does
-      # not. #189 carries the fix, and this pin is what will fail when it
-      # lands — which is the point of it.
-      - name: --update narrates without a timestamp (pins #189)
+      # It asserts the presence now, and the SHAPE, which is the half no other
+      # job can check: `src/localtime`'s own tests run on a machine whose
+      # offset comes from a tz file, and this is the only place the Windows
+      # path — `chrono::Local` via `local_offset_at` — is ever executed.
+      #
+      # Seconds are part of the shape on purpose (#190): dart's native build
+      # prints them and its dart2js build truncates them away by accident, and
+      # the native build is what a Windows user installs.
+      - name: --update narrates WITH a timestamp (the Windows clock, #189)
         shell: pwsh
         run: |
           Set-Content -Path one.scss -Value 'a {b: c}'
@@ -175,8 +195,16 @@ jobs:
           if ($out -notmatch 'Compiled one\.scss to one\.css\.$') {
             throw "expected dart's wording, got: $out"
           }
-          if ($out -match '^\[') {
-            throw "no tz database is readable here, so there should be no stamp: $out"
+          # `[YYYY-MM-DD HH:MM:SS] ` — anchored at the start, seconds required.
+          # Deliberately not `-match '^\['` alone: that would pass for any
+          # bracket at all, and this step exists to check a shape.
+          if ($out -notmatch '^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ') {
+            throw "expected a [YYYY-MM-DD HH:MM:SS] stamp, got: $out"
+          }
+          # …and that it is a LOCAL reading rather than a constant: the year
+          # has to be this decade, which a zeroed or epoch stamp is not.
+          if ($out -notmatch '^\[20[2-9]\d-') {
+            throw "the stamp does not look like a real local time: $out"
           }
 
   parity:
