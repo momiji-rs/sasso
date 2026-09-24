@@ -73,11 +73,11 @@
 //! tzdata on the host, and give the same answer in five years when these
 //! zones' rules have moved on.
 
-// All four are `#[cfg(unix)]`, along with everything that uses them: on a
-// platform with no tz database to read, a calendar and a TZif parser are
-// dead code, and `-D warnings` is right to say so. The whole module
-// collapses to `now()` and a `local_stamp` that returns None.
-#[cfg(unix)]
+// `civil` is wanted everywhere a stamp is printed — it turns "UTC seconds
+// plus an offset" into a date, and that arithmetic is the same whoever
+// supplied the offset. The other three read the tz database, which only a
+// POSIX machine has, and on any other target they would be dead code that
+// `-D warnings` is right to reject.
 pub(crate) mod civil;
 #[cfg(unix)]
 pub(crate) mod posix;
@@ -122,15 +122,33 @@ pub(crate) fn local_offset_at(unix_secs: i64) -> Option<i64> {
     }
 }
 
-/// No tz database exists to read here, so there is no time to report.
+/// The same question on Windows, asked of the platform instead of a file.
 ///
-/// `None` rather than a UTC stamp: unlike a bare container, a Windows
-/// machine HAS a local zone and we simply cannot see it without FFI or an
-/// embedded copy of the whole database (~427 KB, the way `jiff` does it).
-/// Claiming UTC would be confidently wrong; printing the line without its
-/// bracket is merely less. See #85.
-#[cfg(not(unix))]
-pub(crate) fn local_stamp(_unix_secs: i64) -> Option<String> {
+/// `chrono::Local` rather than FFI, and rather than `windows-sys`: see the
+/// `[target.'cfg(windows)'.dependencies]` comment in `Cargo.toml` for why a
+/// safe-API crate is the cheaper answer than a second `unsafe` exemption.
+/// Nothing else in the crate depends on it and no other target resolves it.
+///
+/// `None` if the instant cannot be represented, which for a stamp of `now()`
+/// means never — but it is the caller's existing "print no time rather than
+/// a wrong one" path, so it costs nothing to keep honest.
+#[cfg(all(windows, feature = "cli-clock"))]
+pub(crate) fn local_offset_at(unix_secs: i64) -> Option<i64> {
+    use chrono::{DateTime, Local, Offset};
+    let utc = DateTime::from_timestamp(unix_secs, 0)?;
+    Some(i64::from(
+        utc.with_timezone(&Local).offset().fix().local_minus_utc(),
+    ))
+}
+
+/// Everything else: the two wasm targets, and a Windows build that opted out
+/// of `cli-clock`.
+///
+/// No clock to ask and no file to read, so the caller prints the line without
+/// its bracket — the behaviour the whole module had on Windows before #189.
+/// A wasm build has no business reading a host clock anyway.
+#[cfg(not(any(unix, all(windows, feature = "cli-clock"))))]
+pub(crate) fn local_offset_at(_unix_secs: i64) -> Option<i64> {
     None
 }
 
@@ -171,7 +189,6 @@ pub(crate) fn local_stamp(_unix_secs: i64) -> Option<String> {
 /// sasso matched the npm build, because every dart measurement in this repo
 /// is taken against it. It matches dart's INTENT now, which is also what a
 /// Windows user sees, and what `brew install sass` gives you.
-#[cfg(unix)]
 pub(crate) fn local_stamp(unix_secs: i64) -> Option<String> {
     Some(format_stamp(&civil::civil_from_unix(
         unix_secs + local_offset_at(unix_secs)?,
@@ -181,7 +198,6 @@ pub(crate) fn local_stamp(unix_secs: i64) -> Option<String> {
 /// The bracket itself, split out so the fixture test below asserts against
 /// THIS rather than against a second `format!` written to match it. The two
 /// had to agree by inspection before; now there is only one.
-#[cfg(unix)]
 fn format_stamp(c: &civil::Civil) -> String {
     format!(
         "[{:04}-{:02}-{:02} {:02}:{:02}:{:02}]",

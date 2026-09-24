@@ -13,6 +13,44 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **The binary stamps `--update`/`--watch` on Windows too** (#189). dart prints
+  a timestamp on all three platforms; sasso printed one on two. `local_stamp`
+  learns the local offset by reading `/etc/localtime`, and Windows has no TZif
+  file, so the line came out bare:
+
+  ```
+    dart    [2026-09-23 04:21:49] Compiled stamp.scss to stamp.css.
+    sasso                         Compiled one.scss to one.css.
+  ```
+
+  `std` exposes no local time on any platform, so the offset has to come from
+  FFI or a crate. FFI would need a second `#[allow(unsafe_code)]` — this crate
+  allows one, in `arena`, audited under Miri, and a Win32 call cannot be
+  checked under Miri at all. So: one dependency, Windows only, optional, and
+  behind a default-on `cli-clock` feature. Measured with `cargo tree -e
+  normal`:
+
+  ```
+    windows msvc, default                 3 runtime crates
+    windows msvc, --no-default-features   0
+    aarch64-apple-darwin                  0
+    wasm32-wasip1                         0
+  ```
+
+  `localtime` is a module of the BINARY and the library never refers to it, so
+  a Windows embedder who wants the zero-dependency build asks for
+  `default-features = false` and gets exactly that, at the cost of the stamp.
+  Every other target resolves nothing either way.
+
+  The platform seam stays where the module already put it: only
+  `local_offset_at` differs now, and `local_stamp`, the formatter and the
+  calendar are one implementation for every target. The Windows CI step that
+  pinned the ABSENCE of a stamp — and that was written so a clock would have
+  to fail it — now asserts its presence and its shape, which is the only
+  place the Windows path is ever executed. The MSRV job cross-checks the
+  Windows target from ubuntu, because a host-only check resolves chrono on no
+  platform at all.
+
 - **The `--update`/`--watch` stamp keeps its seconds** (#190). Both front ends
   printed `[2026-09-23 22:57]`; dart prints `[2026-09-23 22:57:40]`. We had
   been matching the wrong one of dart's two builds — and the one we matched is
