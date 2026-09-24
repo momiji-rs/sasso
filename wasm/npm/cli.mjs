@@ -1324,7 +1324,7 @@ function parseJobs(positionals, output) {
  * dart's one-line report for `--update` and `--watch`, the only thing either
  * flag says back to a person who leaves it running:
  *
- *     [2026-09-19 12:58] Compiled src/one.scss to out/one.css.
+ *     [2026-09-19 12:58:07] Compiled src/one.scss to out/one.css.
  *
  * Measured against dart-sass 1.104.1 on 2026-09-19 — local time to the
  * minute, on STDOUT, one line per file actually written. A skipped output
@@ -1341,7 +1341,15 @@ function parseJobs(positionals, output) {
 function compiledLine(input, output) {
   const d = new Date();
   const p2 = (n) => String(n).padStart(2, "0");
-  const stamp = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+  // To the SECOND, like the binary and like dart's own VM build. `sass` from
+  // npm prints only the minute, but that is dart-sass truncating
+  // `DateTime.now().toString()` by a fixed seven characters — right for the
+  // VM's six microsecond digits, one field too many for dart2js's three
+  // (#190). Matching the bug would mean two sasso front ends disagreeing to
+  // mirror two dart builds disagreeing.
+  const stamp =
+    `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ` +
+    `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
   return `[${stamp}] Compiled ${input === "-" ? "stdin" : input} to ${output}.\n`;
 }
 

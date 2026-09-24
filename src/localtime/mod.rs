@@ -4,7 +4,7 @@
 //! dart-sass stamps it with the local time:
 //!
 //! ```text
-//! [2026-09-19 12:58] Compiled src/one.scss to out/one.css.
+//! [2026-09-19 12:58:07] Compiled src/one.scss to out/one.css.
 //! ```
 //!
 //! `std` gives UTC seconds and nothing else — no calendar, no timezone — so
@@ -134,16 +134,59 @@ pub(crate) fn local_stamp(_unix_secs: i64) -> Option<String> {
     None
 }
 
-/// dart-sass's stamp for `unix_secs`: `[YYYY-MM-DD HH:MM]`, local time to
-/// the minute. `None` when the local offset cannot be determined, which the
+/// dart-sass's stamp for `unix_secs`: `[YYYY-MM-DD HH:MM:SS]`, local time to
+/// the second. `None` when the local offset cannot be determined, which the
 /// caller renders as no stamp at all rather than as a wrong one.
+///
+/// # Why seconds, when `sass` from npm prints none
+///
+/// dart-sass builds the stamp by stripping a fixed SEVEN characters off
+/// `DateTime.now().toString()` (`sass.dart.js` around the `"Compiled "`
+/// line):
+///
+/// ```js
+///   nowStr = DateTime.now().toString();
+///   timestamp = nowStr.substring(0, nowStr.length - 7);
+/// ```
+///
+/// Seven is `.` plus six microsecond digits, which is what the Dart VM
+/// prints. dart2js prints three fractional digits, so on the npm build the
+/// slice eats `:SS` as well:
+///
+/// ```text
+///   VM       2026-09-22 23:36:00.123456   len 26   -> 2026-09-22 23:36:00
+///   dart2js  2026-09-22 23:36:00.123      len 23   -> 2026-09-22 23:36
+/// ```
+///
+/// So the two distributions of ONE dart version disagree, and the shorter
+/// one is a truncation bug rather than a format: the code intends to drop a
+/// fractional part and keep the seconds. Measured on macOS, same machine,
+/// same second (#190):
+///
+/// ```text
+///   dart native (macos-arm64 release)   [2026-09-22 23:36:00]
+///   dart npm    (dart2js)               [2026-09-22 23:36]
+/// ```
+///
+/// sasso matched the npm build, because every dart measurement in this repo
+/// is taken against it. It matches dart's INTENT now, which is also what a
+/// Windows user sees, and what `brew install sass` gives you.
 #[cfg(unix)]
 pub(crate) fn local_stamp(unix_secs: i64) -> Option<String> {
-    let c = civil::civil_from_unix(unix_secs + local_offset_at(unix_secs)?);
-    Some(format!(
-        "[{:04}-{:02}-{:02} {:02}:{:02}]",
-        c.year, c.month, c.day, c.hour, c.minute
-    ))
+    Some(format_stamp(&civil::civil_from_unix(
+        unix_secs + local_offset_at(unix_secs)?,
+    )))
+}
+
+/// The bracket itself, split out so the fixture test below asserts against
+/// THIS rather than against a second `format!` written to match it. The two
+/// had to agree by inspection before; now there is only one.
+#[cfg(unix)]
+fn format_stamp(c: &civil::Civil) -> String {
+    format!(
+        "[{:04}-{:02}-{:02} {:02}:{:02}:{:02}]",
+        c.year, c.month, c.day, c.hour, c.minute, c.second
+    )
 }
 
 /// Seconds since the Unix epoch, or 0 if the system clock predates it.
@@ -172,11 +215,8 @@ mod tests {
         assert_eq!(off, 10 * 3600 + 1800);
         let c = civil::civil_from_unix(secs + off);
         assert_eq!(
-            format!(
-                "[{:04}-{:02}-{:02} {:02}:{:02}]",
-                c.year, c.month, c.day, c.hour, c.minute
-            ),
-            "[2026-07-15 22:30]",
+            format_stamp(&c),
+            "[2026-07-15 22:30:00]",
             "a half-hour zone must not be rounded to the hour"
         );
     }
@@ -188,12 +228,12 @@ mod tests {
         match local_stamp(now()) {
             None => {}
             Some(s) => {
-                assert_eq!(s.len(), 18, "[YYYY-MM-DD HH:MM] is 18 chars: {s:?}");
+                assert_eq!(s.len(), 21, "[YYYY-MM-DD HH:MM:SS] is 21 chars: {s:?}");
                 assert!(s.starts_with('[') && s.ends_with(']'), "{s:?}");
                 let inner = &s[1..s.len() - 1];
                 let (date, time) = inner.split_once(' ').expect("one space");
                 assert_eq!(date.split('-').count(), 3, "{s:?}");
-                assert_eq!(time.split(':').count(), 2, "minute resolution: {s:?}");
+                assert_eq!(time.split(':').count(), 3, "second resolution: {s:?}");
                 assert!(inner
                     .chars()
                     .all(|c| c.is_ascii_digit() || c == '-' || c == ':' || c == ' '));

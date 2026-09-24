@@ -13,6 +13,39 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **The `--update`/`--watch` stamp keeps its seconds** (#190). Both front ends
+  printed `[2026-09-23 22:57]`; dart prints `[2026-09-23 22:57:40]`. We had
+  been matching the wrong one of dart's two builds — and the one we matched is
+  wrong by accident. dart-sass builds the stamp by stripping a fixed seven
+  characters off `DateTime.now().toString()`:
+
+  ```js
+    nowStr = DateTime.now().toString();
+    timestamp = nowStr.substring(0, nowStr.length - 7);
+  ```
+
+  Seven is `.` plus six microsecond digits, which is what the Dart VM prints.
+  dart2js prints three, so on the npm build the slice eats `:SS` too:
+
+  ```
+    VM       2026-09-22 23:36:00.123456   len 26   ->  2026-09-22 23:36:00
+    dart2js  2026-09-22 23:36:00.123      len 23   ->  2026-09-22 23:36
+  ```
+
+  So one dart version has two answers, and the shorter is a truncation bug
+  rather than a format: the code means to drop a fractional part and keep the
+  seconds. Every dart measurement in this project is taken against the npm
+  build, which is why this went unnoticed — the native build had never been
+  compared. Both sasso front ends now match dart's intent, which is also what
+  `brew install sass` and every Windows user see:
+
+  ```
+    dart native    [2026-09-23 22:57:40] Compiled one.scss to one.css.
+    dart npm       [2026-09-23 22:57]    Compiled one.scss to one.css.
+    sasso binary   [2026-09-23 22:57:40] Compiled one.scss to one.css.
+    sasso npm      [2026-09-23 22:57:40] Compiled one.scss to one.css.
+  ```
+
 - **The drive-letter pair grammar was three different rules** (#172). A
   `<source>:<destination>` operand is split at the first colon that is not a
   drive letter's, and each front end decided that differently — the binary
