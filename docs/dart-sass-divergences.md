@@ -49,6 +49,48 @@ sasso   --no-source-map t.scss
 binary when `SASSO_PARITY=1 SASS_BIN=<path>` is set, so an expectation cannot
 silently drift away from the reference.
 
+### Which dart-sass 1.104.1?
+
+There are two, and they do not agree about everything. `npm install sass` gives
+the **dart2js** build; the GitHub release archives, `brew install sass` and the
+standalone installers give the **native** one. Every measurement in this repo
+is taken against the npm build, which is what the snippet above pins — so where
+the two differ, a row here describes the dart2js answer unless it says
+otherwise.
+
+Swept on 2026-09-24 over 19 commands (compile, parse error, eval error, missing
+dependency, `@warn`, `@debug`, color output, `math.div`, `--style=compressed`,
+`--indented`, `--help`, a bad flag, a bad pair, a missing file, source maps,
+`--embed-sources`, `--quiet`, `--stdin`, `--version`). **Three differ, from two
+causes:**
+
+| | native | dart2js (npm) |
+|---|---|---|
+| `--version` | `1.104.1` | `1.104.1 compiled with dart2js 3.13.3` |
+| a file it cannot read | `Error reading x.scss: Cannot open file.` | `Error reading x.scss: no such file or directory.` |
+
+The second is dart2js surfacing Node's `errno` string where the VM prints
+Dart's own `FileSystemException` message. **sasso matches the native build**
+there, on both front ends — so a comparison against the npm build reads as a
+divergence and is not one:
+
+```
+  dart native    Error reading no-such.scss: Cannot open file.
+  dart npm       Error reading no-such.scss: no such file or directory.
+  sasso binary   Error reading no-such.scss: Cannot open file.
+  sasso npm      Error reading no-such.scss: Cannot open file.
+```
+
+The `--update`/`--watch` timestamp was a third case and is fixed: the npm build
+prints `[YYYY-MM-DD HH:MM]` because dart-sass truncates
+`DateTime.now().toString()` by a fixed seven characters — right for the VM's
+six microsecond digits, one field too many for dart2js's three. sasso had
+matched the truncation; it prints `[YYYY-MM-DD HH:MM:SS]` now, like the native
+build ([#190](https://github.com/momiji-rs/sasso/issues/190)).
+
+Everything else in the sweep was byte-identical, so the npm build remains a
+sound oracle for output — just not for I/O error text or the version banner.
+
 ---
 
 ## 1. Compiled output
