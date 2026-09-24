@@ -49,6 +49,78 @@ sasso   --no-source-map t.scss
 binary when `SASSO_PARITY=1 SASS_BIN=<path>` is set, so an expectation cannot
 silently drift away from the reference.
 
+### Which dart-sass 1.104.1?
+
+There are two, and they do not agree about everything. `npm install sass` gives
+the **dart2js** build; the GitHub release archives, `brew install sass` and the
+standalone installers give the **native** one. Every measurement in this repo
+is taken against the npm build, which is what the snippet above pins — so where
+the two differ, a row here describes the dart2js answer unless it says
+otherwise.
+
+Swept on 2026-09-24 over **22 commands in two groups**, because output that
+contains a clock cannot be compared the same way as output that does not.
+
+**Group 1 — 19 commands, compared by exact equality.** Compile to stdout, parse
+error, eval error, missing dependency, `@warn`, `@debug`, color output,
+`math.div`, `--style=compressed`, `--indented`, `--help`, a bad flag, a bad
+pair, a missing file, source maps, `--embed-sources`, `--quiet`, `--stdin`,
+`--version`. **Three differ, from two causes:**
+
+| | native | dart2js (npm) |
+|---|---|---|
+| `--version` | `1.104.1` | `1.104.1 compiled with dart2js 3.13.3` |
+| a file it cannot read | `Error reading x.scss: Cannot open file.` | `Error reading x.scss: no such file or directory.` |
+
+(Two of the three are the same cause: `a:b:c:d` and a plainly missing file both
+fail to open something.) The second row is dart2js surfacing Node's `errno`
+string where the VM prints Dart's own `FileSystemException` message. **sasso
+matches the native build** there, on both front ends — so a comparison against
+the npm build reads as a divergence and is not one:
+
+```
+  dart native    Error reading no-such.scss: Cannot open file.
+  dart npm       Error reading no-such.scss: no such file or directory.
+  sasso binary   Error reading no-such.scss: Cannot open file.
+  sasso npm      Error reading no-such.scss: Cannot open file.
+```
+
+**Group 2 — the 3 `--update` commands**, kept separate because the one that
+narrates prints a clock, and no by-equality sweep can include that: the two
+runs happen at different instants, so the line always differs. Compared with
+any stamp masked to `[STAMP]`, and the stamp's own shape reported separately:
+
+```
+  --update (writes a file)   same once masked   native [NNNN-NN-NN NN:NN:NN]
+                                                npm    [NNNN-NN-NN NN:NN]
+  --update --quiet           same               no output at all
+  --update (to stdout)       same               refused, identically
+```
+
+Only the first actually carries a stamp, for two different reasons worth
+knowing before reproducing this: `--quiet` suppresses the narration outright,
+and `--update` to stdout is refused by both builds with `--update is not
+allowed when printing to stdout.` (Narration is an `--update`/`--watch`
+behaviour in the first place — a plain compile to a file prints nothing.)
+
+So the **third** cause, and the only one that ever affected compiled-adjacent
+output: dart-sass truncates `DateTime.now().toString()` by a fixed seven
+characters — right for the VM's six microsecond digits, one field too many for
+dart2js's three. sasso had matched the truncation; it prints
+`[YYYY-MM-DD HH:MM:SS]` now, like the native build
+([#190](https://github.com/momiji-rs/sasso/issues/190)). `--watch` narrates
+through the same code path and is not separately swept because it does not
+terminate.
+
+Reproduction trap, since it produced a wrong answer the first time: give each
+binary its **own** directory. `--update` narrates only when it actually writes,
+so a shared directory lets the first run satisfy the second, which then prints
+nothing and looks like a difference.
+
+Everything else in both groups was byte-identical, so the npm build remains a
+sound oracle for output — just not for I/O error text, the version banner, or
+the timestamp.
+
 ---
 
 ## 1. Compiled output
