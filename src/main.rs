@@ -3205,8 +3205,8 @@ fn file_url(abs: &Path) -> String {
 ///
 /// | caller | `None` means | direction |
 /// |---|---|---|
-/// | [`Compiler::loaded_paths`] — `--update` freshness | "unknowable input, rebuild" | safe: costs one extra write |
-/// | [`Compiler::load`] — the watch's pre-read stamp | no stamp is recorded for that file | NOT safe: a save landing mid-read is not seen |
+/// | [`RecordingImporter::loaded_paths`] — `--update` freshness | "unknowable input, rebuild" | safe: costs one extra write |
+/// | [`RecordingImporter::load`] — the watch's pre-read stamp | no stamp is recorded for that file | NOT safe: a save landing mid-read is not seen |
 ///
 /// Latent rather than live, because the `file:` arm below is unreachable
 /// today: `FsImporter`'s canonical form IS the absolute filesystem path, so
@@ -3250,10 +3250,35 @@ mod url_to_path_tests {
         url_to_path(url)
     }
 
+    /// An absolute path, spelled the way THIS platform spells one.
+    ///
+    /// `/w/a` is not absolute on Windows: `Path::is_absolute` wants a prefix
+    /// as well as a root there, so a bare rooted path answers `false`. The
+    /// function under test asks the host (`is_absolute`, and `file_url_to_path`
+    /// through `pathstyle::HOST`), so its tests have to as well — a POSIX
+    /// spelling here would pass on this machine and fail the Windows job.
+    #[cfg(unix)]
+    const ABS: &str = "/w/src/a.scss";
+    #[cfg(windows)]
+    const ABS: &str = r"C:\w\src\a.scss";
+
+    /// A decoded `file:` URL, spelled for this platform: `pathstyle` emits
+    /// `\` under `Style::Windows` and roots a driveless path at `\`.
+    fn want(posix: &str) -> Option<PathBuf> {
+        #[cfg(unix)]
+        {
+            Some(PathBuf::from(posix))
+        }
+        #[cfg(windows)]
+        {
+            Some(PathBuf::from(posix.replace('/', "\\")))
+        }
+    }
+
     /// The arm that actually runs: a canonical IS an absolute path.
     #[test]
     fn an_absolute_path_is_its_own_answer() {
-        assert_eq!(at("/w/src/a.scss"), Some(PathBuf::from("/w/src/a.scss")));
+        assert_eq!(at(ABS), Some(PathBuf::from(ABS)));
         // …and a relative one names nothing to stat.
         assert_eq!(at("src/a.scss"), None);
         assert_eq!(at(""), None);
@@ -3272,29 +3297,66 @@ mod url_to_path_tests {
     /// The `file:` arm, through the shared decoder.
     #[test]
     fn a_file_url_decodes_the_way_the_rest_of_the_crate_does() {
-        assert_eq!(at("file:///w/a.scss"), Some(PathBuf::from("/w/a.scss")));
+        assert_eq!(at("file:///w/a.scss"), want("/w/a.scss"));
         // A space arrives percent-encoded; a path that keeps `%20` is a path
         // nobody has.
-        assert_eq!(
-            at("file:///my%20docs/a.scss"),
-            Some(PathBuf::from("/my docs/a.scss"))
-        );
+        assert_eq!(at("file:///my%20docs/a.scss"), want("/my docs/a.scss"));
     }
 
     /// The drift this file's own copy had, now impossible to have on one side:
     /// `localhost` is this machine, exactly as the empty authority is.
     #[test]
     fn a_localhost_authority_is_this_machine() {
-        assert_eq!(at("file://localhost/w/a.scss"), Some(PathBuf::from("/w/a.scss")));
+        assert_eq!(at("file://localhost/w/a.scss"), want("/w/a.scss"));
     }
 
-    /// A UNC authority is a Windows spelling. On POSIX there is no such path,
-    /// and `None` is the safe answer for both callers; the old copy here
-    /// refused it on every platform, including the one that can open it.
+    /// A UNC authority is a Windows spelling: no such path exists on POSIX,
+    /// and `None` is the safe answer there for both callers.
     #[test]
     #[cfg(unix)]
     fn a_unc_authority_is_not_a_posix_path() {
         assert_eq!(at("file://server/share/a.scss"), None);
+    }
+
+    /// …and on Windows it IS a path. The copy this file used to carry refused
+    /// it on every platform, including the one that can open it — which is
+    /// half of #188 and the half no POSIX machine can check.
+    #[test]
+    #[cfg(windows)]
+    fn a_unc_authority_is_a_windows_path() {
+        assert_eq!(
+            at("file://server/share/a.scss"),
+            Some(PathBuf::from(r"\\server\share\a.scss"))
+        );
+    }
+
+    /// The strings the `#[cfg(windows)]` arms above assert, pinned HERE —
+    /// on every platform.
+    ///
+    /// Those arms run on one machine in CI and on none of ours, so their
+    /// expected values are predictions. `Style` is a value precisely so a
+    /// prediction like that can be checked anywhere: this asserts the same
+    /// four answers against `Style::Windows` directly, and it caught the
+    /// first draft of the UNC arm above, which had `\\\\server` — a raw
+    /// string does not process escapes, so the literal carried four
+    /// backslashes where the path has two.
+    ///
+    /// `want()` is the same rule as a `/` -> `\` replacement, which is why
+    /// the first three can be written that way and the UNC one cannot.
+    #[test]
+    fn the_windows_arms_expect_what_the_windows_rules_produce() {
+        use crate::pathstyle::{file_url_path, Style};
+        let win = |url: &str| file_url_path(Style::Windows, url);
+        assert_eq!(win("file:///w/a.scss").as_deref(), Some(r"\w\a.scss"));
+        assert_eq!(win("file://localhost/w/a.scss").as_deref(), Some(r"\w\a.scss"));
+        assert_eq!(
+            win("file:///my%20docs/a.scss").as_deref(),
+            Some(r"\my docs\a.scss")
+        );
+        assert_eq!(
+            win("file://server/share/a.scss").as_deref(),
+            Some(r"\\server\share\a.scss")
+        );
     }
 
     /// Undecodable bytes are refused rather than substituted: a name with
