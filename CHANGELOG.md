@@ -27,15 +27,30 @@ Conformance is tracked separately as a ratchet against the official
   FFI or a crate. FFI would need a second `#[allow(unsafe_code)]` — this crate
   allows one, in `arena`, audited under Miri, and a Win32 call cannot be
   checked under Miri at all. So: one dependency, Windows only, optional, and
-  behind a default-on `cli-clock` feature. Measured with `cargo tree -e
-  normal`:
+  behind a default-on `cli-clock` feature.
+
+  Measured by LOCKFILE entries, which is what every platform carries (a
+  lockfile is target-independent, so `cargo tree --target` understates it):
 
   ```
-    windows msvc, default                 3 runtime crates
-    windows msvc, --no-default-features   0
-    aarch64-apple-darwin                  0
-    wasm32-wasip1                         0
+    candidate   lockfile   1.74 + windows   ours unsafe   shipped weight
+    chrono          37     builds           no            none
+    time            13     FAILS            no            none
+    jiff            21     builds           no            ~427 KB
+    windows-sys     11     builds           YES           none
   ```
+
+  `time` is the smallest and unusable: `time-core` ships an edition-2024
+  manifest that Cargo 1.74 cannot parse, so it breaks the MSRV promise on the
+  one platform that resolves it. `jiff` embeds the whole tz database on
+  Windows, which has no system copy — the ~427 KB `src/localtime`'s header had
+  already weighed and rejected, and unlike lockfile metadata it is weight in
+  every shipped binary. `windows-sys` still needs an `unsafe` block at each
+  call site, so it buys a dependency *and* the exemption.
+
+  chrono's 37 are mostly `iana-time-zone`'s other platforms (wasm-bindgen,
+  js-sys, core-foundation-sys) — crates a Windows build never compiles; on
+  Windows `clock` resolves to the platform API, so nothing is embedded.
 
   `localtime` is a module of the BINARY and the library never refers to it, so
   a Windows embedder who wants the zero-dependency build asks for

@@ -124,14 +124,15 @@ pub(crate) fn local_offset_at(unix_secs: i64) -> Option<i64> {
 
 /// The same question on Windows, asked of the platform instead of a file.
 ///
-/// `chrono::Local` rather than FFI, and rather than `windows-sys`: see the
-/// `[target.'cfg(windows)'.dependencies]` comment in `Cargo.toml` for why a
-/// safe-API crate is the cheaper answer than a second `unsafe` exemption.
-/// Nothing else in the crate depends on it and no other target resolves it.
+/// A safe-API crate rather than our own FFI, and chrono rather than the three
+/// smaller-looking alternatives: the
+/// `[target.'cfg(windows)'.dependencies]` comment in `Cargo.toml` has the
+/// measured table and why each of the others is disqualified. `clock`
+/// resolves to the Windows API here, so nothing is embedded in the binary.
 ///
-/// `None` if the instant cannot be represented, which for a stamp of `now()`
-/// means never — but it is the caller's existing "print no time rather than
-/// a wrong one" path, so it costs nothing to keep honest.
+/// `None` if the instant falls outside chrono's range, which a stamp of
+/// `now()` never does — but it is the caller's existing "print no time rather
+/// than a wrong one" path, so it costs nothing to stay honest about it.
 #[cfg(all(windows, feature = "cli-clock"))]
 pub(crate) fn local_offset_at(unix_secs: i64) -> Option<i64> {
     use chrono::{DateTime, Local, Offset};

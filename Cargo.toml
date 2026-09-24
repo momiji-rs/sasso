@@ -66,31 +66,43 @@ path = "src/main.rs"
 #
 # `windows-sys` is NOT the way to do that: it declares the `extern "system"`
 # functions but every call site still needs an `unsafe` block, so it buys a
-# dependency and the exemption. chrono's `Local` is a safe API. Measured
-# trees for the msvc target on 2026-09-23, all safe-API:
+# dependency AND the exemption. What is needed is a crate with a SAFE
+# local-time API, and there are three. Measured 2026-09-23:
 #
-#   chrono (clock, no default)   3 runtime crates  (+ autocfg, build-only)
-#   jiff                         5
-#   time (local-offset)          5
+#   candidate   lockfile   1.74 + windows   ours unsafe   shipped weight
+#   chrono          37     builds           no            none
+#   time            13     FAILS            no            none
+#   jiff            21     builds           no            ~427 KB
+#   windows-sys     11     builds           YES           none
 #
-# Measured in situ with `cargo tree -e normal` (runtime deps only; the
-# unfiltered tree is dominated by dev-deps nobody downstream builds):
+# LOCKFILE entries, not `cargo tree`: a lockfile is target-independent, so it
+# records every dependency a crate declares for every platform, including ones
+# we never build. `cargo tree -e normal --target x86_64-pc-windows-msvc` says
+# chrono costs 3 crates, which is true of a Windows BUILD and wrong about the
+# file every platform carries. The napi workspace's staleness check caught that.
 #
-#   windows msvc, default               3 runtime crates
-#   windows msvc, --no-default-features 0
-#   aarch64-apple-darwin                0
-#   wasm32-wasip1                       0
+# `time` is the smallest and cannot be used: `time-core` ships an edition-2024
+# manifest, which Cargo 1.74 refuses to parse, so it breaks the MSRV promise on
+# the one platform that would resolve it — and the MSRV job would not have
+# noticed, because it resolves this dependency on no platform at all. (It does
+# now; see the `msrv` job.)
 #
-# The three are chrono, num-traits and windows-link. Checked at the MSRV for
-# this target too — the `msrv` job cross-checks it from ubuntu, because the
-# host-only check resolves chrono on no platform at all.
+# `jiff` embeds the whole tz database on Windows, which has no system copy —
+# jiff's own docs say so. That is the ~427 KB this module's header already
+# weighed and rejected for one log line, and unlike a lockfile entry it is
+# weight in every shipped binary.
+#
+# So: chrono, whose cost is 37 lines of lockfile metadata and nothing in the
+# binary, because `clock` resolves to the Windows API here. The 37 are mostly
+# iana-time-zone's other platforms (wasm-bindgen, js-sys, core-foundation-sys,
+# android_system_properties) — crates this build never compiles.
 #
 # OPTIONAL, behind a default-on feature, because `localtime` is a module of
 # the BINARY and the library never refers to it — but a target dependency
-# belongs to the package, so without this a Windows EMBEDDER would carry
-# chrono in their graph for a clock they never call. `default-features =
-# false` gives them the zero-dependency build the README promises; the
-# binary, and anyone who just runs `cargo install sasso`, keeps its stamp.
+# belongs to the package, so without this a Windows EMBEDDER would carry it in
+# their graph for a clock they never call. `default-features = false` gives
+# them the zero-dependency build the README promises; the binary, and anyone
+# who just runs `cargo install sasso`, keeps its stamp.
 [target.'cfg(windows)'.dependencies]
 chrono = { version = "0.4", default-features = false, features = [
   "clock",
