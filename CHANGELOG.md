@@ -11,6 +11,67 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Fixed
+
+- **The drive-letter pair grammar was three different rules** (#172). A
+  `<source>:<destination>` operand is split at the first colon that is not a
+  drive letter's, and each front end decided that differently — the binary
+  only on Windows (`cfg!(windows)`, so a POSIX run took the false branch and
+  no test ran on Windows to take the other), the npm CLI on every platform but
+  only when a separator followed (`C:\`, not `C:`), and dart on every platform
+  with no separator required. Measured against dart-sass 1.104.1 on macOS:
+
+  ```
+    operand                 dart          binary before   npm CLI before
+    C:\in.scss              one path      pair C+\in…     one path
+    C:in.scss               one path      pair C+in…      pair C+in…
+    C:\in.scss:C:\out.css   pair          one-":" error   pair
+    in.scss:C:\out.css      pair          one-":" error   pair
+    a:b                     one path      pair a+b        pair a+b
+    a:b:c                   pair a:b+c    one-":" error   one-":" error
+  ```
+
+  All three agree now, on exit code, on what is written, and on the message.
+  Two consequences worth stating: `sasso C:\in.scss` compiles that file
+  instead of failing to read a file called `C`, and a POSIX directory named
+  with a single letter can no longer be the source of a pair — `a:b` is one
+  path, as it already was on Windows and as dart has it everywhere.
+
+  The `may only contain one ":"` message quoted the operand with `{:?}`, which
+  escapes a backslash, so the message for the operand this rule exists for came
+  out naming `C:\\in.scss…` — two backslashes where the user typed one. It
+  prints what the user typed now, as dart and the npm CLI already did.
+
+  The grammar had no test anywhere before this: no `C:\` literal existed under
+  `tests/`, and the binary's rule was `cfg!`-gated, so a POSIX run could not
+  reach it and the Windows job had nothing to run. It is platform-independent
+  now, so the cases run everywhere.
+
+- **The nested-destination rule is checkable off Windows** (#172). `path_key`
+  folds case on Windows — where dart lowercases each part of a canonical, so
+  `Src` and `src` name one directory — and it was `#[cfg(windows)]`-gated, so
+  the fold existed only in a build no test ran. The rule it serves ("is this
+  file inside the destination, and would a second run mirror the output tree
+  into itself") therefore had no case at all.
+
+  The fold is a value now: `path_key_in(style, path)` is the one
+  style-dependent step, and the two rules built on it — `key_inside` and
+  `dest_nested_in_src` — are pure comparisons of its output, so a test keys
+  with `Style::Windows` and asks the Windows question on any host. Keeping the
+  keying out of the comparisons is also what lets the directory walk key the
+  destination once rather than once per file.
+
+  Behaviour is unchanged; the POSIX column is measured against dart-sass
+  1.104.1 on macOS, with a stylesheet already in the destination:
+
+  ```
+    sass Src:src/css  ->  src/css/a.css AND src/css/css/old.css
+    sass src:src/css  ->  src/css/a.css only
+  ```
+
+  The first row is the proof that dart does not fold off Windows even on a
+  case-insensitive volume, where `Src/` and `src/` are one directory on disk.
+
 ### Changed
 
 - **One `file:` URL decoder instead of two** (#163). `src/pathstyle.rs`

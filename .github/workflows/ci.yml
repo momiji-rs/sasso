@@ -81,7 +81,7 @@ jobs:
       # the command line is reported `src\entry.scss` (#151). Non-blocking and
       # printed in full, so a download hiccup does not fail the build and a
       # disagreement is visible without one.
-      - name: dart-sass frame-separator probe (informational)
+      - name: dart-sass probes (informational)
         continue-on-error: true
         shell: pwsh
         run: |
@@ -113,6 +113,36 @@ jobs:
               Write-Host "neither spelling of $f in the transcript -- read it above"
             }
           }
+          # --- does dart stamp the --update narration HERE? (#189) ----------
+          #
+          # ANSWERED, 2026-09-23, by this step's first run: it does.
+          #
+          #   [2026-09-23 04:21:49] Compiled stamp.scss to stamp.css.
+          #
+          # sasso prints `Compiled …` alone here — `local_stamp` reads
+          # /etc/localtime or $TZ and Windows has neither — so the pin below
+          # is recording a DIVERGENCE, not a decision. #189 carries it.
+          #
+          # Kept running because dart is the thing being tracked, not us: if
+          # a future dart stops stamping, the fix in #189 becomes wrong and
+          # this is what says so. The match is deliberately loose after the
+          # minutes — the native build prints `HH:MM:SS` and the dart2js npm
+          # build prints `HH:MM` (#190), and requiring `]` right after the
+          # minutes is what made this step's first run report the OPPOSITE of
+          # what it had just printed.
+          Set-Content -Path probe/stamp.scss -Value 'a {b: c}'
+          Push-Location probe
+          $upd = & ../dart-sass-dist/dart-sass/sass.bat --no-source-map --update stamp.scss:stamp.css 2>&1 | Out-String
+          Pop-Location
+          Write-Host "--- dart --update, on this runner ---"
+          Write-Host $upd
+          if ($upd -match '\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}') {
+            Write-Host "dart STAMPS on Windows, as of the 2026-09-23 measurement -- the pin below records the divergence in #189"
+          } elseif ($upd -match 'Compiled ') {
+            Write-Host "dart NO LONGER stamps on Windows -- this changed since 2026-09-23; #189's fix would now be wrong"
+          } else {
+            Write-Host "dart narrated nothing to match against -- read the transcript above"
+          }
       # `--no-fail-fast` because the first Windows run stopped at the library
       # unit tests and never reached a single integration suite, on a platform
       # where none of them had ever run. The ledger it reads names every test
@@ -129,10 +159,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cargo test failed" }
       # The one behaviour that differs by platform rather than merely needing
       # to work on it: with no tz database to read, the compile line keeps its
-      # text and drops its timestamp. Asserting the ABSENCE is a pin — adding
-      # a Windows clock (#85, #86) must fail here rather than change output
-      # quietly.
-      - name: --update narrates without a timestamp
+      # text and drops its timestamp. Asserting the ABSENCE is a pin — giving
+      # Windows a clock must fail here rather than change output quietly.
+      #
+      # It pins a KNOWN DIVERGENCE, not a decision. The probe above measured
+      # dart on this very runner on 2026-09-23 and dart stamps; sasso does
+      # not. #189 carries the fix, and this pin is what will fail when it
+      # lands — which is the point of it.
+      - name: --update narrates without a timestamp (pins #189)
         shell: pwsh
         run: |
           Set-Content -Path one.scss -Value 'a {b: c}'

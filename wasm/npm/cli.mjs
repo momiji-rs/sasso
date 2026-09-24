@@ -1084,9 +1084,20 @@ function reportFailure(outPath, opts, message, mayCreate = true) {
   }
 }
 
-/** The `:` index separating `<input>:<output>` (skips a leading drive letter). */
+/**
+ * The `:` index separating `<input>:<output>`, skipping a leading drive
+ * letter's colon.
+ *
+ * No separator is required after the drive colon. `C:in.scss` is
+ * drive-RELATIVE — the current directory on C:, which a process tracks per
+ * drive — and dart reads it as one path, not as the pair `C` + `in.scss`.
+ * Requiring `[\\/]` here made this the third spelling of one rule: the binary
+ * gated it on `cfg!(windows)`, this asked for a separator, dart asks for
+ * neither (#172). All three answered differently for `C:in.scss`, `a:b` and
+ * `a:b:c`.
+ */
 function colonIndex(p) {
-  return p.indexOf(":", /^[a-zA-Z]:[\\/]/.test(p) ? 2 : 0);
+  return p.indexOf(":", /^[a-zA-Z]:/.test(p) ? 2 : 0);
 }
 /**
  * The key two paths are compared BY. On Windows the filesystem is

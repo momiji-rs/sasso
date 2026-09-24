@@ -1462,6 +1462,114 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   rejects(["--jobs", "0"], "--jobs expects a positive integer");
   rejects(["--loop", "nope"], "--loop expects a positive integer");
 
+  // --- the drive-letter pair grammar (#172) ---------------------------------
+  //
+  // A colon at index 1 after an ASCII letter is a drive letter's, not the pair
+  // separator, on EVERY platform — dart asks the same question everywhere and
+  // so must both sasso CLIs, or one command line means three things. Measured
+  // against dart-sass 1.104.1 on macOS, all three before the fix:
+  //
+  //   operand                 dart            binary          this CLI
+  //   C:\in.scss              one path        pair C+\in...   one path
+  //   C:in.scss               one path        pair C+in...    pair C+in...
+  //   a:b                     one path        pair a+b        pair a+b
+  //   a:b:c                   pair a:b+c      one-":" error   one-":" error
+  //   in.scss:C:\out.css      pair            one-":" error   pair
+  //
+  // (measured on macOS, where every spelling above is an ordinary relative
+  // filename; `driveArg` below re-spells the ones that need a REAL drive)
+  //
+  // The binary was `cfg!(windows)`-gated (so POSIX took the false branch and
+  // no test ran on Windows); this CLI asked for a separator after the drive
+  // colon, which dart does not. Both read the rule the same way now.
+  //
+  // A backslash is an ordinary filename byte on POSIX, so the drive-shaped
+  // operands below run here as written — which is the point: the grammar is
+  // no longer a Windows-only branch nobody can reach. Where a real drive
+  // letter is needed, `driveArg` spells one the way THIS platform can.
+  {
+    // A path carrying a drive letter, in the only form each platform has one.
+    //
+    // On Windows the temp directory is already drive-qualified
+    // (`C:\Users\…\Temp\sasso-args-…`), so the operand exercises the rule
+    // with a real path. On POSIX no path carries a drive, so the fixture is a
+    // FILE WHOSE NAME IS `C:\out.css` — legal there, and the same string the
+    // parser sees.
+    //
+    // Writing the POSIX spelling on Windows would build
+    // `…\sasso-args-…\C:\out.css`, which `path.join` produces happily and
+    // Windows cannot create (`:` is reserved), and passing `C:\out.css` as an
+    // operand there is ABSOLUTE — it addresses the root of the real C:, not
+    // the fixture. Neither would test the parser; one would write outside the
+    // temp directory.
+    const WIN = process.platform === "win32";
+    const driveArg = (name) => (WIN ? join(dir, name) : `C:\\${name}`);
+    const driveFile = (name) => (WIN ? join(dir, name) : join(dir, `C:\\${name}`));
+
+    writeFileSync(driveFile("drive.scss"), ".drive{a:1}\n");
+    mkdirSync(join(dir, "a"), { recursive: true });
+    writeFileSync(join(dir, "a", "one.scss"), ".one{b:2}\n");
+
+    // One path, not a pair: it compiles to stdout rather than being read as
+    // the pair `C` + the rest.
+    const whole = run([driveArg("drive.scss")]);
+    assert.equal(whole.status, 0, `cli: a drive-spelled path is one path (stderr: ${whole.stderr})`);
+    assert.ok(whole.stdout.includes(".drive"), "cli: …and it is the file that was compiled");
+
+    // No separator after the drive colon is required — `Q:in.scss` is
+    // drive-RELATIVE, and dart reads it as one path too. The proof is WHICH
+    // name the read error carries: the whole operand, not the `Q` a pair
+    // would have split off.
+    //
+    // `Q:`, not `C:`: on Windows a drive-relative path is resolved against
+    // that drive's own current directory, and the cwd here IS on C:, so
+    // `C:no-such.scss` would name a file in this very fixture directory.
+    const rel = run(["Q:no-such-drive-relative.scss"]);
+    assert.equal(rel.status, EXIT_IO, "cli: a drive-relative path is one path that is missing");
+    assert.ok(
+      rel.stderr.includes("Q:no-such-drive-relative.scss"),
+      `cli: …named whole, not split (got: ${rel.stderr.split("\n")[0]})`,
+    );
+
+    // Both sides may carry a drive, and that is not "more than one colon".
+    const two = run([`${driveArg("drive.scss")}:${driveArg("out.css")}`]);
+    assert.equal(two.status, 0, `cli: two drive colons are one pair (stderr: ${two.stderr})`);
+    assert.ok(existsSync(driveFile("out.css")), "cli: …written to the drive-spelled destination");
+
+    // The destination carries the only drive.
+    const destOnly = run([`in.scss:${driveArg("dest.css")}`]);
+    assert.equal(destOnly.status, 0, `cli: a drive on the destination alone (stderr: ${destOnly.stderr})`);
+    assert.ok(existsSync(driveFile("dest.css")), "cli: …written there");
+
+    // Past the skipped drive colon the NEXT colon separates, so this is the
+    // pair `a:b` + `c` and fails at READ time, not as a grammar error.
+    const past = run(["a:b:c"]);
+    assert.equal(past.status, EXIT_IO, "cli: a:b:c splits after the drive colon");
+    assert.ok(past.stderr.includes("a:b"), `cli: …source a:b (got: ${past.stderr.split("\n")[0]})`);
+
+    // The cost of parity, pinned: a one-letter source directory is read as a
+    // drive, so `a:b` is one path. dart answers `Error reading a:b`.
+    const oneLetter = run(["a:b"]);
+    assert.equal(oneLetter.status, EXIT_IO, "cli: a:b is one path, not a pair");
+    assert.ok(!existsSync(join(dir, "b")), "cli: …so nothing was compiled into b/");
+
+    // Two letters is not a drive: still a pair.
+    const twoLetters = run(["src:outdir"]);
+    assert.equal(twoLetters.status, 0, `cli: ab:cd is still a pair (stderr: ${twoLetters.stderr})`);
+    assert.ok(existsSync(join(dir, "outdir", "a.css")), "cli: …and it compiled the directory");
+
+    // A digit is not a drive letter, so this splits at index 1 and the
+    // destination carries the extra colon.
+    rejects(["1:\\in.scss:out.css"], 'may only contain one ":".');
+    // The operand is quoted as the user typed it — `{arg:?}` in the binary
+    // escaped the backslash and printed `"C:\\\\in.scss…"`.
+    const quoted = run(["C:\\in.scss:out.css:x"]);
+    assert.ok(
+      quoted.stderr.includes('"C:\\in.scss:out.css:x" may only contain one ":".'),
+      `cli: the operand is quoted raw (got: ${quoted.stderr.split("\n")[0]})`,
+    );
+  }
+
   // The same file named by a directory pair AND an explicit pair compiles once,
   // to the destination named last — dart keeps its sources in a path-keyed map.
   // (Spellings are compared lexically against the cwd, as the native CLI does,

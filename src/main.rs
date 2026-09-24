@@ -888,15 +888,45 @@ fn push_operand(cli: &mut Cli, arg: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Is `s`'s colon at index 1 a Windows drive letter's, rather than the
+/// separator of a `source:destination` pair?
+///
+/// Asked on EVERY platform, because dart asks it on every platform. Measured
+/// against dart-sass 1.104.1 on macOS, where sasso gated the same rule behind
+/// `cfg!(windows)` and so answered differently for the whole family (#172):
+///
+/// ```text
+///   operand                  dart 1.104.1              sasso before
+///   C:\in.scss               compiles to stdout        Error reading C:
+///   C:\in.scss:C:\out.css    writes C:\out.css         may only contain one ":"
+///   in.scss:C:\out.css       writes C:\out.css         may only contain one ":"
+///   c:\in.scss:c:\out.css    writes c:\out.css         may only contain one ":"
+///   a:b                      Error reading a:b         compiled a/ into b/
+///   a:b:c                    Error reading a:b         may only contain one ":"
+/// ```
+///
+/// The cost of parity is the `a:b` row: a POSIX directory named with one
+/// letter can no longer be the source of a pair, because `a:` is read as a
+/// drive. dart pays that cost too, and sasso already paid it on Windows — the
+/// gate made one platform disagree with both.
+///
+/// A digit is not a drive letter: `1:\in.scss:out.css` splits at index 1 and
+/// is the "one `:`" error in both.
+fn is_drive_colon(s: &str, idx: usize) -> bool {
+    idx == 1
+        && s.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && s.as_bytes().get(1) == Some(&b':')
+}
+
 /// Split a dart-style `source:destination` argument at its separating colon,
-/// or return `Ok(None)` for a plain path. On Windows the colon of a leading
-/// drive letter (`C:\in.scss`) is part of the path, not a separator.
+/// or return `Ok(None)` for a plain path. The colon of a leading drive letter
+/// (`C:\in.scss`) is part of the path, not a separator — see
+/// [`is_drive_colon`].
 fn split_pair(arg: &str) -> Result<Option<(PathBuf, PathBuf)>, String> {
     let mut from = 0;
     while let Some(off) = arg[from..].find(':') {
         let idx = from + off;
-        let is_drive_colon = cfg!(windows) && idx == 1 && arg.as_bytes()[0].is_ascii_alphabetic();
-        if is_drive_colon {
+        if is_drive_colon(arg, idx) {
             from = idx + 1;
             continue;
         }
@@ -906,21 +936,104 @@ fn split_pair(arg: &str) -> Result<Option<(PathBuf, PathBuf)>, String> {
         }
         // dart: exactly one separator; the destination may only carry a drive
         // colon of its own (`C:\out.css`).
-        let dest_drive_colon = cfg!(windows)
-            && dest.len() > 1
-            && dest.as_bytes()[1] == b':'
-            && dest.as_bytes()[0].is_ascii_alphabetic();
-        let extra = if dest_drive_colon {
+        let extra = if is_drive_colon(dest, 1) {
             dest[2..].contains(':')
         } else {
             dest.contains(':')
         };
         if extra {
-            return Err(format!("{arg:?} may only contain one \":\"."));
+            // `{arg}` in quotes, not `{arg:?}`: Debug escapes a backslash,
+            // so the message for the operand this rule EXISTS for came out
+            // as `"C:\\in.scss:out.css:x"`. dart and `cli.mjs` both print
+            // the operand as the user typed it.
+            return Err(format!("\"{arg}\" may only contain one \":\"."));
         }
         return Ok(Some((PathBuf::from(src), PathBuf::from(dest))));
     }
     Ok(None)
+}
+
+/// The drive-letter pair grammar, which had no case anywhere before #172 —
+/// no `C:\` literal existed under `tests/`, and the rule was `cfg!`-gated, so
+/// a POSIX run took the false branch and a Windows run had nothing to take.
+/// Every expectation here is measured against dart-sass 1.104.1; the table in
+/// [`is_drive_colon`] is the measurement.
+#[cfg(test)]
+mod split_pair_tests {
+    use super::split_pair;
+    use std::path::PathBuf;
+
+    /// What `split_pair` said, in a shape a table can assert.
+    fn split(arg: &str) -> Result<Option<(String, String)>, String> {
+        split_pair(arg)
+            .map(|o| o.map(|(a, b)| (a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned())))
+    }
+
+    fn pair(a: &str, b: &str) -> Result<Option<(String, String)>, String> {
+        Ok(Some((a.to_string(), b.to_string())))
+    }
+
+    #[test]
+    fn a_drive_colon_is_part_of_the_path_on_every_platform() {
+        // One pair, two drive colons.
+        assert_eq!(
+            split(r"C:\in.scss:C:\out.css"),
+            pair(r"C:\in.scss", r"C:\out.css")
+        );
+        // One path, NOT a pair — the whole point of the rule.
+        assert_eq!(split(r"C:\in.scss"), Ok(None));
+        // The destination carries the only drive.
+        assert_eq!(split(r"in.scss:C:\out.css"), pair("in.scss", r"C:\out.css"));
+        // A lowercase drive is a drive.
+        assert_eq!(
+            split(r"c:\in.scss:c:\out.css"),
+            pair(r"c:\in.scss", r"c:\out.css")
+        );
+        // A separator after the colon is not required: `C:in.scss` is
+        // drive-relative, and dart reads it as one path too.
+        assert_eq!(split("C:in.scss"), Ok(None));
+    }
+
+    #[test]
+    fn a_second_separator_is_still_an_error() {
+        let err = |a: &str| Err(format!("\"{a}\" may only contain one \":\"."));
+        assert_eq!(split(r"C:\in.scss:out.css:x"), err(r"C:\in.scss:out.css:x"));
+        assert_eq!(split("in.scss:out.css:x"), err("in.scss:out.css:x"));
+        // A digit is not a drive letter, so this splits at index 1 and the
+        // destination `\in.scss:out.css` carries the extra colon.
+        assert_eq!(split(r"1:\in.scss:out.css"), err(r"1:\in.scss:out.css"));
+    }
+
+    #[test]
+    fn a_one_letter_source_is_a_drive_not_a_pair() {
+        // The cost of parity, pinned so it cannot regress silently: `a:b` was
+        // a working POSIX pair before #172 and is one path now, because `a:`
+        // is a drive. dart-sass 1.104.1 answers `Error reading a:b`.
+        assert_eq!(split("a:b"), Ok(None));
+        // Two letters is not a drive, so this stays a pair.
+        assert_eq!(split("ab:b"), pair("ab", "b"));
+        // Past the skipped drive colon, the NEXT colon separates: dart
+        // answers `Error reading a:b`, naming `a:b` as the source.
+        assert_eq!(split("a:b:c"), pair("a:b", "c"));
+    }
+
+    #[test]
+    fn an_ordinary_pair_is_untouched() {
+        assert_eq!(split("in.scss:out.css"), pair("in.scss", "out.css"));
+        assert_eq!(split("src:css"), pair("src", "css"));
+        assert_eq!(split("in.scss"), Ok(None));
+        assert_eq!(
+            split("/abs/in.scss:/abs/out.css"),
+            pair("/abs/in.scss", "/abs/out.css")
+        );
+    }
+
+    /// `PathBuf` round-trips the spellings above without normalising them —
+    /// the backslashes are data on POSIX, and this asserts the assertions.
+    #[test]
+    fn the_table_above_is_comparing_what_it_thinks() {
+        assert_eq!(PathBuf::from(r"C:\out.css").to_string_lossy(), r"C:\out.css");
+    }
 }
 
 /// Report a usage error the way `parse_args` failures are reported.
@@ -1170,8 +1283,11 @@ fn expand_dir(src: &Path, dest: &Path, indented: bool, units: &mut Vec<Unit>) ->
     }
     files.sort();
     let cwd = std::env::current_dir().unwrap_or_default();
-    let src_abs = path_key(&normalize_path(&cwd.join(src)));
-    let dest_abs = path_key(&normalize_path(&cwd.join(dest)));
+    let key = |p: &Path| path_key_in(pathstyle::HOST, &normalize_path(&cwd.join(p)));
+    // Keyed ONCE, outside the loop: `path_key_in` lower-cases and reallocates
+    // on Windows, and the destination does not change between files.
+    let src_key = key(src);
+    let dest_key = key(dest);
     // dart-sass 1.104.1 skips every source file INSIDE the output directory
     // when that directory is nested in the source tree: `.:css` run twice
     // would otherwise mirror `css/` into `css/css/`. Nesting is strict — a
@@ -1179,18 +1295,20 @@ fn expand_dir(src: &Path, dest: &Path, indented: bool, units: &mut Vec<Unit>) ->
     // `dir:dir`) still compiles every file — and it is the destination that
     // counts, not an intermediate directory: `.:css/deep` skips only what is
     // under `css/deep`, and still compiles `css/stale.scss`.
-    let nested = dest_abs != src_abs && dest_abs.starts_with(&src_abs);
+    let nested = dest_nested_in_src(&src_key, &dest_key);
     for path in files {
         let rel = path.strip_prefix(src).unwrap_or(&path).with_extension("css");
         let out = dest.join(rel);
-        let path_abs = path_key(&normalize_path(&cwd.join(&path)));
-        if nested && path_abs.starts_with(&dest_abs) {
+        // Two keyings per file — the file and its destination — which is what
+        // this loop cost before these rules were named.
+        let path_key = key(&path);
+        if nested && key_inside(&dest_key, &path_key) {
             continue;
         }
         // dart skips a CSS file whose destination is itself (`sasso dir`, or
         // `dir:dir`, with a `plain.css` inside): it would only be rewritten in
         // place.
-        if path_key(&normalize_path(&cwd.join(&out))) == path_abs {
+        if key(&out) == path_key {
             continue;
         }
         units.push(Unit {
@@ -2830,9 +2948,6 @@ fn adjust_sources(
         .collect()
 }
 
-/// Lexically normalize a path: resolve `.`/`..` components without touching the
-/// filesystem (so it works for paths that may not exist yet), like dart's URL
-/// normalization. Keeps it absolute if it started absolute.
 /// A path reduced to the key the two directory-relationship tests compare —
 /// "is this file inside the destination" and "is its destination itself".
 ///
@@ -2842,17 +2957,149 @@ fn adjust_sources(
 /// else the path is compared as written, again like dart — which case-folds
 /// for no other style, not even on a case-insensitive macOS volume. The key
 /// is lexical either way: no `realpath`, so a symlink is not resolved.
-#[cfg(windows)]
-fn path_key(p: &Path) -> PathBuf {
-    PathBuf::from(p.to_string_lossy().to_lowercase())
+fn path_key_in(style: pathstyle::Style, p: &Path) -> PathBuf {
+    match style {
+        pathstyle::Style::Windows => PathBuf::from(p.to_string_lossy().to_lowercase()),
+        pathstyle::Style::Posix => p.to_path_buf(),
+    }
 }
 
-/// See the Windows variant above: elsewhere the path is its own key.
-#[cfg(not(windows))]
+/// [`path_key_in`] under this platform's rules.
 fn path_key(p: &Path) -> PathBuf {
-    p.to_path_buf()
+    path_key_in(pathstyle::HOST, p)
 }
 
+/// Is the key `p_key` the key `dir_key` itself, or one inside it?
+///
+/// `starts_with` compares whole COMPONENTS, so `src2` is not inside `src` —
+/// a string prefix would make `.:cssx` skip a tree it never writes to.
+///
+/// Both arguments are [`path_key_in`] output, not raw paths. Keeping the
+/// keying out of here is what lets `expand_dir` key the destination once
+/// instead of once per file; the style question lives in `path_key_in`, and
+/// these two rules are then pure comparisons.
+fn key_inside(dir_key: &Path, p_key: &Path) -> bool {
+    p_key.starts_with(dir_key)
+}
+
+/// Is the destination nested STRICTLY inside the source tree — the case where
+/// a second run would mirror the output directory into itself?
+///
+/// Equal is not nested: `sasso dir` is `dir:dir`, and it still compiles every
+/// file. Both arguments are [`path_key_in`] output.
+fn dest_nested_in_src(src_key: &Path, dest_key: &Path) -> bool {
+    dest_key != src_key && key_inside(src_key, dest_key)
+}
+
+/// The two directory-relationship rules, asked of BOTH styles.
+///
+/// Item 2 of #172: the case-folding half of `path_key` was covered for
+/// diagnostic path spelling (`pathstyle`, 29 tests) and for the watch
+/// snapshot's directory key, but not for the use it was filed about — "is
+/// this file inside the destination". It was `#[cfg(windows)]`-gated, so a
+/// POSIX run compiled the other body and had nothing to check.
+///
+/// The POSIX column is measured against dart-sass 1.104.1 on macOS, with a
+/// stylesheet already sitting in the destination:
+///
+/// ```text
+///   sass Src:src/css   ->  src/css/a.css AND src/css/css/old.css
+///   sass src:src/css   ->  src/css/a.css only
+/// ```
+///
+/// The first is the proof that dart does NOT fold case off Windows, even on
+/// a case-insensitive volume where `Src/` and `src/` are one directory on
+/// disk: it read the two spellings as two trees, called the destination not
+/// nested, and mirrored the destination into itself.
+#[cfg(test)]
+mod dir_pair_tests {
+    use super::{dest_nested_in_src, key_inside, path_key_in};
+    use crate::pathstyle::Style;
+    use std::path::{Path, PathBuf};
+
+    /// A path as the loop would key it. The style is the ONLY thing that
+    /// differs between platforms here, which is why it is the only thing
+    /// these tests vary.
+    fn k(style: Style, p: &str) -> PathBuf {
+        path_key_in(style, Path::new(p))
+    }
+
+    /// `Src:src/css` — one directory under two spellings.
+    #[test]
+    fn case_decides_nesting_only_under_the_windows_rules() {
+        for (style, nested) in [(Style::Windows, true), (Style::Posix, false)] {
+            assert_eq!(
+                dest_nested_in_src(&k(style, "/w/Src"), &k(style, "/w/src/css")),
+                nested,
+                "{style:?}: Src:src/css",
+            );
+        }
+    }
+
+    /// The same fold, for the per-file question the loop asks.
+    #[test]
+    fn a_file_is_inside_the_destination_by_the_same_rules() {
+        for (style, inside) in [(Style::Windows, true), (Style::Posix, false)] {
+            assert_eq!(
+                key_inside(&k(style, "/w/src/CSS"), &k(style, "/w/src/css/old.scss")),
+                inside,
+                "{style:?}: is src/css/old.scss under src/CSS",
+            );
+        }
+    }
+
+    /// …and for "is this file its own destination", which the loop asks as an
+    /// equality between two keys.
+    #[test]
+    fn a_file_is_its_own_destination_by_the_same_rules() {
+        for (style, same) in [(Style::Windows, true), (Style::Posix, false)] {
+            assert_eq!(
+                k(style, "/w/DIR/plain.css") == k(style, "/w/dir/plain.css"),
+                same,
+                "{style:?}: DIR/plain.css vs dir/plain.css",
+            );
+        }
+    }
+
+    /// Equal is not nested, or `sasso dir` (which is `dir:dir`) would skip
+    /// every file it was asked to compile.
+    #[test]
+    fn a_destination_equal_to_the_source_is_not_nested() {
+        for style in [Style::Posix, Style::Windows] {
+            assert!(!dest_nested_in_src(&k(style, "/w/dir"), &k(style, "/w/dir")));
+        }
+        // …and under Windows, not even spelled differently.
+        assert!(!dest_nested_in_src(
+            &k(Style::Windows, "/w/Dir"),
+            &k(Style::Windows, "/w/dir")
+        ));
+    }
+
+    /// Nesting is by whole components: a sibling whose name merely starts
+    /// with the source's is not inside it. Without this, `.:cssx` would skip
+    /// everything under a directory it never writes to.
+    #[test]
+    fn a_prefix_of_a_name_is_not_a_parent() {
+        for style in [Style::Posix, Style::Windows] {
+            assert!(!dest_nested_in_src(&k(style, "/w/src"), &k(style, "/w/src2")));
+            assert!(!key_inside(&k(style, "/w/src"), &k(style, "/w/src2/a.scss")));
+        }
+    }
+
+    /// It is the DESTINATION that bounds the skip, not an intermediate
+    /// directory: `.:css/deep` still compiles `css/stale.scss`.
+    #[test]
+    fn only_what_is_under_the_destination_is_skipped() {
+        let style = Style::Posix;
+        let dest = k(style, "/w/css/deep");
+        assert!(key_inside(&dest, &k(style, "/w/css/deep/old.scss")));
+        assert!(!key_inside(&dest, &k(style, "/w/css/stale.scss")));
+    }
+}
+
+/// Lexically normalize a path: resolve `.`/`..` components without touching the
+/// filesystem (so it works for paths that may not exist yet), like dart's URL
+/// normalization. Keeps it absolute if it started absolute.
 fn normalize_path(p: &Path) -> PathBuf {
     use std::path::Component;
     let mut out: Vec<Component<'_>> = Vec::new();

@@ -736,15 +736,35 @@ mod tests {
         );
         assert_ne!(first.digest, 0, "a whole-second mtime should have been digested");
         // …and the rule that decides it: a precise mtime reads nothing.
+        //
+        // Guarded by `subsecond_is_fine` itself, not by `subsec_nanos != 0`.
+        // The two are not the same question — the rule also rejects a whole
+        // number of microseconds — and on a 100 ns clock the gap is reachable:
+        // every NTFS subsecond is a multiple of 100, so one in ten is also a
+        // multiple of 1000, and on those runs `Stamp::of` digests while the
+        // weaker guard still demanded that it had not. That is why this test
+        // failed roughly one Windows run in ten, on master as well as here.
         let p2 = dir.join("b.scss");
         std::fs::write(&p2, "$c: red00;\n").unwrap();
         let precise = Stamp::of(&p2);
-        if precise
+        let subsec = precise
             .modified
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-            .is_some_and(|d| d.subsec_nanos() != 0)
-        {
-            assert_eq!(precise.digest, 0, "a precise mtime should not read the file");
+            .map_or(0, |d| d.subsec_nanos());
+        if subsecond_is_fine(subsec) {
+            assert_eq!(
+                precise.digest, 0,
+                "a precise mtime ({subsec} ns) should not read the file"
+            );
+        } else {
+            // The other half of the same rule, so neither branch is a way
+            // through this test that checks nothing: a clock this coarse is
+            // exactly when the contents MUST be read, which is what the two
+            // saves above rely on.
+            assert_ne!(
+                precise.digest, 0,
+                "a coarse mtime ({subsec} ns) should have read the file"
+            );
         }
         std::fs::remove_dir_all(&dir).ok();
     }
