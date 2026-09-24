@@ -3193,63 +3193,117 @@ fn file_url(abs: &Path) -> String {
     s
 }
 
-/// The local path a `file://` URL names, or `None` when this cannot say.
+/// The local path a canonical URL names, or `None` when this cannot say.
 ///
-/// The inverse of [`file_url`], deliberately partial. `None` is returned for
-/// anything that is not a plain absolute local path — a non-`file:` URL from a
-/// custom importer, or a UNC form — and the only caller, `--update`'s
-/// freshness test, reads `None` as "cannot be shown unchanged, rebuild". That
-/// is the safe direction to be wrong in: the cost of guessing `None` is one
-/// extra write, and the cost of guessing a path wrong is stale CSS.
+/// The inverse of [`file_url`], deliberately partial: a non-`file:` URL from a
+/// custom importer has no path, and neither does a relative one.
+///
+/// # What `None` means, per caller
+///
+/// It is read in opposite directions, which the doc here used to get wrong by
+/// naming only the first:
+///
+/// | caller | `None` means | direction |
+/// |---|---|---|
+/// | [`Compiler::loaded_paths`] — `--update` freshness | "unknowable input, rebuild" | safe: costs one extra write |
+/// | [`Compiler::load`] — the watch's pre-read stamp | no stamp is recorded for that file | NOT safe: a save landing mid-read is not seen |
+///
+/// Latent rather than live, because the `file:` arm below is unreachable
+/// today: `FsImporter`'s canonical form IS the absolute filesystem path, so
+/// every canonical the binary sees takes the first arm. Measured by
+/// instrumenting both arms and running the CLI suite — 11 hits on the path
+/// arm, 0 on the `file:` one — so the second column is a warning about a
+/// future importer, not a bug anyone can reach now.
+///
+/// Reading the canonical as a URL was this function's FIRST bug: every
+/// dependency parsed as `None`, the list came back empty, and `--update`
+/// reported a stale output as fresh — passing the "nothing changed" test while
+/// failing the one the flag exists for. Hence the arm order.
 fn url_to_path(url: &str) -> Option<PathBuf> {
-    // `FsImporter`'s canonical form IS the absolute filesystem path (see its
-    // `canonicalize`), so the common case never reaches the URL branch below.
-    // Taking it for a URL was this function's first bug: every dependency
-    // parsed as `None`, the list came back empty, and `--update` reported a
-    // stale output as fresh — passing the "nothing changed" test while
-    // failing the one the flag exists for.
     if !url.starts_with("file:") {
         let p = Path::new(url);
         return p.is_absolute().then(|| p.to_path_buf());
     }
-    let rest = url.strip_prefix("file://")?;
-    // `file://server/share/…` (UNC): no leading slash, and reconstructing it
-    // is not worth the risk here.
-    let rest = rest.strip_prefix('/')?;
-    let decoded = percent_decode(rest)?;
-    // `file:///C:/x` decodes to `/C:/x`, whose real path drops the slash.
-    let is_drive = {
-        let b = decoded.as_bytes();
-        b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
-    };
-    Some(PathBuf::from(if is_drive {
-        decoded
-    } else {
-        format!("/{decoded}")
-    }))
+    // One line, because the decoder lives in the `sasso` crate. This file had
+    // the third copy of it (#188, after #163 unified the other two), with its
+    // own `percent_decode` beside it, and it had drifted the same way the
+    // others had: it declined a `localhost` authority, and it declined a UNC
+    // form that `pathstyle` resolves on Windows and correctly refuses on
+    // POSIX. The strict reading is the right one here — this path is about to
+    // be `stat`ed.
+    sasso::file_url_to_path(url).map(PathBuf::from)
 }
 
-/// Percent-decode a URL path, or `None` on a malformed escape.
-fn percent_decode(s: &str) -> Option<String> {
-    if !s.contains('%') {
-        return Some(s.to_string());
+/// [`url_to_path`], including the arm production cannot reach.
+///
+/// The `file:` arm is unreachable today — `FsImporter` hands back absolute
+/// paths, so the CLI suite hits it 0 times — which is exactly why it needs
+/// cases of its own. Dead-but-defensive code that nobody checks is how the
+/// third copy of the decoder drifted from the other two without anyone
+/// noticing (#188).
+#[cfg(test)]
+mod url_to_path_tests {
+    use super::url_to_path;
+    use std::path::PathBuf;
+
+    fn at(url: &str) -> Option<PathBuf> {
+        url_to_path(url)
     }
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hex = bytes.get(i + 1..i + 3)?;
-            let hi = (hex[0] as char).to_digit(16)?;
-            let lo = (hex[1] as char).to_digit(16)?;
-            out.push((hi * 16 + lo) as u8);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
+
+    /// The arm that actually runs: a canonical IS an absolute path.
+    #[test]
+    fn an_absolute_path_is_its_own_answer() {
+        assert_eq!(at("/w/src/a.scss"), Some(PathBuf::from("/w/src/a.scss")));
+        // …and a relative one names nothing to stat.
+        assert_eq!(at("src/a.scss"), None);
+        assert_eq!(at(""), None);
     }
-    String::from_utf8(out).ok()
+
+    /// A custom importer's canonical has no filesystem path, and `--update`
+    /// reads that as "unknowable input, rebuild".
+    #[test]
+    fn a_non_file_scheme_has_no_path() {
+        assert_eq!(at("myscheme:thing"), None);
+        assert_eq!(at("https://example.com/a.scss"), None);
+        // `stdin` is the evaluator's synthetic name, not a path.
+        assert_eq!(at("stdin"), None);
+    }
+
+    /// The `file:` arm, through the shared decoder.
+    #[test]
+    fn a_file_url_decodes_the_way_the_rest_of_the_crate_does() {
+        assert_eq!(at("file:///w/a.scss"), Some(PathBuf::from("/w/a.scss")));
+        // A space arrives percent-encoded; a path that keeps `%20` is a path
+        // nobody has.
+        assert_eq!(
+            at("file:///my%20docs/a.scss"),
+            Some(PathBuf::from("/my docs/a.scss"))
+        );
+    }
+
+    /// The drift this file's own copy had, now impossible to have on one side:
+    /// `localhost` is this machine, exactly as the empty authority is.
+    #[test]
+    fn a_localhost_authority_is_this_machine() {
+        assert_eq!(at("file://localhost/w/a.scss"), Some(PathBuf::from("/w/a.scss")));
+    }
+
+    /// A UNC authority is a Windows spelling. On POSIX there is no such path,
+    /// and `None` is the safe answer for both callers; the old copy here
+    /// refused it on every platform, including the one that can open it.
+    #[test]
+    #[cfg(unix)]
+    fn a_unc_authority_is_not_a_posix_path() {
+        assert_eq!(at("file://server/share/a.scss"), None);
+    }
+
+    /// Undecodable bytes are refused rather than substituted: a name with
+    /// U+FFFD in it is a different name, and this path is about to be
+    /// `stat`ed.
+    #[test]
+    fn a_name_that_is_not_utf8_is_not_guessed_at() {
+        assert_eq!(at("file:///w/a%FFb.scss"), None);
+    }
 }
 
 /// Percent-encode a forward-slash-separated relative URL path (keeping the `/`).
