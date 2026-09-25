@@ -1167,6 +1167,16 @@ struct Shared {
     file_error_css: bool,
     /// Print an error stylesheet to stdout on failure (`--error-css`, explicit).
     stdout_error_css: bool,
+    /// Every file this WATCH has read as a stylesheet, across all rounds.
+    /// Empty for a one-shot run, and empty on a watch's first compile.
+    ///
+    /// `finish_compile_error` needs it because a failure reports no
+    /// dependencies at all: once `_v.scss` is deleted, `attempted_paths()`
+    /// has no record that it was ever one, and the guard that refuses to
+    /// write an error stylesheet over a source has nothing to compare the
+    /// output against. The npm CLI survives this by keeping its `known` set
+    /// across a failure; this is the same memory (#177).
+    watch_known: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1444,6 +1454,9 @@ fn run(cli: Cli) -> ExitCode {
     }
 
     let shared = Shared {
+        // A one-shot run has read nothing before; `run_watch` fills this in
+        // per round.
+        watch_known: Vec::new(),
         load_paths: cli.load_paths.clone(),
         style: cli.style,
         unicode: !cli.no_unicode,
@@ -1773,7 +1786,7 @@ fn dirs_key(p: &Path) -> PathBuf {
 ///
 /// `path_key` rather than `==`, so the answer does not depend on the case a
 /// path was typed in on Windows, where two spellings are one file.
-fn aliases_a_source(output: &Path, unit: &Unit, deps: &[PathBuf]) -> bool {
+fn aliases_a_source(output: &Path, unit: &Unit, deps: &[PathBuf], remembered: &[PathBuf]) -> bool {
     // `dirs_key`, the same one the snapshot uses: the output is whatever was
     // typed on the command line and a dependency is the absolute path the
     // importer resolved, so `_v.scss` and `/…/_v.scss` are the same file
@@ -1787,14 +1800,33 @@ fn aliases_a_source(output: &Path, unit: &Unit, deps: &[PathBuf]) -> bool {
     // that EXISTS, which is why it is a second opinion rather than the rule:
     // an output that is not there yet cannot alias anything.
     let real = |p: &Path| std::fs::canonicalize(cwd.join(p)).ok().map(|c| path_key(&c));
+    // What the output NAMES, if it is a symlink: the target as WRITTEN,
+    // resolved against the link's own directory. The one reading that
+    // survives a DANGLING link, where `canonicalize` answers nothing at all —
+    // which is how `out.css -> _v.scss` came to recreate a deleted `_v.scss`
+    // with an error stylesheet in it (#177). `read_link` does not follow, so
+    // it answers for a link whose target is gone.
+    let named = std::fs::read_link(cwd.join(output)).ok().map(|target| {
+        let holder = cwd
+            .join(output)
+            .parent()
+            .map_or_else(|| cwd.clone(), Path::to_path_buf);
+        key(&holder.join(target))
+    });
     let dest = key(output);
     let dest_real = real(output);
-    let same =
-        |p: &Path| key(p) == dest || (dest_real.is_some() && real(p).is_some() && real(p) == dest_real);
+    let same = |p: &Path| {
+        key(p) == dest
+            || (dest_real.is_some() && real(p).is_some() && real(p) == dest_real)
+            || named.as_ref() == Some(&key(p))
+    };
     if unit.source_path().is_some_and(same) {
         return true;
     }
-    deps.iter().any(|d| same(d))
+    // `deps` is what THIS compile read, and a failure reads nothing — so a
+    // watch also asks what it has read before. Without that second list the
+    // guard has nothing to recognise a deleted dependency by.
+    deps.iter().any(|d| same(d)) || remembered.iter().any(|d| same(d))
 }
 
 /// `--update`: is `output` at least as new as `input` and every file in
@@ -1948,7 +1980,7 @@ fn finish_compile_error(
     // then destroying the file on the next typo is worse than either.
     if shared.watch {
         if let Target::File(output) = &unit.target {
-            if aliases_a_source(output, unit, deps) {
+            if aliases_a_source(output, unit, deps, &shared.watch_known) {
                 return;
             }
         }
@@ -2014,6 +2046,9 @@ mod disturbed_tests {
     fn shared() -> Shared {
         Shared {
             load_paths: Vec::new(),
+            // These tests drive `finish_compile_error` directly, outside any
+            // watch, so there is nothing read to remember.
+            watch_known: Vec::new(),
             style: OutputStyle::Expanded,
             unicode: true,
             charset: true,
@@ -2251,7 +2286,8 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
             //
             // Silent, because dart is silent.
             Target::File(output)
-                if shared.watch && aliases_a_source(output, unit, &importer.attempted_paths()) => {}
+                if shared.watch
+                    && aliases_a_source(output, unit, &importer.attempted_paths(), &shared.watch_known) => {}
             Target::File(output)
                 if shared.update && output_is_fresh(output, unit.source_path(), &importer.loaded_paths()) => {
             }
@@ -2400,20 +2436,26 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
     // stuck on `color: bl` forever. dart's own `--watch --update` is worse
     // here — it left the first change uncompiled entirely — so there is no
     // behaviour of its to copy.
-    let live = Shared {
+    // Rebuilt per round rather than twice up front, because it now carries
+    // the set of files this watch has read — which grows as the watch runs.
+    // Two `Vec` clones against a whole compile is not a cost worth shaping
+    // the code around.
+    let round_shared = |provisional: bool, known: &std::collections::BTreeSet<PathBuf>| Shared {
         update: false,
-        provisional: false,
+        provisional,
         load_paths: shared.load_paths.clone(),
         silenced: shared.silenced.clone(),
+        watch_known: known.iter().cloned().collect(),
         ..*shared
     };
-    let live_provisional = Shared {
-        update: false,
-        provisional: true,
-        load_paths: shared.load_paths.clone(),
-        silenced: shared.silenced.clone(),
-        ..*shared
-    };
+
+    // Every file any round has read as a stylesheet, entries included.
+    //
+    // Kept across a FAILURE on purpose, which is the whole point: a failed
+    // compile reports no dependencies, so without this the error-stylesheet
+    // guard cannot tell that the output symlink points at one (#177). The
+    // npm CLI keeps its own `known` set for the same reason.
+    let mut ever_read: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
 
     let mut snapshot = watch::Snapshot::default();
     let mut coalesce = watch::Coalesce::new(watch::WINDOW);
@@ -2437,12 +2479,14 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
                 .iter()
                 .filter_map(|u| u.source_path().map(|p| (p.to_path_buf(), watch::Stamp::of(p))))
                 .collect();
-            let run_shared = match (started_once, provisional) {
-                // The very first compile is the only one `--update` applies
-                // to; it is also never provisional.
-                (false, _) => shared,
-                (true, true) => &live_provisional,
-                (true, false) => &live,
+            // The very first compile is the only one `--update` applies to;
+            // it is also never provisional, and has read nothing yet.
+            let round_owned;
+            let run_shared = if started_once {
+                round_owned = round_shared(provisional, &ever_read);
+                &round_owned
+            } else {
+                shared
             };
             started_once = true;
             let outcomes = compile_all(units, run_shared, jobs, stop_on_error);
@@ -2492,6 +2536,10 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
             // keeps the earliest observation of a path, so adding both is
             // safe and the older wins.
             followed.extend(before_run);
+            // Remember them for the NEXT round, before directories are mixed
+            // in below: what this needs is files that were read, and a
+            // directory is not one.
+            ever_read.extend(followed.iter().map(|(f, _)| f.clone()));
             // …and the directories they live in, so a dependency that does
             // not exist YET can arrive. A missing `@use` target has no path
             // to stat; its directory does, and its mtime moves when the file

@@ -3187,6 +3187,106 @@ fn watch_declines_to_write_over_a_source_reached_through_a_symlink() {
     );
 }
 
+/// A deleted dependency is not resurrected through the output symlink.
+///
+/// `out.css -> _v.scss`, `--watch main.scss out.css`, then `rm _v.scss`. The
+/// compile now fails, and writing the error stylesheet through the link would
+/// RECREATE the file the user deleted, with CSS in it — after which the next
+/// compile finds it and may well succeed on garbage.
+///
+/// Measured 2026-09-22 and again 2026-09-24:
+///
+/// ```text
+///   dart                 _v.scss stays gone
+///   npm CLI, before #176 _v.scss RECREATED holding the error stylesheet
+///   npm CLI, after  #176 _v.scss stays gone
+///   binary, before #177  _v.scss RECREATED holding the error stylesheet
+///   binary, after  #177  _v.scss stays gone
+/// ```
+///
+/// Two things had to change for this, and neither alone is enough. The guard
+/// asked `canonicalize`, which answers NOTHING for a dangling link, so it
+/// stepped aside; it reads what the link SAYS now. And a failed compile
+/// reports no dependencies at all, so there was nothing left to recognise
+/// `_v.scss` by — the watch remembers every file it has read, across
+/// failures, the way the npm CLI keeps its `known` set.
+#[test]
+#[cfg(unix)]
+fn watch_does_not_recreate_a_deleted_dependency_through_the_output_link() {
+    use std::time::Duration;
+
+    let dir = scratch("watch_deleted_dep_link");
+    write(&dir, "main.scss", "@use \"v\" as v;\n.a { color: v.$c; }\n");
+    write(&dir, "_v.scss", "$c: red;\n");
+    std::os::unix::fs::symlink("_v.scss", dir.join("out.css")).unwrap();
+
+    let mut child = std::process::Command::new(BIN)
+        .args(["--no-source-map", "--watch", "main.scss", "out.css"])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn --watch");
+
+    // Let the first compile finish, so the watch has read `_v.scss` and can
+    // remember it. Deleting before that would test a different thing: a watch
+    // that never saw the file at all.
+    std::thread::sleep(Duration::from_millis(1500));
+    let read_it = dir.join("_v.scss").exists();
+    std::fs::remove_file(dir.join("_v.scss")).expect("rm the dependency");
+    // …and long enough for the failing compile to run and try to write.
+    std::thread::sleep(Duration::from_millis(3000));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let came_back = dir.join("_v.scss").exists();
+    let contents = std::fs::read_to_string(dir.join("_v.scss")).unwrap_or_default();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(read_it, "the fixture was not there for the first compile to read");
+    assert!(
+        !came_back,
+        "the deleted dependency was recreated through the output symlink: {contents:?}"
+    );
+}
+
+/// …and the legitimate dangling link still works, which is why the guard
+/// cannot simply refuse to write through one.
+///
+/// `out.css -> dist/out.css` before the first build is a common setup, and
+/// `dist/out.css` is not a file any compile has read — so the link names
+/// nothing the watch knows and the write goes through. dart writes it too
+/// (measured 2026-09-24).
+#[test]
+#[cfg(unix)]
+fn watch_writes_through_a_dangling_link_that_names_no_source() {
+    use std::time::Duration;
+
+    let dir = scratch("watch_dangling_ok");
+    write(&dir, "main.scss", ".a { color: red; }\n");
+    std::fs::create_dir_all(dir.join("dist")).unwrap();
+    std::os::unix::fs::symlink("dist/out.css", dir.join("out.css")).unwrap();
+
+    let mut child = std::process::Command::new(BIN)
+        .args(["--no-source-map", "--watch", "main.scss", "out.css"])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn --watch");
+
+    std::thread::sleep(Duration::from_millis(2500));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let written = std::fs::read_to_string(dir.join("dist/out.css")).unwrap_or_default();
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(
+        written.contains("color: red"),
+        "the CSS was not written through the link: {written:?}"
+    );
+}
+
 /// The alias guard on the FAILURE path: a broken save when the output is
 /// one of the sources.
 ///
