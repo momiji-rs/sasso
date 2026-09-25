@@ -19,6 +19,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -1167,8 +1168,9 @@ struct Shared {
     file_error_css: bool,
     /// Print an error stylesheet to stdout on failure (`--error-css`, explicit).
     stdout_error_css: bool,
-    /// Every file this WATCH has read as a stylesheet, across all rounds.
-    /// Empty for a one-shot run, and empty on a watch's first compile.
+    /// Every file this WATCH has read as a stylesheet, across all rounds,
+    /// already reduced to the key `aliases_a_source` compares by. Empty for a
+    /// one-shot run, and empty on a watch's first compile.
     ///
     /// `finish_compile_error` needs it because a failure reports no
     /// dependencies at all: once `_v.scss` is deleted, `attempted_paths()`
@@ -1176,7 +1178,20 @@ struct Shared {
     /// write an error stylesheet over a source has nothing to compare the
     /// output against. The npm CLI survives this by keeping its `known` set
     /// across a failure; this is the same memory (#177).
-    watch_known: Vec<PathBuf>,
+    ///
+    /// REDUCED WHEN ADDED, and a set rather than a list, because the guard
+    /// runs per unit per round while this grows for the life of the watch.
+    /// Canonicalising it on every comparison cost 9.5 ms per unit per round
+    /// at 500 files and 38.9 ms at 2000 — a directory watch paid that once
+    /// per unit (measured 2026-09-25). A lookup costs nothing and touches no
+    /// filesystem.
+    ///
+    /// Each file contributes TWO keys: its own name, and what it ultimately
+    /// names if it is a symlink. A dependency read through `_v.scss ->
+    /// real_v.scss` is remembered under both, so deleting `real_v.scss` is
+    /// still recognised — the output link resolves to the target, and the
+    /// importer only ever reported the link.
+    watch_known: BTreeSet<PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1456,7 +1471,7 @@ fn run(cli: Cli) -> ExitCode {
     let shared = Shared {
         // A one-shot run has read nothing before; `run_watch` fills this in
         // per round.
-        watch_known: Vec::new(),
+        watch_known: BTreeSet::new(),
         load_paths: cli.load_paths.clone(),
         style: cli.style,
         unicode: !cli.no_unicode,
@@ -1846,7 +1861,7 @@ fn resolved_dir_key(p: &Path, cwd: &Path) -> PathBuf {
 ///
 /// `path_key` rather than `==`, so the answer does not depend on the case a
 /// path was typed in on Windows, where two spellings are one file.
-fn aliases_a_source(output: &Path, unit: &Unit, deps: &[PathBuf], remembered: &[PathBuf]) -> bool {
+fn aliases_a_source(output: &Path, unit: &Unit, deps: &[PathBuf], remembered: &BTreeSet<PathBuf>) -> bool {
     // `dirs_key`, the same one the snapshot uses: the output is whatever was
     // typed on the command line and a dependency is the absolute path the
     // importer resolved, so `_v.scss` and `/…/_v.scss` are the same file
@@ -1879,10 +1894,17 @@ fn aliases_a_source(output: &Path, unit: &Unit, deps: &[PathBuf], remembered: &[
     if unit.source_path().is_some_and(same) {
         return true;
     }
-    // `deps` is what THIS compile read, and a failure reads nothing — so a
-    // watch also asks what it has read before. Without that second list the
-    // guard has nothing to recognise a deleted dependency by.
-    deps.iter().any(|d| same(d)) || remembered.iter().any(|d| same(d))
+    // `deps` is what THIS compile read: a live, short list, and the strongest
+    // check available because those files still exist.
+    if deps.iter().any(|d| same(d)) {
+        return true;
+    }
+    // …and a failure reads nothing, so a watch also asks what it has read
+    // BEFORE. By lookup, not by scanning: every path in there was reduced
+    // when it was added, so this is two comparisons against a set rather than
+    // two `canonicalize` calls per file ever read.
+    remembered.contains(&resolved_dir_key(output, &cwd))
+        || named.as_ref().is_some_and(|n| remembered.contains(n))
 }
 
 /// `--update`: is `output` at least as new as `input` and every file in
@@ -2104,7 +2126,7 @@ mod disturbed_tests {
             load_paths: Vec::new(),
             // These tests drive `finish_compile_error` directly, outside any
             // watch, so there is nothing read to remember.
-            watch_known: Vec::new(),
+            watch_known: BTreeSet::new(),
             style: OutputStyle::Expanded,
             unicode: true,
             charset: true,
@@ -2496,12 +2518,12 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
     // the set of files this watch has read — which grows as the watch runs.
     // Two `Vec` clones against a whole compile is not a cost worth shaping
     // the code around.
-    let round_shared = |provisional: bool, known: &std::collections::BTreeSet<PathBuf>| Shared {
+    let round_shared = |provisional: bool, known: &BTreeSet<PathBuf>| Shared {
         update: false,
         provisional,
         load_paths: shared.load_paths.clone(),
         silenced: shared.silenced.clone(),
-        watch_known: known.iter().cloned().collect(),
+        watch_known: known.clone(),
         ..*shared
     };
 
@@ -2511,7 +2533,8 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
     // compile reports no dependencies, so without this the error-stylesheet
     // guard cannot tell that the output symlink points at one (#177). The
     // npm CLI keeps its own `known` set for the same reason.
-    let mut ever_read: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    let mut ever_read: BTreeSet<PathBuf> = BTreeSet::new();
+    let watch_cwd = std::env::current_dir().unwrap_or_default();
 
     let mut snapshot = watch::Snapshot::default();
     let mut coalesce = watch::Coalesce::new(watch::WINDOW);
@@ -2595,7 +2618,18 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
             // Remember them for the NEXT round, before directories are mixed
             // in below: what this needs is files that were read, and a
             // directory is not one.
-            ever_read.extend(followed.iter().map(|(f, _)| f.clone()));
+            //
+            // Reduced HERE rather than at comparison time, and each file
+            // contributes what it names as well as its own name — the
+            // importer reports the link it read (`_v.scss`) and the output
+            // link resolves to the target (`real_v.scss`), so remembering
+            // only one of the two leaves the other unrecognised.
+            for (f, _) in &followed {
+                ever_read.insert(resolved_dir_key(f, &watch_cwd));
+                if let Some(dest) = link_destination(&watch_cwd.join(f)) {
+                    ever_read.insert(resolved_dir_key(&dest, &watch_cwd));
+                }
+            }
             // …and the directories they live in, so a dependency that does
             // not exist YET can arrive. A missing `@use` target has no path
             // to stat; its directory does, and its mtime moves when the file

@@ -38,11 +38,27 @@ Conformance is tracked separately as a ratchet against the official
     symlinked directory, where the entry and the output spell one directory
     two ways (both mixed orders failed, in both directions). A relative target
     climbing out with `..` through a symlinked holder is the fourth, and the
-    one the final parent's resolution alone cannot save;
+    one the final parent's resolution alone cannot save; a DEPENDENCY that is
+    itself a symlink is the fifth — the importer reports the link it opened
+    and the output link resolves to the target, so both names are remembered;
   - a failed compile reports no dependencies at all, so once `_v.scss` was
     deleted nothing was left to recognise it by. The watch remembers every
     file it has read, across failures, the way the npm CLI keeps its `known`
     set.
+
+  The watch's memory is reduced to comparison keys as it is built, not scanned
+  at comparison time. The guard runs once per unit per round while the memory
+  grows for the life of the watch, so canonicalising it per comparison cost
+  10.5 ms per unit per round at 500 files ever read and 42.3 ms at 2000. Two
+  set lookups cost 8-9 us regardless of history size:
+
+  ```
+    files ever read   scanned    looked up
+              10      217 us      8.6 us
+             100      2.24 ms     9.4 us
+             500     10.48 ms     8.4 us
+            2000     42.28 ms     9.3 us
+  ```
 
   Not done by refusing to write through a dangling link at all:
   `out.css -> dist/out.css` before the first build is a legitimate and common

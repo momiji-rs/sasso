@@ -3357,6 +3357,74 @@ fn watch_does_not_recreate_a_deleted_dependency_through_a_symlinked_directory() 
     }
 }
 
+/// …and where the DEPENDENCY is itself a symlink whose target is deleted.
+///
+/// ```text
+///   _v.scss -> real_v.scss     the dependency, read through a link
+///   out.css -> _v.scss         the output link
+///   rm real_v.scss             the chain now ends at a deleted file
+/// ```
+///
+/// The importer only ever reports `_v.scss`, the name it opened; the output
+/// link resolves all the way to `real_v.scss`. Remembering one of the two
+/// leaves the other unrecognised, and the error stylesheet then recreated
+/// `real_v.scss` (r4101409155, measured before the fix). So each remembered
+/// file contributes BOTH keys: its own name and what it ultimately names.
+#[test]
+#[cfg(unix)]
+fn watch_does_not_recreate_a_deleted_target_of_a_symlinked_dependency() {
+    use std::time::{Duration, Instant};
+
+    let dir = scratch("watch_dep_is_a_link");
+    write(
+        &dir,
+        "real_v.scss",
+        "$c: red;\n@debug \"the dependency was read\";\n",
+    );
+    write(&dir, "main.scss", "@use \"v\" as v;\n.a { color: v.$c; }\n");
+    std::os::unix::fs::symlink("real_v.scss", dir.join("_v.scss")).unwrap();
+    std::os::unix::fs::symlink("_v.scss", dir.join("out.css")).unwrap();
+
+    let log = dir.join("watch.err");
+    let mut child = std::process::Command::new(BIN)
+        .args(["--no-source-map", "--watch", "main.scss", "out.css"])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(std::fs::File::create(&log).unwrap()))
+        .spawn()
+        .expect("spawn --watch");
+
+    let until = |pred: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if pred() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    };
+    let logged = |needle: &str| std::fs::read_to_string(&log).unwrap_or_default().contains(needle);
+
+    let read_it = until(&|| logged("the dependency was read"));
+    std::fs::remove_file(dir.join("real_v.scss")).expect("rm the link's target");
+    let failed = until(&|| logged("Can't find stylesheet to import"));
+    std::thread::sleep(Duration::from_millis(500));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let came_back = dir.join("real_v.scss").exists();
+    let contents = std::fs::read_to_string(dir.join("real_v.scss")).unwrap_or_default();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(read_it, "the dependency was never read");
+    assert!(failed, "the missing import was never reported");
+    assert!(
+        !came_back,
+        "the link's deleted target was recreated: {contents:?}"
+    );
+}
+
 /// …and where the link's target climbs out with `..` through a symlinked
 /// holder, which is the one shape the FINAL parent's resolution cannot save.
 ///
