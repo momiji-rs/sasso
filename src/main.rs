@@ -1781,6 +1781,66 @@ fn dirs_key(p: &Path) -> PathBuf {
     path_key(&normalize_path(&cwd.join(p)))
 }
 
+/// How many symlink hops to follow before calling it a cycle.
+///
+/// Linux gives up at 40 and macOS at 32; the number only has to be finite,
+/// because the answer for a cycle is "this names nothing we can compare".
+const MAX_LINK_HOPS: usize = 40;
+
+/// What `start` ultimately names, following the symlink chain as far as it
+/// goes. `None` for a cycle.
+///
+/// Unlike `canonicalize`, the END need not exist: that is the whole point,
+/// because the file this is asked about has just been deleted. Each hop is
+/// resolved against its own link's directory, CANONICALLY — a relative target
+/// is read by the filesystem after it has followed symlinks in the parent, so
+/// resolving lexically would name a different directory (#177, r4100984799).
+///
+/// Following the whole chain rather than one hop matters for the same reason:
+/// `out.css -> middle.scss -> _v.scss` writes through to `_v.scss`, and one
+/// hop stops at `middle.scss`, which is nothing any compile read
+/// (r4100984752).
+fn link_destination(start: &Path) -> Option<PathBuf> {
+    let mut cur = start.to_path_buf();
+    for _ in 0..MAX_LINK_HOPS {
+        // Not a link, or not there at all: this is the name it settles on.
+        let Ok(target) = std::fs::read_link(&cur) else {
+            return Some(cur);
+        };
+        // The holder of a link that was just read always exists, so
+        // `canonicalize` answers here even though it cannot answer for `cur`.
+        let holder = match cur.parent() {
+            Some(p) => std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()),
+            None => PathBuf::new(),
+        };
+        // An absolute target replaces the holder, which `join` already does.
+        cur = holder.join(target);
+    }
+    None
+}
+
+/// A key for a path whose FINAL component may not exist: the directory
+/// resolved through symlinks, plus the name as written.
+///
+/// `canonicalize` needs the whole path to exist and so answers nothing for a
+/// deleted file — but the directory holding it is still there, and the
+/// directory is the part a symlink can rename. Without this, `real/_v.scss`
+/// and `linkdir/_v.scss` key differently while being one file, and which
+/// spelling each side uses depends on how the command line named the entry
+/// and the output (#177).
+fn resolved_dir_key(p: &Path, cwd: &Path) -> PathBuf {
+    let abs = normalize_path(&cwd.join(p));
+    match (abs.parent(), abs.file_name()) {
+        (Some(parent), Some(name)) => {
+            let dir = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+            path_key(&dir.join(name))
+        }
+        // A root, or a path ending in `..`: nothing to split, so fall back to
+        // the lexical key rather than inventing one.
+        _ => path_key(&abs),
+    }
+}
+
 /// Would writing `output` replace a file this compile read — the entry
 /// itself, or one of its dependencies?
 ///
@@ -1800,25 +1860,21 @@ fn aliases_a_source(output: &Path, unit: &Unit, deps: &[PathBuf], remembered: &[
     // that EXISTS, which is why it is a second opinion rather than the rule:
     // an output that is not there yet cannot alias anything.
     let real = |p: &Path| std::fs::canonicalize(cwd.join(p)).ok().map(|c| path_key(&c));
-    // What the output NAMES, if it is a symlink: the target as WRITTEN,
-    // resolved against the link's own directory. The one reading that
-    // survives a DANGLING link, where `canonicalize` answers nothing at all —
-    // which is how `out.css -> _v.scss` came to recreate a deleted `_v.scss`
-    // with an error stylesheet in it (#177). `read_link` does not follow, so
-    // it answers for a link whose target is gone.
-    let named = std::fs::read_link(cwd.join(output)).ok().map(|target| {
-        let holder = cwd
-            .join(output)
-            .parent()
-            .map_or_else(|| cwd.clone(), Path::to_path_buf);
-        key(&holder.join(target))
-    });
+    // What the output ultimately NAMES, following the symlink chain. This is
+    // the reading that survives a DANGLING link, where `canonicalize` answers
+    // nothing at all — which is how `out.css -> _v.scss` came to recreate a
+    // deleted `_v.scss` with an error stylesheet in it (#177).
+    let named = link_destination(&cwd.join(output)).map(|p| resolved_dir_key(&p, &cwd));
     let dest = key(output);
     let dest_real = real(output);
     let same = |p: &Path| {
         key(p) == dest
             || (dest_real.is_some() && real(p).is_some() && real(p) == dest_real)
-            || named.as_ref() == Some(&key(p))
+            // Compared through `resolved_dir_key`, not `key`: the file is
+            // GONE, so the only part symlinks can still rename is the
+            // directory holding it, and the two sides may spell that
+            // differently — `real/_v.scss` and `linkdir/_v.scss` are one file.
+            || named.as_ref() == Some(&resolved_dir_key(p, &cwd))
     };
     if unit.source_path().is_some_and(same) {
         return true;

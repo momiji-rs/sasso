@@ -29,9 +29,16 @@ Conformance is tracked separately as a ratchet against the official
   Two things had to change, and neither alone is enough:
 
   - the guard asked `canonicalize`, which answers nothing for a DANGLING link,
-    so it stepped aside. It reads what the link *says* now — `read_link`
-    resolved against the link's own directory, which survives a target that is
-    gone;
+    so it stepped aside. It follows the link CHAIN now, resolving each hop
+    against its own holder — and compares through the holder rather than
+    lexically, because the file is gone and the directory is the only part a
+    symlink can still rename. Three shapes, each its own regression:
+    `out.css -> _v.scss`; `out.css -> middle.scss -> _v.scss`, where one hop
+    stops at a file no compile ever read; and a link reached through a
+    symlinked directory, where the entry and the output spell one directory
+    two ways (both mixed orders failed, in both directions). A relative target
+    climbing out with `..` through a symlinked holder is the fourth, and the
+    one the final parent's resolution alone cannot save;
   - a failed compile reports no dependencies at all, so once `_v.scss` was
     deleted nothing was left to recognise it by. The watch remembers every
     file it has read, across failures, the way the npm CLI keeps its `known`
