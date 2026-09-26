@@ -46,8 +46,8 @@ Conformance is tracked separately as a ratchet against the official
     file it has read, across failures, the way the npm CLI keeps its `known`
     set.
 
-  The watch's memory is reduced to comparison keys as it is built, not scanned
-  at comparison time. The guard runs once per unit per round while the memory
+  The watch's memory is reduced to comparison keys as it is built, held behind
+  an `Arc` so no round copies it, and looked up rather than scanned. The guard runs once per unit per round while the memory
   grows for the life of the watch, so canonicalising it per comparison cost
   10.5 ms per unit per round at 500 files ever read and 42.3 ms at 2000. Two
   set lookups cost 8-9 us regardless of history size:

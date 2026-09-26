@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -1186,12 +1187,18 @@ struct Shared {
     /// per unit (measured 2026-09-25). A lookup costs nothing and touches no
     /// filesystem.
     ///
+    /// Behind an `Arc` so a round's `Shared` shares it rather than copying it.
+    /// Cloning the set was 11.8 us at 500 keys and 45.8 us at 2000, once per
+    /// round — not a practical cost, but it is O(history) work in a design
+    /// whose point is that the history stops costing anything, and the handle
+    /// makes it nothing.
+    ///
     /// Each file contributes TWO keys: its own name, and what it ultimately
     /// names if it is a symlink. A dependency read through `_v.scss ->
     /// real_v.scss` is remembered under both, so deleting `real_v.scss` is
     /// still recognised — the output link resolves to the target, and the
     /// importer only ever reported the link.
-    watch_known: BTreeSet<PathBuf>,
+    watch_known: Arc<BTreeSet<PathBuf>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1471,7 +1478,7 @@ fn run(cli: Cli) -> ExitCode {
     let shared = Shared {
         // A one-shot run has read nothing before; `run_watch` fills this in
         // per round.
-        watch_known: BTreeSet::new(),
+        watch_known: Arc::new(BTreeSet::new()),
         load_paths: cli.load_paths.clone(),
         style: cli.style,
         unicode: !cli.no_unicode,
@@ -1796,11 +1803,22 @@ fn dirs_key(p: &Path) -> PathBuf {
     path_key(&normalize_path(&cwd.join(p)))
 }
 
-/// How many symlink hops to follow before calling it a cycle.
+/// How many symlink hops to follow before deciding the chain does not end.
 ///
-/// Linux gives up at 40 and macOS at 32; the number only has to be finite,
-/// because the answer for a cycle is "this names nothing we can compare".
+/// Linux gives up at 40 and macOS at 32, and a chain of exactly this many
+/// still resolves on Linux — so the hop AFTER this many is what marks a cycle,
+/// not this many themselves. See the tail of [`link_destination`].
 const MAX_LINK_HOPS: usize = 40;
+
+/// The constant may exceed a platform's own limit but must not fall below it:
+/// a chain Linux resolves has to be one `link_destination` can name, or the
+/// guard is blind to it there. A `const` assertion rather than a test, because
+/// it is a fact about two constants — this fails the BUILD, which is the
+/// strongest place to fail.
+const _: () = assert!(
+    MAX_LINK_HOPS >= 40,
+    "MAX_LINK_HOPS must reach Linux's MAXSYMLINKS of 40"
+);
 
 /// What `start` ultimately names, following the symlink chain as far as it
 /// goes. `None` for a cycle.
@@ -1831,7 +1849,117 @@ fn link_destination(start: &Path) -> Option<PathBuf> {
         // An absolute target replaces the holder, which `join` already does.
         cur = holder.join(target);
     }
-    None
+    // `MAX_LINK_HOPS` links have been followed, and the chain may have ENDED
+    // exactly there — Linux resolves a 40-link chain and refuses only the
+    // 41st, so returning `None` here would leave the guard blind to a real
+    // target at the boundary. Measured before this: a 39-link chain named its
+    // target, a 40-link chain named nothing.
+    //
+    // So ask once more, and answer by whether what we landed on is itself a
+    // link: if it is not, the chain ended and this is the name; if it is,
+    // the chain is longer than anything resolves, or a cycle.
+    std::fs::read_link(&cur).err().map(|_| cur)
+}
+
+/// [`link_destination`]'s hop boundary, tested at the FUNCTION rather than
+/// through a compile.
+///
+/// Deliberately not end-to-end: macOS's own `SYMLOOP_MAX` is 32, so a 40-link
+/// chain is refused by the kernel there and an end-to-end case would pass for
+/// the wrong reason — the guard would never be consulted. Linux resolves 40,
+/// which is exactly why the off-by-one mattered. The unit is where the rule
+/// lives, so the unit is where it is pinned.
+#[cfg(all(test, unix))]
+mod link_destination_tests {
+    use std::path::{Path, PathBuf};
+
+    /// `out.css -> h(n-1) -> … -> h1 -> _v.scss`, i.e. `n` links to follow.
+    fn chain_of(dir: &Path, n: usize) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("_v.scss"), "$c: red;\n").unwrap();
+        let mut prev = PathBuf::from("_v.scss");
+        for i in 1..n {
+            let link = dir.join(format!("h{i}"));
+            std::os::unix::fs::symlink(&prev, &link).unwrap();
+            prev = PathBuf::from(format!("h{i}"));
+        }
+        let out = dir.join("out.css");
+        std::os::unix::fs::symlink(&prev, &out).unwrap();
+        out
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("sasso-hops-{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&d).ok();
+        d
+    }
+
+    /// Linux's own `MAXSYMLINKS`. The boundary that matters is the
+    /// platform's, not whatever this file's constant happens to say — so it
+    /// is written out here, and the constant is required to reach it.
+    /// Building the chains from `MAX_LINK_HOPS` instead made this test adapt
+    /// to a lowered constant rather than catch it.
+    const LINUX_MAXSYMLINKS: usize = 40;
+
+    /// A chain that ENDS on the last allowed hop still names its target.
+    /// Returning `None` there left the guard blind at the boundary: measured
+    /// before the fix, 39 links named `_v.scss` and 40 named nothing.
+    #[test]
+    fn a_chain_ending_on_the_last_hop_is_named() {
+        for n in [1, 2, LINUX_MAXSYMLINKS - 1, LINUX_MAXSYMLINKS] {
+            let dir = scratch(&format!("end{n}"));
+            let out = chain_of(&dir, n);
+            let got = super::link_destination(&out);
+            let want = dir.join("_v.scss");
+            std::fs::remove_dir_all(&dir).ok();
+            assert_eq!(
+                got.as_deref().and_then(Path::file_name),
+                want.file_name(),
+                "a chain of {n} links should name its target, got {got:?}",
+            );
+        }
+    }
+
+    /// One hop past the limit is not resolvable, and neither is a cycle.
+    #[test]
+    fn a_longer_chain_or_a_cycle_names_nothing() {
+        let dir = scratch("over");
+        let out = chain_of(&dir, super::MAX_LINK_HOPS + 1);
+        // …counted from the CONSTANT here, because "one past what this
+        // follows" is what the `None` branch is about, not the platform's.
+        let over = super::link_destination(&out);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(over, None, "a chain past the limit should name nothing");
+
+        let dir = scratch("cycle");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink("b.css", dir.join("a.css")).unwrap();
+        std::os::unix::fs::symlink("a.css", dir.join("b.css")).unwrap();
+        let cycle = super::link_destination(&dir.join("a.css"));
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(cycle, None, "a cycle should name nothing");
+    }
+
+    /// A plain path, and a dangling link, both name themselves — the two
+    /// cases the guard relies on most.
+    #[test]
+    fn a_plain_path_and_a_dangling_link_name_themselves() {
+        let dir = scratch("plain");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.scss"), ".a{b:1}\n").unwrap();
+        std::os::unix::fs::symlink("gone.scss", dir.join("dangling.css")).unwrap();
+
+        let plain = super::link_destination(&dir.join("main.scss"));
+        let dangling = super::link_destination(&dir.join("dangling.css"));
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(plain.as_deref(), Some(dir.join("main.scss").as_path()));
+        assert_eq!(
+            dangling.as_deref().and_then(Path::file_name),
+            Some(std::ffi::OsStr::new("gone.scss")),
+            "a dangling link must still name what it points at",
+        );
+    }
 }
 
 /// A key for a path whose FINAL component may not exist: the directory
@@ -2126,7 +2254,7 @@ mod disturbed_tests {
             load_paths: Vec::new(),
             // These tests drive `finish_compile_error` directly, outside any
             // watch, so there is nothing read to remember.
-            watch_known: BTreeSet::new(),
+            watch_known: Arc::new(BTreeSet::new()),
             style: OutputStyle::Expanded,
             unicode: true,
             charset: true,
@@ -2518,12 +2646,13 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
     // the set of files this watch has read — which grows as the watch runs.
     // Two `Vec` clones against a whole compile is not a cost worth shaping
     // the code around.
-    let round_shared = |provisional: bool, known: &BTreeSet<PathBuf>| Shared {
+    let round_shared = |provisional: bool, known: &Arc<BTreeSet<PathBuf>>| Shared {
         update: false,
         provisional,
         load_paths: shared.load_paths.clone(),
         silenced: shared.silenced.clone(),
-        watch_known: known.clone(),
+        // The HANDLE, not the set.
+        watch_known: Arc::clone(known),
         ..*shared
     };
 
@@ -2533,7 +2662,11 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
     // compile reports no dependencies, so without this the error-stylesheet
     // guard cannot tell that the output symlink points at one (#177). The
     // npm CLI keeps its own `known` set for the same reason.
-    let mut ever_read: BTreeSet<PathBuf> = BTreeSet::new();
+    // In the `Arc` itself, so no round ever copies it. `Arc::make_mut` below
+    // copies only when the handle is still shared, and the round's `Shared` is
+    // scoped to drop before then — so in the steady state this is mutated in
+    // place and each round's clone is a refcount bump.
+    let mut ever_read: Arc<BTreeSet<PathBuf>> = Arc::new(BTreeSet::new());
     let watch_cwd = std::env::current_dir().unwrap_or_default();
 
     let mut snapshot = watch::Snapshot::default();
@@ -2560,15 +2693,21 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
                 .collect();
             // The very first compile is the only one `--update` applies to;
             // it is also never provisional, and has read nothing yet.
-            let round_owned;
-            let run_shared = if started_once {
-                round_owned = round_shared(provisional, &ever_read);
-                &round_owned
-            } else {
-                shared
+            //
+            // Scoped, so the round's `Shared` — and with it its handle on the
+            // history — is dropped before the history is extended below. That
+            // is what lets `Arc::make_mut` mutate in place instead of copying.
+            let outcomes = {
+                let round_owned;
+                let run_shared = if started_once {
+                    round_owned = round_shared(provisional, &ever_read);
+                    &round_owned
+                } else {
+                    shared
+                };
+                started_once = true;
+                compile_all(units, run_shared, jobs, stop_on_error)
             };
-            started_once = true;
-            let outcomes = compile_all(units, run_shared, jobs, stop_on_error);
             let mut ok = true;
             let mut followed: Vec<(PathBuf, watch::Stamp)> = Vec::new();
             let mut unresolved: Vec<String> = Vec::new();
@@ -2624,10 +2763,13 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
             // importer reports the link it read (`_v.scss`) and the output
             // link resolves to the target (`real_v.scss`), so remembering
             // only one of the two leaves the other unrecognised.
-            for (f, _) in &followed {
-                ever_read.insert(resolved_dir_key(f, &watch_cwd));
-                if let Some(dest) = link_destination(&watch_cwd.join(f)) {
-                    ever_read.insert(resolved_dir_key(&dest, &watch_cwd));
+            {
+                let known = Arc::make_mut(&mut ever_read);
+                for (f, _) in &followed {
+                    known.insert(resolved_dir_key(f, &watch_cwd));
+                    if let Some(dest) = link_destination(&watch_cwd.join(f)) {
+                        known.insert(resolved_dir_key(&dest, &watch_cwd));
+                    }
                 }
             }
             // …and the directories they live in, so a dependency that does
