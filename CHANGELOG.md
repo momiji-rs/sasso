@@ -525,6 +525,13 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Added
 
+- **`nur.repos.momiji-rs.sasso` resolves** — the NUR registration
+  ([nix-community/NUR#1229](https://github.com/nix-community/NUR/pull/1229))
+  merged, so the `nix/nur.nix` entry point from #82 is now a channel anyone
+  can name, not just us. It serves `sasso` and `sasso-ffi` from whatever
+  `master` NUR last locked, which trails a push by up to a day; the top-level
+  README now advertises it beside the flake.
+
 - **`-w`/`--watch` in the binary** (#86), which closes the flag gap that made
   a `sass` build script work under `npm install sasso` and fail with the
   binary. It follows the entry and everything the entry loaded, re-resolving
