@@ -3500,6 +3500,73 @@ fn watch_follows_a_link_that_climbs_out_through_a_symlinked_holder() {
     assert!(!stray, "the write was misdirected into sub/x rather than refused");
 }
 
+/// A dependency DROPPED from the entry stops blocking the output.
+///
+/// `out.css -> _v.scss`, `main.scss` uses `v`, so the first round declines to
+/// write — the output aliases a source. Then `@use "v"` is deleted: nothing
+/// reads `_v.scss` any more, and `out.css` is just the user's output again, so
+/// the write must go through.
+///
+/// It did not, once the watch started remembering: the historical key matched
+/// forever and the output was never written again — silently, with nothing
+/// narrated (r4109667607). So the history is consulted on the FAILURE path
+/// only, where `deps` is empty because the compile read nothing. A successful
+/// compile's `deps` are the truth.
+#[test]
+#[cfg(unix)]
+fn watch_stops_blocking_the_output_once_the_dependency_is_dropped() {
+    use std::time::{Duration, Instant};
+
+    let dir = scratch("watch_dep_dropped");
+    write(&dir, "_v.scss", "$c: red;\n");
+    write(&dir, "main.scss", "@use \"v\" as v;\n.a { color: v.$c; }\n");
+    // The output IS the dependency, by link — so a write lands in `_v.scss`.
+    std::os::unix::fs::symlink("_v.scss", dir.join("out.css")).unwrap();
+
+    let mut child = std::process::Command::new(BIN)
+        .args(["--no-source-map", "--watch", "main.scss", "out.css"])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn --watch");
+
+    let until = |pred: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if pred() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    };
+    let body = || std::fs::read_to_string(dir.join("_v.scss")).unwrap_or_default();
+
+    // The first round must NOT write: the output aliases a live dependency.
+    assert!(
+        until(&|| body().contains("$c: red")),
+        "the fixture is not what the test assumes"
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    let untouched = body();
+
+    // Drop the dependency from the entry.
+    write(&dir, "main.scss", ".a { color: blue; }\n");
+    let wrote = until(&|| body().contains("color: blue"));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let after = body();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(
+        untouched.contains("$c: red"),
+        "the first round wrote over a live dependency: {untouched:?}"
+    );
+    assert!(wrote, "the write stayed blocked by the stale history: {after:?}");
+}
+
 /// …and the legitimate dangling link still works, which is why the guard
 /// cannot simply refuse to write through one.
 ///
