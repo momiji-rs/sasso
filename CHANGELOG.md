@@ -529,7 +529,8 @@ Conformance is tracked separately as a ratchet against the official
   ([nix-community/NUR#1229](https://github.com/nix-community/NUR/pull/1229))
   merged, so the `nix/nur.nix` entry point from #82 is now a channel anyone
   can name, not just us. It serves `sasso` and `sasso-ffi` from whatever
-  `master` NUR last locked, which trails a push by up to a day; the top-level
+  `master` NUR last locked — normally re-locked daily, but a revision that
+  fails NUR's evaluation is skipped, so it can trail longer. The top-level
   README now advertises it beside the flake.
 
 - **`-w`/`--watch` in the binary** (#86), which closes the flag gap that made

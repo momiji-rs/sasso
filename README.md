@@ -126,8 +126,9 @@ runs offline (`SASSO_PARITY=1 cargo test --test parity`).
 A configuration that already uses the
 [Nix User Repository](https://github.com/nix-community/NUR) can name the
 package instead of the flake — `pkgs.nur.repos.momiji-rs.sasso`, and
-`sasso-ffi` beside it. NUR re-locks daily, so it can trail `master` by up to a
-day. See [`nix/README.md`](nix/README.md) for the packaging itself.
+`sasso-ffi` beside it. It trails `master`: NUR normally re-locks daily, and
+keeps the last revision that evaluated if a newer one does not. See
+[`nix/README.md`](nix/README.md) for the packaging itself.
 
 **Library — crates.io.**
 
