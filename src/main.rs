@@ -1803,21 +1803,39 @@ fn dirs_key(p: &Path) -> PathBuf {
     path_key(&normalize_path(&cwd.join(p)))
 }
 
-/// How many symlink hops to follow before deciding the chain does not end.
+/// How many hops to follow before deciding the chain does not end.
 ///
-/// Linux gives up at 40 and macOS at 32, and a chain of exactly this many
-/// still resolves on Linux — so the hop AFTER this many is what marks a cycle,
-/// not this many themselves. See the tail of [`link_destination`].
-const MAX_LINK_HOPS: usize = 40;
+/// Has to reach the deepest chain any supported platform will resolve, or the
+/// guard goes blind on a chain the OS is perfectly happy to write through:
+///
+/// ```text
+///   macOS     32  (SYMLOOP_MAX)
+///   Linux     40  (MAXSYMLINKS)
+///   Windows   63  (reparse points per path, per Microsoft's docs)
+/// ```
+///
+/// 64, so the deepest of those is inside the walk with a hop to spare. This is
+/// a CEILING, not a cost: the walk stops as soon as the chain ends, so an
+/// ordinary one-link output still costs one `read_link`. Only a cycle pays the
+/// full count, once per unit per round.
+///
+/// A chain of exactly this many still resolves, so the hop AFTER it is what
+/// marks a cycle — see the tail of [`link_destination`].
+const MAX_LINK_HOPS: usize = 64;
 
-/// The constant may exceed a platform's own limit but must not fall below it:
-/// a chain Linux resolves has to be one `link_destination` can name, or the
-/// guard is blind to it there. A `const` assertion rather than a test, because
-/// it is a fact about two constants — this fails the BUILD, which is the
-/// strongest place to fail.
+/// The deepest chain any supported platform resolves. See [`MAX_LINK_HOPS`].
+const DEEPEST_PLATFORM_CHAIN: usize = 63;
+
+/// The ceiling may exceed a platform's own limit but must not fall below it: a
+/// chain the OS resolves has to be one `link_destination` can name. A `const`
+/// assertion rather than a test, because it is a fact about two constants —
+/// this fails the BUILD, which is the strongest place to fail.
+///
+/// It was 40 — Linux's figure — which left a 41-to-63-hop chain resolvable on
+/// Windows and unnameable here (r4109839508).
 const _: () = assert!(
-    MAX_LINK_HOPS >= 40,
-    "MAX_LINK_HOPS must reach Linux's MAXSYMLINKS of 40"
+    MAX_LINK_HOPS > DEEPEST_PLATFORM_CHAIN,
+    "MAX_LINK_HOPS must exceed the deepest chain any platform resolves"
 );
 
 /// What `start` ultimately names, following the symlink chain as far as it
@@ -1958,19 +1976,29 @@ mod link_destination_tests {
         d
     }
 
-    /// Linux's own `MAXSYMLINKS`. The boundary that matters is the
-    /// platform's, not whatever this file's constant happens to say — so it
-    /// is written out here, and the constant is required to reach it.
-    /// Building the chains from `MAX_LINK_HOPS` instead made this test adapt
-    /// to a lowered constant rather than catch it.
-    const LINUX_MAXSYMLINKS: usize = 40;
-
     /// A chain that ENDS on the last allowed hop still names its target.
     /// Returning `None` there left the guard blind at the boundary: measured
     /// before the fix, 39 links named `_v.scss` and 40 named nothing.
     #[test]
     fn a_chain_ending_on_the_last_hop_is_named() {
-        for n in [1, 2, LINUX_MAXSYMLINKS - 1, LINUX_MAXSYMLINKS] {
+        // Two kinds of length, each for its own reason:
+        //
+        // - LITERALS for the platform limits (40 Linux, 63 Windows). Building
+        //   them from `MAX_LINK_HOPS` made this test adapt to a lowered
+        //   constant instead of catching it, which a mutation sweep caught.
+        // - `MAX_LINK_HOPS` itself, because a chain of exactly that length is
+        //   the only one that leaves the loop by exhausting it and so reaches
+        //   the post-loop check. Without it, deleting that check survived —
+        //   which a mutation sweep also caught, one ceiling raise later.
+        for n in [
+            1,
+            2,
+            39,
+            40,
+            62,
+            super::DEEPEST_PLATFORM_CHAIN,
+            super::MAX_LINK_HOPS,
+        ] {
             let dir = scratch(&format!("end{n}"));
             let out = chain_of(&dir, n);
             let got = super::link_destination(&out);
