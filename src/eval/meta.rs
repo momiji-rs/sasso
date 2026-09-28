@@ -862,10 +862,15 @@ impl<'a> Evaluator<'a> {
                 // The enumerated references belong to the module, not to the
                 // namespace they were reached through.
                 let owner = crate::value::BuiltinModule::from_name(builtin);
-                let names: Vec<&str> = match (*builtin, kind) {
-                    ("meta", MemberKind::Function) => crate::builtins::META_FUNCTION_NAMES.to_vec(),
-                    ("meta", MemberKind::Mixin) => crate::builtins::META_MIXIN_NAMES.to_vec(),
-                    _ => Vec::new(),
+                // Every built-in module answers now, from the one table in
+                // `builtins`, and in DART'S ORDER — a Sass map keeps insertion
+                // order, so this is observable. `sass:meta` was the only
+                // module modelled member-by-member before, which is why every
+                // other one returned an empty map (#64).
+                let names: Vec<&str> = match kind {
+                    MemberKind::Function => crate::builtins::module_function_names(builtin),
+                    MemberKind::Mixin => crate::builtins::module_mixin_names(builtin).to_vec(),
+                    MemberKind::Variable => crate::builtins::module_variable_names(builtin).to_vec(),
                 };
                 let entries: Vec<(Value, Value)> = names
                     .into_iter()
@@ -886,7 +891,14 @@ impl<'a> Evaluator<'a> {
                                 user: None,
                                 module: None,
                             })),
-                            MemberKind::Variable => Value::Null,
+                            // The real value, not `null`: dart answers
+                            // `("e": 2.718281828459045, "pi": …)` and this
+                            // used to answer `("e": null, …)` — the keys were
+                            // right and every value was wrong. `module_var`
+                            // already owned these; nothing was asking it.
+                            MemberKind::Variable => {
+                                crate::builtins::module_var(builtin, name, pos).unwrap_or(Value::Null)
+                            }
                         };
                         (key, val)
                     })
