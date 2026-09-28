@@ -1870,6 +1870,7 @@ function runWatch(jobs, common, opts) {
    * so an error that is real still reaches the terminal — one window later.
    */
   const settle = ({ u, result, failure, said }, provisional) => {
+    u.settledAt = ++settles;
     if (failure !== undefined) {
       if (provisional) return false;
       // Whatever it managed to warn about before failing is still the
@@ -1959,7 +1960,9 @@ function runWatch(jobs, common, opts) {
     }
     // Before the `Compiled` line, which is the order dart prints them in.
     if (said) writeStderrSync(said);
-    const arrives = !existsSync(u.output);
+    // Created is "absent before and present after", not "absent before":
+    // `--no-css` writes nothing, and its output is absent on every save.
+    const absent = !existsSync(u.output);
     const writeError = emit(result, u.output, common.sourceMap, opts);
     if (writeError) process.stderr.write(`${writeError}\n`);
     else {
@@ -1968,7 +1971,8 @@ function runWatch(jobs, common, opts) {
       // Wrote AT the catch-up: said so just below, and the burst is over.
       u.burstWrote = provisional;
       u.everWrote = true;
-      if (arrives) created.push(u);
+      wrote.push(u);
+      if (absent && existsSync(u.output)) created.push(u);
       // A provisional run narrates nothing, exactly as the binary's
       // does: its whole stdout is dropped there. The catch-up 50ms
       // behind it says the line instead, which is what puts the
@@ -1993,6 +1997,7 @@ function runWatch(jobs, common, opts) {
     const chosen = [...pending].sort((a, b) => a - b).map((i) => units[i]);
     if (chosen.length === 0) return true;
     if (!provisional) pending.clear();
+    wrote = [];
     created = [];
     // Pairs that write what another pair reads (`outputsCollide`) are
     // compiled and written one at a time, in command-line order, as
@@ -2016,27 +2021,42 @@ function runWatch(jobs, common, opts) {
     return ok;
   };
   /**
-   * The outputs this round CREATED, and the failing jobs that may have been
-   * waiting for one of them.
+   * The jobs this round's writes reach, told directly rather than left for
+   * a watcher to notice.
    *
-   * Another job's output is noise to a job that has not read it (see
-   * `oursFor`), and the sweep does not survey outputs at all. That is right
-   * for a job that compiles, and wrong for one that failed BECAUSE the file
-   * was not there yet: `a.scss:shared.css` beside `b.scss` that says
-   * `@use "shared"` fails b in the first round, which compiles before it
-   * writes, and then nothing ever woke it. So a job that is failing and
-   * follows the directory an output appeared in is compiled again.
+   * A job that READS another job's output — `a.scss:b.scss b.scss:out.css`,
+   * or an `@use` of a generated file — has to compile again when that output
+   * changes. Leaving it to the watchers loses it: the catch-up after a
+   * provisional write snapshots BEFORE it compiles, and that snapshot
+   * adopts the file the provisional run just wrote as the baseline. With
+   * the native watcher silent, whether the sweep ticked inside those 50 ms
+   * decided whether b ever caught up. Measured with every core busy, which
+   * stretches the sweep's interval: 5 of 15 saves of a.scss never reached
+   * out.css before this, 0 of 15 after.
+   * One of this round's own later batches that already read the new file
+   * is left alone.
    *
-   * Only a successful compile creating its output wakes anyone. An error
-   * stylesheet, a removal or a rewrite does not: a missing file is the one
-   * failure an output can fix by appearing, and waking on every rewrite
-   * would reprint an unrelated failure beside it on every save. It also
-   * means two failing jobs cannot wake each other forever.
+   * And a job that is FAILING because the file was not there yet:
+   * `a.scss:shared.css` beside `b.scss` that says `@use "shared"` fails b in
+   * the first round, which compiles before it writes, and another job's
+   * output is noise to a job that has not read it (see `oursFor`) — the
+   * sweep does not survey outputs at all. So a failing job that follows the
+   * directory an output was CREATED in is compiled again. Creation only: a
+   * missing file is the one failure an output can fix by appearing, and
+   * waking on every rewrite would reprint an unrelated failure on every
+   * save.
+   *
+   * Only a successful write of new CSS wakes anyone — never an error
+   * stylesheet or a removal — so two failing jobs cannot wake each other
+   * forever.
    */
+  let wrote = [];
   let created = [];
+  let settles = 0;
   const wakeReaders = (provisional) => {
-    const landed = created.map((w) => [w, pathKey(dirname(pathKey(w.output)))]);
-    const woken = units.filter((v) => v.failing && landed.some(([w, dir]) => w !== v && v.dirs.has(dir)));
+    const reads = (v, w) => v.known.has(pathKey(w.output)) && !(collides && v.settledAt > w.settledAt);
+    const beside = (v, w) => v.failing && created.includes(w) && v.dirs.has(pathKey(dirname(pathKey(w.output))));
+    const woken = units.filter((v) => wrote.some((w) => w !== v && (reads(v, w) || beside(v, w))));
     if (!reach(woken)) return;
     // A provisional round is always followed by its catch-up, which
     // compiles everything pending. After an authoritative one, ask for a

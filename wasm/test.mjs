@@ -4496,6 +4496,41 @@ const watchPairs = (wdir, args, env = {}) => {
   }
 }
 
+// …and under `--no-css` nothing appears, so nothing wakes. The output of a
+// pair that compiles is absent on every save there, and counting "absent
+// before the write" as "created" recompiled every failing neighbour on
+// every save, reprinting its error each time.
+//
+// a's SOURCE lives elsewhere: a failing job takes any change in the
+// directories it follows, so a source beside b would wake it by itself.
+// Only a's output is meant to land beside b.
+{
+  const wdir = mkdtempSync(join(tmpdir(), "sasso-watch-nocss-"));
+  mkdirSync(join(wdir, "src"));
+  mkdirSync(join(wdir, "b"));
+  writeFileSync(join(wdir, "src", "a.scss"), ".a { color: red; }\n");
+  writeFileSync(join(wdir, "b", "b.scss"), ".b { color: $nope; }\n");
+  const w = watchPairs(wdir, ["--no-css", "src/a.scss:b/a.css", "b/b.scss:b/b.css"]);
+  const compiledB = () => w.log.stderr.split("\n").filter((l) => l === "sasso: compiling b/b.scss").length;
+  const compiledA = () => w.log.stderr.split("\n").filter((l) => l === "sasso: compiling src/a.scss").length;
+  try {
+    assert.ok(await w.banner(), `no banner: ${w.log.stdout}${w.log.stderr}`);
+    await new Promise((r) => setTimeout(r, 1500));
+    const b0 = compiledB();
+    for (const colour of ["green", "blue"]) {
+      const a0 = compiledA();
+      writeFileSync(join(wdir, "src", "a.scss"), `.a { color: ${colour}; }\n`);
+      assert.ok(await w.until(() => compiledA() > a0), `the save to a.scss was never compiled: ${w.log.stderr}`);
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    assert.equal(compiledB(), b0, `a --no-css save woke the failing b: ${JSON.stringify(w.log.stderr)}`);
+    assert.ok(!existsSync(join(wdir, "b", "a.css")), "--no-css wrote an output");
+    console.log("ok: cli --watch --no-css, many pairs — an output that is never written wakes nobody");
+  } finally {
+    w.proc.kill();
+  }
+}
+
 // The pool losing its workers: one that cannot load the engine, and one that
 // dies in the middle of a round. The main thread sleeps until every worker
 // has reported, and a worker that never reached the handler that reports
