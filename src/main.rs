@@ -1831,6 +1831,11 @@ fn dirs_key(p: &Path) -> PathBuf {
 const MAX_LINK_HOPS: usize = 64;
 
 /// The deepest chain any supported platform resolves. See [`MAX_LINK_HOPS`].
+///
+/// The `allow` is for the MSRV: rustc 1.74 does not count the `const`
+/// assertion below as a use, and reports this as dead under `-D warnings`.
+/// Current compilers do count it.
+#[allow(dead_code)]
 const DEEPEST_PLATFORM_CHAIN: usize = 63;
 
 /// The ceiling may exceed a platform's own limit but must not fall below it: a
