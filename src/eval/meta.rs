@@ -824,9 +824,25 @@ impl<'a> Evaluator<'a> {
 
     /// `meta.module-variables/-functions/-mixins($module)`: a map from each
     /// (non-private) member name of the `@use`d module bound to `$module` to its
-    /// value (variables) or a first-class reference (functions/mixins). Members
-    /// are ordered by name (dart-sass uses source order; every spec module
-    /// defines them alphabetically, so this matches byte-for-byte).
+    /// value (variables) or a first-class reference (functions/mixins).
+    ///
+    /// The order is observable — the result is a map, and a Sass map keeps
+    /// insertion order — and the two branches below order differently on
+    /// purpose:
+    ///
+    /// - a BUILT-IN module answers in dart's DECLARATION order, from the member
+    ///   table in `builtins`. `sass:math` ends with `div`, not `unit`, and
+    ///   `sass:meta` begins `feature-exists, inspect, type-of` (#64).
+    /// - a USER module answers SORTED BY NAME, and dart uses declaration order
+    ///   there too, so this one still diverges (#209). It is not a choice so
+    ///   much as what the data allows: the member scopes are `HashMap`s, whose
+    ///   iteration order is randomized, so sorting is the only deterministic
+    ///   answer available until the order is recorded. The reason no test
+    ///   notices is that every spec module happens to declare its members
+    ///   alphabetically — a property of the corpus, not of the compiler.
+    ///
+    /// So do NOT unify these by sorting both: that would undo #64. Unifying
+    /// them the other way is #209.
     fn meta_module_members(
         &self,
         pos_args: &[Value],
