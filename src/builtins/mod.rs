@@ -481,8 +481,15 @@ struct Members {
 ///
 /// Measured against dart-sass 1.104.1 on 2026-09-28, through
 /// `map.keys(meta.module-functions(…))` for the names and order and
-/// `meta.function-exists($module:)` for membership: 93 members across seven
-/// modules, and the three that disagreed are noted where they sit.
+/// `meta.function-exists($module:)` for membership: across the seven modules,
+/// 116 functions (24 math, 37 color, 10 list, 9 map, 8 selector, 10 string, 18
+/// meta), 2 mixins and 7 variables. The three members that disagreed are noted
+/// where they sit.
+///
+/// The first spelling of this paragraph said 93, which is not a count of
+/// anything here (r4118793518). A number in a comment cannot fail, so the one
+/// that can is in [`tests::the_table_holds_no_more_and_no_less`] — this
+/// paragraph is a dated measurement record, and that test is the guard.
 fn members_of(module: &str) -> Option<&'static Members> {
     Some(match module {
         "math" => &MATH_MEMBERS,
@@ -1050,6 +1057,28 @@ mod tests {
             ],
         ),
     ];
+
+    /// The table holds no more and no less than what was measured.
+    ///
+    /// For the FUNCTIONS this is subsumed by the list comparison below, which
+    /// checks every name; for the mixins and the variables nothing else pins a
+    /// total, and for all three it is the only thing that can contradict the
+    /// counts the module comment and the CHANGELOG publish. Those said 93 and
+    /// 118 against a real 116, neither of which anything could disagree with
+    /// (r4118793518, r4118793564).
+    #[test]
+    fn the_table_holds_no_more_and_no_less() {
+        let mut counts = (0, 0, 0);
+        for (module, _) in DART_FUNCTIONS {
+            counts.0 += module_function_names(module).len();
+            counts.1 += super::module_mixin_names(module).len();
+            counts.2 += super::module_variable_names(module).len();
+        }
+        // dart-sass 1.104.1, measured 2026-09-28 by
+        // `list.length(map.keys(meta.module-{functions,mixins,variables}($m)))`
+        // summed over the seven modules.
+        assert_eq!(counts, (116, 2, 7), "(functions, mixins, variables)");
+    }
 
     /// `meta.module-functions()` answers with dart's names, in dart's order.
     ///

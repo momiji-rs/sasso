@@ -23,14 +23,17 @@ Conformance is tracked separately as a ratchet against the official
   questions, and the order is dart's: the result is a map, a Sass map keeps
   insertion order, and dart returns members as declared rather than sorted.
   Measured against dart-sass 1.104.1 — all seven modules identical, names and
-  order:
+  order, 116 function members in total:
 
   ```
-    sass:math      26 members     sass:selector   8
-    sass:color     37             sass:string    10
-    sass:list      10             sass:meta      18
+    sass:math      24    sass:selector   8
+    sass:color     37    sass:string    10
+    sass:list      10    sass:meta      18
     sass:map        9
   ```
+
+  And the members that are not functions: `sass:meta`'s two mixins
+  (`load-css`, `apply`) and `sass:math`'s seven variables.
 
   Three membership differences went with it:
 
