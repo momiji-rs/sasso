@@ -639,9 +639,42 @@ Conformance is tracked separately as a ratchet against the official
   thousand. It scales so the watcher spends at most 2% of its time asking,
   between a 50 ms floor and a 500 ms ceiling.
 
-  What it prints matches dart exactly — the banner, and one
-  `[stamp] Compiled x to y.` per file actually written, `--quiet` suppressing
-  the lines but not the banner. dart's three usage refusals are refused with
+  **A save recompiles the entries that depend on it, and no others** (#198),
+  which is dart's rule. The first cut recompiled and rewrote every entry on
+  every save — invisible with one entry, and the dominant cost with many,
+  because a build that wraps `--watch` post-processes per `Compiled` line and
+  every output's mtime moved. Lichess's 147 entry points, their own flags,
+  macOS/arm64, one save each:
+
+  ```
+                                               before         now
+    save a partial 10 entries use:
+      `Compiled` lines printed                   147           10
+      outputs whose CSS changed                   10           10
+      CPU spent on the save                   3.70 s       0.63 s
+      edit-to-CSS, median of 8 (max)    685 (897) ms  118 (218) ms
+    atomic save of one of the 56 entries
+    sharing a directory, `Compiled` lines        147            1
+  ```
+
+  dart's own rule, measured with `--watch --poll` on three entries where
+  `_x.scss` is used by one: it rewrites and narrates that one, and so does
+  this now.
+
+  A directory still counts — it is followed so a dependency that does not
+  exist yet can arrive in it — but it calls for the entries that follow that
+  directory, and only when what is IN it changed. An editor's atomic save
+  (temp file, rename over the original) moves the directory's mtime with its
+  names unchanged; the file it replaced reports that save under its own name.
+
+  What it prints matches dart — one `[stamp] Compiled x to y.` per file
+  actually written, `--quiet` suppressing the lines but not the banner, and
+  the banner printed **after** the first compile, once every initial output
+  is on disk (#199). The first cut printed it before, under a comment saying
+  dart does the same; measured against dart-sass 1.104.1 with one entry, with
+  147, and with a failing entry beside a good one, dart writes and narrates
+  everything first. Tools wait on that line to mean "the initial build is
+  done". dart's three usage refusals are refused with
   dart's wording and exit code: `--watch` to stdout, `--watch` with `--stdin`,
   and `--poll` without `--watch`. `--[no-]poll` still does nothing on the
   binary, which always polls; on the npm CLI it now chooses (#164).
