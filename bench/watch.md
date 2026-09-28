@@ -103,6 +103,10 @@ ten times in a row before the cause was clear.
 - **The binary has no `--watch`** yet (#86), so every number above is the
   npm CLI. When the binary grows one it should be added as a column, and it
   should implement the same provisional rule rather than rediscovering it.
+- **Many pairs.** The harness watches one entry. The npm CLI takes any
+  number since #200, and a save that reaches many entries compiles them on
+  a worker pool; its numbers on a 147-entry tree are in the CHANGELOG entry
+  for #200, measured by hand rather than by this harness.
 - **Throughput under a burst.** The harness leaves 400 ms between saves so
   each measures one edit rather than the tail of the last. How many compiles
   a burst costs is a different question, covered by the `--watch` tests in
