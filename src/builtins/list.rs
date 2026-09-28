@@ -191,7 +191,7 @@ fn parse_separator(v: &Value, pos: Pos) -> Result<Option<ListSep>, Error> {
 
 /// `length($list)`: the unitless element count.
 fn fn_length(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    validate_args(&["list"], pos_args, named, pos)?;
+    super::check_arity(1, pos_args, named, pos)?;
     let v = super::require(&["list"], pos_args, named, 0, pos)?;
     Ok(unitless(list_len(v) as f64))
 }
@@ -199,7 +199,7 @@ fn fn_length(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<
 /// `nth($list, $n)`: the element at the 1-based (negative-from-end) index.
 fn fn_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list", "n"];
-    validate_args(&params, pos_args, named, pos)?;
+    super::check_arity(params.len(), pos_args, named, pos)?;
     let list = super::require(&params, pos_args, named, 0, pos)?;
     let (items, _) = as_items(list);
     let idx = resolve_index(&params, pos_args, named, 1, items.len(), pos)?;
@@ -213,7 +213,7 @@ fn fn_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
 /// preserving the original separator.
 fn fn_set_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list", "n", "value"];
-    validate_args(&params, pos_args, named, pos)?;
+    super::check_arity(params.len(), pos_args, named, pos)?;
     let list = super::require(&params, pos_args, named, 0, pos)?;
     let (mut items, sep) = as_items(list);
     let idx = resolve_index(&params, pos_args, named, 1, items.len(), pos)?;
@@ -253,7 +253,7 @@ fn settled_sep(v: &Value) -> Option<ListSep> {
 /// true/false by a truthy/falsey argument.
 fn fn_join(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list1", "list2", "separator", "bracketed"];
-    validate_args(&params, pos_args, named, pos)?;
+    super::check_arity(params.len(), pos_args, named, pos)?;
     let list1 = super::require(&params, pos_args, named, 0, pos)?;
     let list2 = super::require(&params, pos_args, named, 1, pos)?;
     let (items1, _) = as_items(list1);
@@ -282,45 +282,6 @@ fn fn_join(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Va
     Ok(Value::List(List::new(items, sep, bracketed)))
 }
 
-/// The dart-sass "Only N argument(s) allowed, but M were passed." error.
-/// `named` decides the "positional" wording, as in [`super::check_arity`].
-fn too_many(passed: usize, max: usize, named: &[(String, Value)], pos: Pos) -> Error {
-    let kind = if named.is_empty() { "" } else { "positional " };
-    Error::at(
-        format!(
-            "Only {} {}argument{} allowed, but {} {} passed.",
-            max,
-            kind,
-            if max == 1 { "" } else { "s" },
-            passed,
-            if passed == 1 { "was" } else { "were" }
-        ),
-        pos,
-    )
-}
-
-/// Validate a fixed-arity (non-variadic) builtin's argument list against its
-/// declared `params`, in dart's own order: a POSITIONAL overflow is the
-/// "Only N argument(s) allowed…" error (only positional arguments count toward
-/// it — see [`super::check_arity`]), and only then is a named argument whose
-/// name is not a declared parameter "No parameter named $X.".
-fn validate_args(
-    params: &[&str],
-    pos_args: &[Value],
-    named: &[(String, Value)],
-    pos: Pos,
-) -> Result<(), Error> {
-    // dart's order (`ArgumentDeclaration.verify`): the positional overflow is
-    // reported before an unrecognized name.
-    if pos_args.len() > params.len() {
-        return Err(too_many(pos_args.len(), params.len(), named, pos));
-    }
-    if let Some((n, _)) = named.iter().find(|(n, _)| !params.contains(&n.as_str())) {
-        return Err(Error::at(format!("No parameter named ${n}."), pos));
-    }
-    Ok(())
-}
-
 /// `join`'s `auto` rule: list1's settled separator, else list2's, else space.
 /// `join` always yields a *decided* separator (dart-sass), so even
 /// `join((), ())` is space-separated, not undecided.
@@ -335,7 +296,7 @@ fn join_auto_separator(list1: &Value, list2: &Value) -> ListSep {
 /// space for a bare value or empty list.
 fn fn_append(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list", "val", "separator"];
-    validate_args(&params, pos_args, named, pos)?;
+    super::check_arity(params.len(), pos_args, named, pos)?;
     let list = super::require(&params, pos_args, named, 0, pos)?;
     let val = super::require(&params, pos_args, named, 1, pos)?.clone();
     let (mut items, _) = as_items(list);
@@ -358,7 +319,7 @@ fn fn_append(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<
 /// `$value` (by Sass `==`), or `null` when absent.
 fn fn_index(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list", "value"];
-    validate_args(&params, pos_args, named, pos)?;
+    super::check_arity(params.len(), pos_args, named, pos)?;
     let list = super::require(&params, pos_args, named, 0, pos)?;
     let value = super::require(&params, pos_args, named, 1, pos)?;
     let (items, _) = as_items(list);
@@ -371,7 +332,7 @@ fn fn_index(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
 /// `list-separator($list)`: the unquoted keyword `comma` or `space`. An empty
 /// list or a bare value is "undecided" and reports `space`.
 fn fn_list_separator(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    validate_args(&["list"], pos_args, named, pos)?;
+    super::check_arity(1, pos_args, named, pos)?;
     let v = super::require(&["list"], pos_args, named, 0, pos)?;
     // A bare value or empty list is "undecided", which dart-sass reports as
     // space; otherwise the list's own separator is authoritative.
@@ -390,7 +351,7 @@ fn fn_list_separator(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
 /// `is-bracketed($list)`: `true` when the list was written with square
 /// brackets. A bare value or an empty/non-bracketed list reports `false`.
 fn fn_is_bracketed(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    validate_args(&["list"], pos_args, named, pos)?;
+    super::check_arity(1, pos_args, named, pos)?;
     let v = super::require(&["list"], pos_args, named, 0, pos)?;
     let bracketed = matches!(v, Value::List(l) if l.bracketed);
     Ok(Value::Bool(bracketed))
