@@ -19,7 +19,10 @@ Conformance is tracked separately as a ratchet against the official
   dependency graph and spawn one-shot compiles. All pairs now share one set
   of watchers, one sweep and one coalesce window, and a save recompiles the
   entries that read the changed file and no others. Another pair's OUTPUT
-  landing in a watched directory is not a change unless some entry reads it.
+  landing in a watched directory is not a change unless some entry reads it,
+  or an entry failed for want of it: one that is failing is compiled again
+  when another pair's output appears beside it. Pairs that write another
+  pair's input compile one at a time, write included, as one-shot mode does.
 
   A round that reaches two or more entries compiles on a pool of workers
   that lives for the whole watch, with diagnostics replayed in command-line

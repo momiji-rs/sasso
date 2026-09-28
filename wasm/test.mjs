@@ -4419,6 +4419,107 @@ for (const mode of [[], ["--no-poll"]]) {
   }
 }
 
+/** Spawn a many-pairs `--watch` in `wdir`; the caller kills it. */
+const watchPairs = (wdir, args, env = {}) => {
+  const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--watch", ...args], {
+    cwd: wdir,
+    env: { ...process.env, SASSO_DEBUG_WATCH: "1", ...env },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const log = { stdout: "", stderr: "" };
+  proc.stdout.on("data", (b) => (log.stdout += b));
+  proc.stderr.on("data", (b) => (log.stderr += b));
+  const read = (f) => {
+    try {
+      return readFileSync(join(wdir, f), "utf8");
+    } catch {
+      return "";
+    }
+  };
+  const until = async (pred, ms = 20000) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (pred()) return true;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return false;
+  };
+  const banner = () => until(() => log.stdout.includes("Sass is watching"));
+  return { proc, log, read, until, banner };
+};
+
+// A pair that writes another pair's INPUT: `a.scss:b.scss b.scss:out.css`.
+// One-shot mode compiles such a batch one job at a time, write included, so
+// b reads what a has just written. The watch compiled the whole round before
+// writing any of it, and b read the b.scss from before.
+{
+  const wdir = mkdtempSync(join(tmpdir(), "sasso-watch-chain-"));
+  writeFileSync(join(wdir, "a.scss"), ".from-a { color: red; }\n");
+  writeFileSync(join(wdir, "b.scss"), ".stale { color: gray; }\n");
+  const w = watchPairs(wdir, ["a.scss:b.scss", "b.scss:out.css"]);
+  try {
+    assert.ok(await w.banner(), `no banner: ${w.log.stdout}${w.log.stderr}`);
+    assert.match(w.read("out.css"), /from-a/, `the first round read the b.scss before a wrote it: ${w.read("out.css")}`);
+    writeFileSync(join(wdir, "a.scss"), ".from-a { color: blue; }\n");
+    assert.ok(await w.until(() => w.read("out.css").includes("blue")), `a's save never reached out.css: ${w.read("out.css")}`);
+    assert.doesNotMatch(w.log.stderr, /Error/, "no error on stderr");
+    console.log("ok: cli --watch, many pairs — a pair that writes another's input is compiled before it, as one-shot does");
+  } finally {
+    w.proc.kill();
+  }
+}
+
+// A pair that fails because another pair's output is not there YET:
+// `a.scss:shared.css` and a `b.scss` that says `@use "shared"`. The first
+// round compiles b before a's output exists, and a's output is noise to a
+// job that has not read it, so b stayed failed until something else moved.
+{
+  const wdir = mkdtempSync(join(tmpdir(), "sasso-watch-created-"));
+  writeFileSync(join(wdir, "a.scss"), ".gen { color: olive; }\n");
+  writeFileSync(join(wdir, "b.scss"), '@use "shared";\n.b { color: teal; }\n');
+  const w = watchPairs(wdir, ["a.scss:shared.css", "b.scss:b.css"]);
+  try {
+    assert.ok(await w.banner(), `no banner: ${w.log.stdout}${w.log.stderr}`);
+    assert.ok(
+      await w.until(() => w.read("b.css").includes("olive")),
+      `b never recovered once a's output appeared: ${JSON.stringify(w.read("b.css"))} ${JSON.stringify(w.log.stderr)}`,
+    );
+    // …and it settles: nothing after that is another round.
+    await new Promise((r) => setTimeout(r, 1500));
+    const ran = w.log.stderr.split("\n").filter((l) => l.startsWith("sasso: compiling ")).length;
+    await new Promise((r) => setTimeout(r, 1500));
+    const now = w.log.stderr.split("\n").filter((l) => l.startsWith("sasso: compiling ")).length;
+    assert.equal(now, ran, `it kept compiling with nothing saved: ${JSON.stringify(w.log.stderr)}`);
+    console.log("ok: cli --watch, many pairs — a pair waiting on another pair's output compiles once it appears");
+  } finally {
+    w.proc.kill();
+  }
+}
+
+// The pool losing its workers: one that cannot load the engine, and one that
+// dies in the middle of a round. The main thread sleeps until every worker
+// has reported, and a worker that never reached the handler that reports
+// left it asleep forever. The jobs they took are compiled in this thread,
+// and so is every round after.
+for (const how of ["fails-to-start", "dies"]) {
+  const wdir = mkdtempSync(join(tmpdir(), "sasso-watch-pool-lost-"));
+  writeFileSync(join(wdir, "_shared.scss"), "$s: navy;\n");
+  for (const n of ["a", "b", "c"]) writeFileSync(join(wdir, `${n}.scss`), `@use "shared";\n.${n} { color: shared.$s; }\n`);
+  const w = watchPairs(wdir, ["-j", "3", "a.scss:a.css", "b.scss:b.css", "c.scss:c.css"], { SASSO_TEST_WATCH_WORKER: how });
+  const all = (text) => ["a", "b", "c"].every((n) => w.read(`${n}.css`).includes(text));
+  try {
+    assert.ok(await w.banner(), `${how}: the watch hung: ${w.log.stdout}${w.log.stderr}`);
+    assert.ok(all("navy"), `${how}: the first round is incomplete: ${w.log.stderr}`);
+    writeFileSync(join(wdir, "_shared.scss"), "$s: teal;\n");
+    assert.ok(await w.until(() => all("teal")), `${how}: a later save never landed: ${w.log.stderr}`);
+    const said = w.log.stderr.split("\n").filter((l) => l.includes("worker pool failed"));
+    assert.equal(said.length, 1, `${how}: say so once: ${JSON.stringify(w.log.stderr)}`);
+    console.log(`ok: cli --watch, many pairs — a pool worker that ${how.replace(/-/g, " ")} costs its jobs nothing`);
+  } finally {
+    w.proc.kill();
+  }
+}
+
 // === Phase 3a4: the output is a source by another name (#168) ===
 //
 // `out.css -> main.scss` and then `--watch main.scss out.css`. The

@@ -1809,7 +1809,8 @@ function runWatch(jobs, common, opts) {
   // A round of two or more goes to the pool when there is one; see
   // `makeWatchPool` for why, and for how it stays synchronous.
   const poolSize = Math.min(units.length, Math.max(1, opts.jobs ?? defaultJobs()));
-  const pooled = poolSize >= 2 && !outputsCollide(jobs, opts);
+  const collides = outputsCollide(jobs, opts);
+  let pooled = poolSize >= 2 && !collides;
   let pool = null;
 
   /**
@@ -1843,9 +1844,20 @@ function runWatch(jobs, common, opts) {
     }
     // A provisional run is the head of a burst, so it starts a new one.
     if (provisional) for (const u of chosen) u.burstWrote = false;
-    if (!pooled || chosen.length < 2) return chosen.map((u) => ({ u, ...compileForWatch(u.input, common, provisional) }));
+    const here = (u) => ({ u, ...compileForWatch(u.input, common, provisional) });
+    if (!pooled || chosen.length < 2) return chosen.map(here);
     pool ??= makeWatchPool(poolSize, opts, common.sourceMap);
-    return pool.compile(chosen.map((u) => u.input), provisional).map((r, k) => ({ u: chosen[k], ...r }));
+    const { ran, broken } = pool.compile(chosen.map((u) => u.input), provisional);
+    if (broken) {
+      // A worker that could not start, or died, took its jobs with it. They
+      // are compiled here instead, and so is every round from now on: a pool
+      // that has lost a thread once is not trusted with the next round.
+      writeStderrSync(`sasso: the --watch worker pool failed (${broken}); compiling in one thread from now on\n`);
+      pool.close();
+      pool = null;
+      pooled = false;
+    }
+    return ran.map((r, k) => (r ? { u: chosen[k], ...r } : here(chosen[k])));
   };
 
   /**
@@ -1947,6 +1959,7 @@ function runWatch(jobs, common, opts) {
     }
     // Before the `Compiled` line, which is the order dart prints them in.
     if (said) writeStderrSync(said);
+    const arrives = !existsSync(u.output);
     const writeError = emit(result, u.output, common.sourceMap, opts);
     if (writeError) process.stderr.write(`${writeError}\n`);
     else {
@@ -1955,6 +1968,7 @@ function runWatch(jobs, common, opts) {
       // Wrote AT the catch-up: said so just below, and the burst is over.
       u.burstWrote = provisional;
       u.everWrote = true;
+      if (arrives) created.push(u);
       // A provisional run narrates nothing, exactly as the binary's
       // does: its whole stdout is dropped there. The catch-up 50ms
       // behind it says the line instead, which is what puts the
@@ -1979,6 +1993,19 @@ function runWatch(jobs, common, opts) {
     const chosen = [...pending].sort((a, b) => a - b).map((i) => units[i]);
     if (chosen.length === 0) return true;
     if (!provisional) pending.clear();
+    created = [];
+    // Pairs that write what another pair reads (`outputsCollide`) are
+    // compiled and written one at a time, in command-line order, as
+    // one-shot mode does: `a.scss:b.scss b.scss:out.css` must read the
+    // b.scss the first pair has just written, not the one before it.
+    let ok = true;
+    for (const batch of collides ? chosen.map((u) => [u]) : [chosen]) {
+      if (!compileAndSettle(batch, provisional)) ok = false;
+    }
+    wakeReaders(provisional);
+    return ok;
+  };
+  const compileAndSettle = (chosen, provisional) => {
     // BEFORE the compiles read a single file — see `takeSnapshots`.
     const before = polling || sawNameless ? snapshotBefore() : undefined;
     const ran = compileAll(chosen, provisional);
@@ -1987,6 +2014,35 @@ function runWatch(jobs, common, opts) {
     let ok = true;
     for (const r of ran) if (!settle(r, provisional)) ok = false;
     return ok;
+  };
+  /**
+   * The outputs this round CREATED, and the failing jobs that may have been
+   * waiting for one of them.
+   *
+   * Another job's output is noise to a job that has not read it (see
+   * `oursFor`), and the sweep does not survey outputs at all. That is right
+   * for a job that compiles, and wrong for one that failed BECAUSE the file
+   * was not there yet: `a.scss:shared.css` beside `b.scss` that says
+   * `@use "shared"` fails b in the first round, which compiles before it
+   * writes, and then nothing ever woke it. So a job that is failing and
+   * follows the directory an output appeared in is compiled again.
+   *
+   * Only a successful compile creating its output wakes anyone. An error
+   * stylesheet, a removal or a rewrite does not: a missing file is the one
+   * failure an output can fix by appearing, and waking on every rewrite
+   * would reprint an unrelated failure beside it on every save. It also
+   * means two failing jobs cannot wake each other forever.
+   */
+  let created = [];
+  const wakeReaders = (provisional) => {
+    const landed = created.map((w) => [w, pathKey(dirname(pathKey(w.output)))]);
+    const woken = units.filter((v) => v.failing && landed.some(([w, dir]) => w !== v && v.dirs.has(dir)));
+    if (!reach(woken)) return;
+    // A provisional round is always followed by its catch-up, which
+    // compiles everything pending. After an authoritative one, ask for a
+    // round — from outside this one, since `coalesce` drops a request made
+    // during a run that failed.
+    if (!provisional) setImmediate(schedule);
   };
 
   /**
@@ -2104,55 +2160,99 @@ function compileForWatch(input, common, provisional) {
  *
  * The workers take jobs from a shared index, as `runJobs`'s do, so one
  * heavy stylesheet does not leave the rest idle.
+ *
+ * A worker that cannot start, or dies, must not leave this thread asleep
+ * forever, which is what counting finished workers did: one that failed to
+ * load the engine never reached the handler that counts. So each worker has
+ * a slot saying which round it last finished, or that it is GONE, and its
+ * `exit` handler writes that. It runs for every way a worker ends: a throw,
+ * a rejection, `process.exit` (all three measured). The round then answers
+ * `broken`, and the jobs nobody answered come back empty for the caller to
+ * compile itself.
  */
+const WORKER_GONE = -1;
 function makeWatchPool(size, opts, sourceMap) {
-  // [0] the next job to take, [1] how many workers have finished the round.
-  const ctl = new Int32Array(new SharedArrayBuffer(8));
+  // [0] the next job to take, [1] bumped on every report, [2 + k] the round
+  // worker k last finished, or WORKER_GONE.
+  const ctl = new Int32Array(new SharedArrayBuffer(4 * (2 + size)));
   const { positionals: _unused, ...workerOpts } = opts;
-  const ports = Array.from({ length: size }, () => {
+  const workers = [];
+  const ports = Array.from({ length: size }, (_, k) => {
     const { port1, port2 } = new MessageChannel();
     const worker = new Worker(fileURLToPath(import.meta.url), {
-      workerData: { sassoWatchWorker: true, opts: workerOpts, sourceMap, port: port2, ctl },
+      workerData: { sassoWatchWorker: true, opts: workerOpts, sourceMap, port: port2, ctl, slot: 2 + k },
       transferList: [port2],
     });
+    // Its failure is reported through its slot; unheard, an `error` event
+    // would take the whole watch down with it.
+    worker.on("error", () => {});
     // The watchers keep a watch alive, not its pool.
     worker.unref();
+    workers.push(worker);
     return port1;
   });
+  let round = 0;
   return {
     compile(inputs, provisional) {
+      round += 1;
       Atomics.store(ctl, 0, 0);
-      Atomics.store(ctl, 1, 0);
-      for (const port of ports) port.postMessage({ inputs, provisional });
-      for (let done; (done = Atomics.load(ctl, 1)) < size; ) Atomics.wait(ctl, 1, done);
-      const out = new Array(inputs.length);
-      for (const port of ports) {
-        for (let m; (m = receiveMessageOnPort(port)); ) out[m.message.i] = m.message.ran;
+      for (const port of ports) port.postMessage({ inputs, provisional, round });
+      // Read the counter BEFORE the slots: a report that lands in between
+      // moves the counter too, so the wait returns at once.
+      const settled = (k) => {
+        const s = Atomics.load(ctl, 2 + k);
+        return s === round || s === WORKER_GONE;
+      };
+      for (let seen = Atomics.load(ctl, 1); !ports.every((_, k) => settled(k)); seen = Atomics.load(ctl, 1)) {
+        Atomics.wait(ctl, 1, seen);
       }
-      // A job whose worker threw before answering is a failure the user
-      // sees, not a round that settles on nothing.
-      const lost = { failure: { exception: false, message: "the --watch worker pool lost this compile" }, said: "" };
-      return Array.from(out, (ran) => ran ?? lost);
+      const ran = new Array(inputs.length).fill(null);
+      let broken = null;
+      for (const port of ports) {
+        for (let m; (m = receiveMessageOnPort(port)); ) {
+          if (m.message.fatal !== undefined) broken ??= m.message.fatal;
+          else ran[m.message.i] = m.message.ran;
+        }
+      }
+      if (!broken && ports.some((_, k) => Atomics.load(ctl, 2 + k) === WORKER_GONE)) broken = "a worker exited";
+      return { ran, broken };
+    },
+    close() {
+      for (const w of workers) w.terminate();
     },
   };
 }
 
 /** A `--watch` pool thread: compile what the round hands out, until the watch ends. */
 async function runWatchWorker() {
-  const { opts, sourceMap, port, ctl } = workerData;
-  await loadEngine();
-  const common = { ...commonOptions(opts), sourceMap, ...syntaxOf(opts) };
-  port.on("message", ({ inputs, provisional }) => {
-    // `finally`, because the other thread is asleep until every worker says
-    // it is done: a worker that died quietly would hang the watch.
+  const { opts, sourceMap, port, ctl, slot } = workerData;
+  const report = (state) => {
+    Atomics.store(ctl, slot, state);
+    Atomics.add(ctl, 1, 1);
+    Atomics.notify(ctl, 1);
+  };
+  process.on("exit", () => report(WORKER_GONE));
+  let common;
+  try {
+    if (process.env.SASSO_TEST_WATCH_WORKER === "fails-to-start") throw new Error("told to fail to start");
+    await loadEngine();
+    common = { ...commonOptions(opts), sourceMap, ...syntaxOf(opts) };
+  } catch (e) {
+    // Said before the slot, so the round that sees GONE finds the reason.
+    port.postMessage({ fatal: String(e && e.message ? e.message : e) });
+    return; // nothing holds the thread now, so it ends, and `exit` says GONE
+  }
+  port.on("message", ({ inputs, provisional, round }) => {
     try {
       for (let i; (i = Atomics.add(ctl, 0, 1)) < inputs.length; ) {
+        if (process.env.SASSO_TEST_WATCH_WORKER === "dies") process.exit(1);
         port.postMessage({ i, ran: compileForWatch(inputs[i], common, provisional) });
       }
-    } finally {
-      Atomics.add(ctl, 1, 1);
-      Atomics.notify(ctl, 1);
+    } catch (e) {
+      port.postMessage({ fatal: String(e && e.message ? e.message : e) });
+      process.exit(1);
     }
+    report(round);
   });
 }
 
