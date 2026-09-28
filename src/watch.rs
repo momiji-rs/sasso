@@ -1064,8 +1064,16 @@ mod tests {
         let moved = Stamp::of(&dir) != dir_before;
         let seen = s.changes(Stamp::of);
 
+        // A pause before each step, or Windows reads the step as no change:
+        // its timestamps have a 100 ns field and advance by the clock tick,
+        // ~15.6 ms, so a directory created into and emptied inside one tick
+        // keeps its stamp. CI failed on the departure without this. A poll
+        // cannot see a change its clock does not record; neither can dart's.
+        let tick = || std::thread::sleep(std::time::Duration::from_millis(50));
+        tick();
         std::fs::write(dir.join("_new.scss"), "").unwrap();
         let arrival = s.changes(Stamp::of);
+        tick();
         std::fs::remove_file(dir.join("_new.scss")).unwrap();
         let departure = s.changes(Stamp::of);
         std::fs::remove_dir_all(&dir).ok();
