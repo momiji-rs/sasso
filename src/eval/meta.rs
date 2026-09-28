@@ -854,10 +854,12 @@ impl<'a> Evaluator<'a> {
             }
         };
         let Some(module) = self.used_user_modules.get(&ns).cloned() else {
-            // A built-in module: `sass:meta` is modeled member-by-member
-            // (the suite probes it); other built-ins have no variables and
-            // their callables are dispatched, not enumerated, so report the
-            // names we know.
+            // A built-in module: all seven are modelled member by member,
+            // from the one table in `builtins`. This used to say that only
+            // `sass:meta` was, that the others "have no variables", and that
+            // their callables are "dispatched, not enumerated" — none of the
+            // three survived #64: `sass:math` has seven variables, and every
+            // module's members are enumerable and callable as references.
             if let Some(builtin) = self.used_modules.get(&ns) {
                 // The enumerated references belong to the module, not to the
                 // namespace they were reached through.

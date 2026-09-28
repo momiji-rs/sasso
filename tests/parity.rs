@@ -9588,6 +9588,71 @@ fn meta_builtin_module_introspection() {
     );
 }
 
+/// The member table, END-TO-END, against dart.
+///
+/// The unit tests in `builtins` compare the table with dart's lists; these
+/// compare what a stylesheet SEES — the map the evaluator builds, the
+/// first-class references it wraps each member in, and the values `module_var`
+/// hands back. A typo in the map construction, a member whose reference cannot
+/// be called, or a variable that comes back `null` passes the unit tests and
+/// fails here (r4118793546).
+#[test]
+fn builtin_module_members_are_enumerable_end_to_end() {
+    const USES: &str = "@use \"sass:meta\";\n@use \"sass:math\";\n@use \"sass:color\";\n\
+                        @use \"sass:list\";\n@use \"sass:map\";\n@use \"sass:selector\";\n\
+                        @use \"sass:string\";\n";
+    // Names AND order, for every module. The result is a map and a Sass map
+    // keeps insertion order, so inspecting the KEYS pins dart's declaration
+    // order as well as its membership — which is the half a `match` could not
+    // express and the reason the table exists.
+    for module in ["math", "color", "list", "map", "selector", "string", "meta"] {
+        assert_parity(&format!(
+            "{USES}a {{v: meta.inspect(map.keys(meta.module-functions(\"{module}\")))}}\n"
+        ));
+    }
+    // The other two kinds, which no `DART_FUNCTIONS`-style literal covers.
+    assert_parity(&format!(
+        "{USES}a {{v: meta.inspect(map.keys(meta.module-mixins(\"meta\")))}}\n"
+    ));
+    assert_parity(&format!(
+        "{USES}a {{v: meta.inspect(map.keys(meta.module-variables(\"math\")))}}\n"
+    ));
+    // A module-only member — the table's `None` arm, with no global alias — is
+    // both enumerated and CALLABLE through the reference the map carries.
+    assert_parity(&format!(
+        "{USES}a {{\n  \
+           set: meta.inspect(meta.call(map.get(meta.module-functions(\"map\"), \"set\"), (a: 1), b, 2));\n  \
+           split: meta.inspect(meta.call(map.get(meta.module-functions(\"string\"), \"split\"), \"a b\", \" \"));\n  \
+           slash: meta.inspect(meta.call(map.get(meta.module-functions(\"list\"), \"slash\"), 1, 2));\n  \
+           div: meta.inspect(meta.call(map.get(meta.module-functions(\"math\"), \"div\"), 6, 3));\n\
+         }}\n"
+    ));
+    // `module-variables` carries the real values, where every key used to be
+    // `null`. Compared by ARITHMETIC rather than by printing the map: our
+    // `meta.inspect` rounds to 10 decimal places where dart prints full
+    // precision (#203), so inspecting it would compare that bug instead of
+    // these values.
+    assert_parity(&format!(
+        "{USES}a {{\n  \
+           pi: math.round(map.get(meta.module-variables(\"math\"), \"pi\") * 100000);\n  \
+           e: math.round(map.get(meta.module-variables(\"math\"), \"e\") * 100000);\n  \
+           max-safe: map.get(meta.module-variables(\"math\"), \"max-safe-integer\");\n  \
+           min-safe: map.get(meta.module-variables(\"math\"), \"min-safe-integer\");\n  \
+           same: map.get(meta.module-variables(\"math\"), \"pi\") == math.$pi;\n  \
+           filled: map.get(meta.module-variables(\"math\"), \"e\") != null;\n\
+         }}\n"
+    ));
+    // The divergence the line above sidesteps, pinned so that fixing #203
+    // fails HERE rather than quietly changing what a stylesheet sees. dart
+    // prints 3.141592653589793.
+    assert_eq!(
+        ours(&format!(
+            "{USES}a {{v: meta.inspect(map.get(meta.module-variables(\"math\"), \"pi\"))}}\n"
+        )),
+        "a {\n  v: 3.1415926536;\n}\n"
+    );
+}
+
 #[test]
 fn deep_media_chains_and_content_forwarding() {
     // A three-level mergeable media chain re-bubbles every batch (the
