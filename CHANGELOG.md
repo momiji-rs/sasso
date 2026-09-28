@@ -13,6 +13,37 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **`--watch` in the npm CLI takes any number of pairs** (#200). dart-sass
+  watches every `in:out` pair it is given; the npm CLI accepted one, so a
+  build with many entries had to run a watcher per entry or keep its own
+  dependency graph and spawn one-shot compiles. All pairs now share one set
+  of watchers, one sweep and one coalesce window, and a save recompiles the
+  entries that read the changed file and no others. Another pair's OUTPUT
+  landing in a watched directory is not a change unless some entry reads it,
+  or an entry failed for want of it: one that is failing is compiled again
+  when another pair's output appears beside it. Pairs that write another
+  pair's input compile one at a time, write included, as one-shot mode does.
+
+  A round that reaches two or more entries compiles on a pool of workers
+  that lives for the whole watch, with diagnostics replayed in command-line
+  order. On a 147-entry tree:
+
+  ```
+    Linux/x86_64            pool (8)   -j 1     one-shot spawn, 0.18.0
+    first round              447 ms   1458 ms   360 ms
+    save reaching 10         196 ms    417 ms   265 ms
+    save reaching 138        354 ms   1549 ms   359 ms
+  ```
+
+  The pool is `--jobs` wide, defaulting as one-shot mode does. Each thread
+  that has compiled keeps its arena's high-water mark, so that watch holds
+  about 1.35 GB after a large round against about 350 MB at `-j 1`: pass
+  `-j` to trade latency for memory. It plateaus rather than grows.
+
+  `SASSO_DEBUG_WATCH=1` prints `sasso: compiling <input>` to stderr per
+  compile. An unchanged stylesheet writes and prints nothing, so without it
+  a wasted recompile is invisible — the tests assert on it.
+
 - **Built-in modules have a member table** (#64). `meta.module-functions()`,
   `meta.module-mixins()` and `meta.module-variables()` listed members for
   `sass:meta` and answered every other built-in with an empty map, because
