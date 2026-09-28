@@ -24,7 +24,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve, relative, sep, delimiter } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { isMainThread, workerData, parentPort, Worker } from "node:worker_threads";
+import { isMainThread, workerData, parentPort, Worker, MessageChannel, receiveMessageOnPort } from "node:worker_threads";
 import { spawnSync } from "node:child_process";
 import { constants as osConstants } from "node:os";
 // The pool's default size — physical cores rather than SMT threads on Linux,
@@ -1806,9 +1806,15 @@ function runWatch(jobs, common, opts) {
     if (reach(hit)) schedule();
   };
 
+  // A round of two or more goes to the pool when there is one; see
+  // `makeWatchPool` for why, and for how it stays synchronous.
+  const poolSize = Math.min(units.length, Math.max(1, opts.jobs ?? defaultJobs()));
+  const pooled = poolSize >= 2 && !outputsCollide(jobs, opts);
+  let pool = null;
+
   /**
-   * Compile one job, without writing anything. `provisional` marks the
-   * speculative compile at the head of a burst (see `schedule`).
+   * Compile the chosen jobs, without writing anything. `provisional` marks
+   * the speculative compile at the head of a burst (see `schedule`).
    *
    * A provisional run says NOTHING, and its `@warn`s are the half that
    * was missing. Its failures were already silent, for the reason in
@@ -1829,21 +1835,17 @@ function runWatch(jobs, common, opts) {
    * CSS has been compared with what is already on disk, and by then
    * the engine's logger has long since written them.
    */
-  const compileUnit = (u, provisional) => {
+  const compileAll = (chosen, provisional) => {
     // A compile whose CSS did not change says nothing and writes nothing, so
     // without this "a save recompiles only what it reaches" cannot be seen.
-    if (process.env.SASSO_DEBUG_WATCH) writeStderrSync(`sasso: compiling ${u.input}\n`);
-    if (provisional) {
-      // A provisional run is the head of a burst, so it starts a new one.
-      u.burstWrote = false;
-      try {
-        return { u, result: compile(u.input, { ...common, logger: Logger.silent }), said: "" };
-      } catch (error) {
-        return { u, error, said: "" };
-      }
+    if (process.env.SASSO_DEBUG_WATCH) {
+      for (const u of chosen) writeStderrSync(`sasso: compiling ${u.input}\n`);
     }
-    const ran = captureStderr(() => compile(u.input, common));
-    return ran.error ? { u, error: ran.error, said: ran.text } : { u, result: ran.value, said: ran.text };
+    // A provisional run is the head of a burst, so it starts a new one.
+    if (provisional) for (const u of chosen) u.burstWrote = false;
+    if (!pooled || chosen.length < 2) return chosen.map((u) => ({ u, ...compileForWatch(u.input, common, provisional) }));
+    pool ??= makeWatchPool(poolSize, opts, common.sourceMap);
+    return pool.compile(chosen.map((u) => u.input), provisional).map((r, k) => ({ u: chosen[k], ...r }));
   };
 
   /**
@@ -1855,14 +1857,13 @@ function runWatch(jobs, common, opts) {
    * user did wrong. The catch-up compile that follows is never provisional,
    * so an error that is real still reaches the terminal — one window later.
    */
-  const settle = ({ u, result, error, said }, provisional) => {
-    if (error !== undefined) {
+  const settle = ({ u, result, failure, said }, provisional) => {
+    if (failure !== undefined) {
       if (provisional) return false;
       // Whatever it managed to warn about before failing is still the
       // user's to see, before the error itself.
       if (said) writeStderrSync(said);
-      const e = error;
-      const msg = e instanceof Exception ? e.message : `error: ${e && e.message ? e.message : e}`;
+      const msg = failure.exception ? failure.message : `error: ${failure.message}`;
       process.stderr.write(msg.replace(/\n?$/, "\n"));
       // Not when the destination is a source. The success path already
       // refuses to WRITE over one; deleting it here would be the same
@@ -1894,8 +1895,8 @@ function runWatch(jobs, common, opts) {
       // `onDisk` still has to be forgotten or "fix the typo back to what
       // it was" leaves the output missing forever (#159, measured again
       // here).
-      if (!aliasesASource(u) && e instanceof Exception) {
-        const writeError = reportFailure(u.output, opts, e.message, u.everWrote || !isSymlink(u.output));
+      if (!aliasesASource(u) && failure.exception) {
+        const writeError = reportFailure(u.output, opts, failure.message, u.everWrote || !isSymlink(u.output));
         if (writeError) process.stderr.write(`${writeError}\n`);
         // The destination is no longer the CSS we last wrote — it is the
         // error stylesheet, or gone. Forgetting that is how "fix the typo
@@ -1980,7 +1981,7 @@ function runWatch(jobs, common, opts) {
     if (!provisional) pending.clear();
     // BEFORE the compiles read a single file — see `takeSnapshots`.
     const before = polling || sawNameless ? snapshotBefore() : undefined;
-    const ran = chosen.map((u) => compileUnit(u, provisional));
+    const ran = compileAll(chosen, provisional);
     for (const r of ran) if (r.result) setKnown(r.u, r.result.loadedUrls);
     rewatch(before);
     let ok = true;
@@ -2058,6 +2059,101 @@ function runWatch(jobs, common, opts) {
   // The trailing blank line is dart's too, and it is once — after the
   // banner, not between later recompiles (measured over three rebuilds).
   process.stdout.write("Sass is watching for changes. Press Ctrl-C to stop.\n\n");
+}
+
+/**
+ * One `--watch` compile, as something a worker can send back: plain CSS, map
+ * and URL strings, and a failure reduced to what `settle` asks of it. The
+ * same function runs in this thread and in the pool, so the two cannot
+ * disagree about what a compile reported.
+ *
+ * A provisional run is silenced and an authoritative one captured; the
+ * reasons are at `compileAll`, in `runWatch`.
+ */
+function compileForWatch(input, common, provisional) {
+  const ran = provisional
+    ? captureStderr(() => compile(input, { ...common, logger: Logger.silent }))
+    : captureStderr(() => compile(input, common));
+  if (ran.error) {
+    const e = ran.error;
+    return {
+      failure: { exception: e instanceof Exception, message: String(e && e.message ? e.message : e) },
+      said: provisional ? "" : ran.text,
+    };
+  }
+  const { css, sourceMap, loadedUrls } = ran.value;
+  return { result: { css, sourceMap, loadedUrls: loadedUrls.map(String) }, said: provisional ? "" : ran.text };
+}
+
+/**
+ * `--watch`'s worker pool: threads that stay up for the whole watch and
+ * compile any round of two or more jobs, so a save that reaches most of a
+ * large build is not slower than rebuilding it one-shot. Measured on Lichess's
+ * 147 entries before it (native addon, macOS/arm64): a shared partial that
+ * reaches 138 of them took 1362 ms to land in this thread, and 345 ms as a
+ * fresh `-j` default spawn over the same pairs.
+ *
+ * `compile` is SYNCHRONOUS, and that is the point. Everything around a round
+ * — the burst window in `_coalesce.mjs`, the snapshot before it reads, the
+ * watchers re-armed between compiling and writing — was built on a compile
+ * that holds the thread, and each of those orders was measured into place.
+ * So this thread hands the round out, sleeps on `Atomics.wait` until every
+ * worker has reported, and takes the results off the ports with
+ * `receiveMessageOnPort`, which needs no event loop. Nothing observable
+ * changes but the time the round takes.
+ *
+ * The workers take jobs from a shared index, as `runJobs`'s do, so one
+ * heavy stylesheet does not leave the rest idle.
+ */
+function makeWatchPool(size, opts, sourceMap) {
+  // [0] the next job to take, [1] how many workers have finished the round.
+  const ctl = new Int32Array(new SharedArrayBuffer(8));
+  const { positionals: _unused, ...workerOpts } = opts;
+  const ports = Array.from({ length: size }, () => {
+    const { port1, port2 } = new MessageChannel();
+    const worker = new Worker(fileURLToPath(import.meta.url), {
+      workerData: { sassoWatchWorker: true, opts: workerOpts, sourceMap, port: port2, ctl },
+      transferList: [port2],
+    });
+    // The watchers keep a watch alive, not its pool.
+    worker.unref();
+    return port1;
+  });
+  return {
+    compile(inputs, provisional) {
+      Atomics.store(ctl, 0, 0);
+      Atomics.store(ctl, 1, 0);
+      for (const port of ports) port.postMessage({ inputs, provisional });
+      for (let done; (done = Atomics.load(ctl, 1)) < size; ) Atomics.wait(ctl, 1, done);
+      const out = new Array(inputs.length);
+      for (const port of ports) {
+        for (let m; (m = receiveMessageOnPort(port)); ) out[m.message.i] = m.message.ran;
+      }
+      // A job whose worker threw before answering is a failure the user
+      // sees, not a round that settles on nothing.
+      const lost = { failure: { exception: false, message: "the --watch worker pool lost this compile" }, said: "" };
+      return Array.from(out, (ran) => ran ?? lost);
+    },
+  };
+}
+
+/** A `--watch` pool thread: compile what the round hands out, until the watch ends. */
+async function runWatchWorker() {
+  const { opts, sourceMap, port, ctl } = workerData;
+  await loadEngine();
+  const common = { ...commonOptions(opts), sourceMap, ...syntaxOf(opts) };
+  port.on("message", ({ inputs, provisional }) => {
+    // `finally`, because the other thread is asleep until every worker says
+    // it is done: a worker that died quietly would hang the watch.
+    try {
+      for (let i; (i = Atomics.add(ctl, 0, 1)) < inputs.length; ) {
+        port.postMessage({ i, ran: compileForWatch(inputs[i], common, provisional) });
+      }
+    } finally {
+      Atomics.add(ctl, 1, 1);
+      Atomics.notify(ctl, 1);
+    }
+  });
 }
 
 /**
@@ -2346,89 +2442,7 @@ async function runJobs(jobs, opts, common) {
   // by that job's failure path. `compileSlice` decodes, fatally.
   const stdinBytes = jobs.some((j) => j.input === "-") ? shareBytes(readStdinBytes()) : undefined;
 
-  // Two sources writing to ONE destination have to stay in command-line order:
-  // dart compiles both and the LAST one wins — the same file every run
-  // (measured against 1.104.1 on 2026-09-17, in both orders). Run them in
-  // parallel and the winner is whoever finishes last, which is the race the
-  // native CLI has today. A collision is almost always a slip in the command
-  // line, so the parallelism given up here costs nothing real.
-  //
-  // A job writes its CSS *and*, with source maps on, a `<output>.map` beside
-  // it — so `a.scss:out.css` and `b.scss:out.css.map` collide on that sidecar
-  // even though their `output`s differ. Both count.
-  // The same goes for a path one job WRITES and another READS:
-  // `a.scss:b.scss b.scss:out.css` compiles a into b.scss and then b.scss into
-  // out.css, and dart, being sequential, always reads the new b.scss. In the
-  // pool the second job reads whichever version it finds (measured: dart and
-  // `-j 1` compile a's output, the pool compiled the original b.scss).
-  //
-  // `--no-css` is the exception to both: `emit` and `discardStaleOutput`
-  // return early under it, so the batch touches no output at all and there is
-  // no last-writer to get right.
-  //
-  // Only ENTRY paths are compared. A job that writes a file some other job
-  // `@use`s is the same hazard and cannot be seen from here — the dependency
-  // is known only once that stylesheet has been parsed — so it stays a
-  // scheduling race, as it is in the native CLI (#87).
-  // A job writing over its OWN input is not one of them: `a.scss:a.scss` reads
-  // before it writes, inside a single job, so there is no order between
-  // threads to get wrong. Only ANOTHER job's input counts, which is why this
-  // remembers who owns each one instead of just that it exists.
-  const inputOwner = new Map();
-  if (!opts.noCss) {
-    jobs.forEach((job, i) => {
-      if (job.input === "-") return;
-      const key = pathKey(job.input);
-      if (!inputOwner.has(key)) inputOwner.set(key, i);
-    });
-  }
-  // A path does not have to match exactly to conflict: `a.scss:out` writes the
-  // FILE `out` while `b.scss:out/sub.css` needs `out` to be a DIRECTORY, and
-  // on a fresh tree whichever job runs first decides which one fails. dart
-  // writes the file and then fails the nested job, the same way every run;
-  // the pool alternated (measured 2026-09-17: four runs left a directory, two
-  // left a file). So an output that is an ancestor or a descendant of another
-  // output counts too.
-  //
-  // Both directions, without comparing every pair: `seenOut` holds the paths
-  // written so far and `seenAncestors` every directory above them. A new path
-  // conflicts if it IS one already written, if it is a directory some earlier
-  // output sits under, or if any directory above it was written as a file.
-  // Sharing a parent directory is not a conflict — that is every ordinary
-  // batch — because only written paths ever go into `seenOut`.
-  const seenOut = new Set();
-  const seenAncestors = new Set();
-  let collides = false;
-  const scan = opts.noCss ? [] : jobs;
-  for (let i = 0; i < scan.length && !collides; i++) {
-    const job = scan[i];
-    if (job.output === undefined) continue;
-    const written = [job.output];
-    if (wantSourceMap(opts, job.output) && !opts.embedSourceMap) written.push(`${job.output}.map`);
-    for (const path of written) {
-      const key = pathKey(path);
-      const owner = inputOwner.get(key);
-      if (seenOut.has(key) || seenAncestors.has(key) || (owner !== undefined && owner !== i)) {
-        collides = true;
-        break;
-      }
-      for (const dir of ancestorsOf(key)) {
-        if (seenOut.has(dir)) {
-          collides = true;
-          break;
-        }
-        // Already recorded means everything above it was too, and was checked
-        // against `seenOut` then. A later output that IS one of those
-        // directories is still caught, by the `seenAncestors` test above. So
-        // the walk can stop here, which is what keeps a directory build from
-        // paying for its whole depth once per file.
-        if (seenAncestors.has(dir)) break;
-        seenAncestors.add(dir);
-      }
-      if (collides) break;
-      seenOut.add(key);
-    }
-  }
+  const collides = outputsCollide(jobs, opts);
 
   const workers = Math.min(jobs.length, Math.max(1, wanted));
   // Diagnostics are collected per job and printed in COMMAND-LINE order, never
@@ -2490,6 +2504,90 @@ async function runJobs(jobs, opts, common) {
   flushDiagnostics(diagnostics, jobs.length);
   flushCompiled(compiled, jobs.length);
   return { failed, worst };
+}
+
+/**
+ * Whether any two of `jobs` must run in command-line order: the pool cannot
+ * keep one, so `runJobs` and `--watch` both compile such a batch in this
+ * thread.
+ */
+function outputsCollide(jobs, opts) {
+  // Two sources writing to ONE destination have to stay in command-line order:
+  // dart compiles both and the LAST one wins — the same file every run
+  // (measured against 1.104.1 on 2026-09-17, in both orders). Run them in
+  // parallel and the winner is whoever finishes last, which is the race the
+  // native CLI has today. A collision is almost always a slip in the command
+  // line, so the parallelism given up here costs nothing real.
+  //
+  // A job writes its CSS *and*, with source maps on, a `<output>.map` beside
+  // it — so `a.scss:out.css` and `b.scss:out.css.map` collide on that sidecar
+  // even though their `output`s differ. Both count.
+  // The same goes for a path one job WRITES and another READS:
+  // `a.scss:b.scss b.scss:out.css` compiles a into b.scss and then b.scss into
+  // out.css, and dart, being sequential, always reads the new b.scss. In the
+  // pool the second job reads whichever version it finds (measured: dart and
+  // `-j 1` compile a's output, the pool compiled the original b.scss).
+  //
+  // `--no-css` is the exception to both: `emit` and `discardStaleOutput`
+  // return early under it, so the batch touches no output at all and there is
+  // no last-writer to get right.
+  //
+  // Only ENTRY paths are compared. A job that writes a file some other job
+  // `@use`s is the same hazard and cannot be seen from here — the dependency
+  // is known only once that stylesheet has been parsed — so it stays a
+  // scheduling race, as it is in the native CLI (#87).
+  // A job writing over its OWN input is not one of them: `a.scss:a.scss` reads
+  // before it writes, inside a single job, so there is no order between
+  // threads to get wrong. Only ANOTHER job's input counts, which is why this
+  // remembers who owns each one instead of just that it exists.
+  const inputOwner = new Map();
+  if (!opts.noCss) {
+    jobs.forEach((job, i) => {
+      if (job.input === "-") return;
+      const key = pathKey(job.input);
+      if (!inputOwner.has(key)) inputOwner.set(key, i);
+    });
+  }
+  // A path does not have to match exactly to conflict: `a.scss:out` writes the
+  // FILE `out` while `b.scss:out/sub.css` needs `out` to be a DIRECTORY, and
+  // on a fresh tree whichever job runs first decides which one fails. dart
+  // writes the file and then fails the nested job, the same way every run;
+  // the pool alternated (measured 2026-09-17: four runs left a directory, two
+  // left a file). So an output that is an ancestor or a descendant of another
+  // output counts too.
+  //
+  // Both directions, without comparing every pair: `seenOut` holds the paths
+  // written so far and `seenAncestors` every directory above them. A new path
+  // conflicts if it IS one already written, if it is a directory some earlier
+  // output sits under, or if any directory above it was written as a file.
+  // Sharing a parent directory is not a conflict — that is every ordinary
+  // batch — because only written paths ever go into `seenOut`.
+  const seenOut = new Set();
+  const seenAncestors = new Set();
+  const scan = opts.noCss ? [] : jobs;
+  for (let i = 0; i < scan.length; i++) {
+    const job = scan[i];
+    if (job.output === undefined) continue;
+    const written = [job.output];
+    if (wantSourceMap(opts, job.output) && !opts.embedSourceMap) written.push(`${job.output}.map`);
+    for (const path of written) {
+      const key = pathKey(path);
+      const owner = inputOwner.get(key);
+      if (seenOut.has(key) || seenAncestors.has(key) || (owner !== undefined && owner !== i)) return true;
+      for (const dir of ancestorsOf(key)) {
+        if (seenOut.has(dir)) return true;
+        // Already recorded means everything above it was too, and was checked
+        // against `seenOut` then. A later output that IS one of those
+        // directories is still caught, by the `seenAncestors` test above. So
+        // the walk can stop here, which is what keeps a directory build from
+        // paying for its whole depth once per file.
+        if (seenAncestors.has(dir)) break;
+        seenAncestors.add(dir);
+      }
+      seenOut.add(key);
+    }
+  }
+  return false;
 }
 
 /** Bytes in shared memory, so `workerData` carries a handle, not a copy. */
@@ -2802,4 +2900,5 @@ function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics, compiled
 
 // A worker thread runs the same file, telling itself apart by its workerData.
 if (!isMainThread && workerData && workerData.sassoWorker) runWorker();
+else if (!isMainThread && workerData && workerData.sassoWatchWorker) runWatchWorker();
 else main();

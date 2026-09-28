@@ -4258,8 +4258,10 @@ for (const mode of [[], ["--no-poll"]]) {
   put("_x.scss", "$x: red;\n");
   put("_shared.scss", "$s: navy;\n");
   put("a.scss", '@use "x";\n.a { color: x.$x; }\n');
-  put("b.scss", '@use "shared";\n.b { color: shared.$s; }\n');
-  put("c.scss", '@use "shared";\n.c { color: shared.$s; }\n');
+  // A warning each, so the rounds the pool compiles have diagnostics to
+  // put back in command-line order.
+  put("b.scss", '@use "shared";\n@warn "from b";\n.b { color: shared.$s; }\n');
+  put("c.scss", '@use "shared";\n@warn "from c";\n.c { color: shared.$s; }\n');
   const names = ["a", "b", "c"];
   const pairs = names.map((n) => `src/${n}.scss:out/${n}.css`);
   // SASSO_DEBUG_WATCH names every compile. One whose CSS did not change
@@ -4322,6 +4324,8 @@ for (const mode of [[], ["--no-poll"]]) {
     assert.ok(await until(() => outputsAtBanner !== null, 20000), `no banner: ${stdout}${stderr}`);
     assert.equal(outputsAtBanner, 3, "the banner came before every output was written");
     assert.equal(narrated().length, 3, `one line per pair before the banner: ${stdout}`);
+    const warned = () => [...stderr.matchAll(/from (b|c)/g)].map((m) => m[1]).join("");
+    assert.equal(warned(), "bc", `each warning once, in command-line order: ${JSON.stringify(stderr)}`);
     await settle();
 
     let r = await save("a private partial", () => put("_x.scss", "$x: green;\n"), () => css("a").includes("green"));
@@ -4333,6 +4337,7 @@ for (const mode of [[], ["--no-poll"]]) {
       css("b").includes("teal") && css("c").includes("teal"),
     );
     assert.deepEqual(r.said, ["b", "c"], `_shared.scss reaches b and c: ${JSON.stringify(stdout)}`);
+    assert.equal(warned(), "bcbc", `and warns once more each, in order: ${JSON.stringify(stderr)}`);
     assert.deepEqual(r.compiled, ["b", "c"], `and compiled nothing else: ${JSON.stringify(stderr)}`);
     assert.deepEqual(r.touched, ["b", "c"], "and a's output was left alone");
 
