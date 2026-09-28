@@ -120,9 +120,11 @@ existing name moves its mtime without changing what is in it.
 
 ## What is not measured here
 
-- **The binary's `--watch` is not in the table above** (#86), which is still
-  the npm CLI on one entry. It implements the same provisional rule; adding it
-  as a column is a harness change, not a design one.
+- **The binary on one entry, and the npm CLI on many.** The first table is the
+  npm CLI on one entry and the section above is the binary on 147; neither has
+  the other's column. The binary implements the same provisional rule, so its
+  single-entry column is a harness change, not a design one. The npm CLI's
+  `--watch` takes only one pair until #200.
 - **Throughput under a burst.** The harness leaves 400 ms between saves so
   each measures one edit rather than the tail of the last. How many compiles
   a burst costs is a different question, covered by the `--watch` tests in
