@@ -65,7 +65,21 @@ pub(crate) fn call(
     // family (#62).
     if let Some(f) = global_member(name) {
         verify_args(f, pos_args, named, pos)?;
+        if f.rest().is_some() {
+            return reject_leftover(f, named, pos, call_body(name, written, pos_args, named, pos));
+        }
     }
+    call_body(name, written, pos_args, named, pos)
+}
+
+/// [`call`]'s dispatch, split out so the rest-parameter post-check can wrap it.
+fn call_body(
+    name: &str,
+    written: &str,
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+) -> Result<Value, Error> {
     if let Some(r) = color::try_call(name, pos_args, named, pos) {
         return r;
     }
@@ -275,20 +289,85 @@ fn verify_args(f: &Fun, pos_args: &[Value], named: &[(String, Value)], pos: Pos)
             !declared.contains(&c.as_ref())
         })
         .collect();
-    if let Some((last, init)) = leftover.split_last() {
-        let msg = if init.is_empty() {
-            format!("No parameter named ${last}.")
-        } else {
-            let head = init
-                .iter()
-                .map(|n| format!("${n}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("No parameters named {head} or ${last}.")
-        };
-        return Err(Error::at(msg, pos));
+    if let Some(err) = no_parameter_named(&leftover, pos) {
+        return Err(err);
     }
     Ok(())
+}
+
+/// dart's message for names that match no parameter, or `None` when there are
+/// none. Plural from two up, joined with a comma and a final `or` and NO comma
+/// before it: `No parameters named $x, $y or $z.` — measured 2026-09-28.
+///
+/// The names are reported in the order they were WRITTEN, not sorted.
+fn no_parameter_named(names: &[&str], pos: Pos) -> Option<Error> {
+    let (last, init) = names.split_last()?;
+    let msg = if init.is_empty() {
+        format!("No parameter named ${last}.")
+    } else {
+        let head = init
+            .iter()
+            .map(|n| format!("${n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("No parameters named {head} or ${last}.")
+    };
+    Some(Error::at(msg, pos))
+}
+
+/// A named argument that matches no parameter of `declared`, as dart's
+/// `No parameter named $x.`.
+///
+/// `declared` matters because a rest parameter usually sits behind named
+/// parameters that ARE addressable — `map.get($map, $key, $keys...)` answers
+/// `map.get((a: 1), $key: a)` with `1` in both compilers.
+fn reject_named(declared: &[&str], named: &[(String, Value)], pos: Pos) -> Result<(), Error> {
+    // `declared` matters: a rest parameter usually sits behind named parameters
+    // that ARE addressable — `map.get($map, $key, $keys...)` answers
+    // `map.get((a: 1), $key: a)` with `1` in both compilers. Rejecting every
+    // name here broke that, which a re-measure caught.
+    let names: Vec<&str> = named
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .filter(|n| !declared.contains(&canonical_name(n).as_ref()))
+        .collect();
+    match no_parameter_named(&names, pos) {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+/// The other half of [`verify_args`], for a REST parameter: dart binds the rest,
+/// RUNS THE BODY, and only then complains about a named argument the body did
+/// not consume.
+///
+/// The order is observable, which is why this is a post-check and not part of
+/// `verify_args` — measured 2026-09-28:
+///
+/// ```text
+///   math.max("a" "b", $x: 1)   ("a" "b") is not a number.       the body
+///   list.slash(1, $x: 2)       At least two elements are required.
+///   math.max($x: 1)            At least one argument must be passed.
+///   math.max(1, 2, $x: 3)      No parameter named $x.           the leftover
+/// ```
+///
+/// A first attempt put the check inside each built-in, before the body's own
+/// validation; `a_built_in_rejects_an_unrecognized_named_argument` failed on the
+/// first of those and this replaced it.
+fn reject_leftover(
+    f: &Fun,
+    named: &[(String, Value)],
+    pos: Pos,
+    out: Result<Value, Error>,
+) -> Result<Value, Error> {
+    // Only for a rest parameter — a fixed-arity member was fully verified up
+    // front — and only when the body does not read the keywords itself.
+    if f.rest().is_none() || f.reads_keywords || named.is_empty() {
+        return out;
+    }
+    let value = out?;
+    reject_named(f.named_params(), named, pos)?;
+    Ok(value)
 }
 
 /// The `Fun` row for a module member, for [`verify_args`].
@@ -592,6 +671,10 @@ struct Fun {
     /// How many leading `params` have no default, so omitting one is
     /// `Missing argument $x.`. A rest parameter requires nothing.
     required: usize,
+    /// Whether the implementation READS the keywords its rest parameter
+    /// collected, so a named argument is part of its interface rather than a
+    /// mistake. Only meaningful with a rest parameter; see [`f_kw`].
+    reads_keywords: bool,
 }
 
 impl Fun {
@@ -636,6 +719,36 @@ const fn f(
         global,
         params: Some(params),
         required,
+        reads_keywords: false,
+    }
+}
+
+/// A member whose rest parameter's KEYWORDS are its interface, so a named
+/// argument that matches no declared parameter is handed to the body instead of
+/// being rejected. Six members, measured: `color.adjust`/`change`/`scale` take
+/// channel adjustments that way (`color.adjust(red, $lightness: 10%)`),
+/// `map.merge` and `map.set` accept `$map2`/`$key`/`$value`, and `meta.call`
+/// forwards everything to the function it calls.
+///
+/// dart decides this at RUNTIME — it checks whether the body actually read the
+/// keywords (`ArgumentList.keywordsAccessed`) — which shows in `map.set`:
+/// `map.set((a: 1), $key: b, $value: 2)` reads them, `map.set((a: 1), b, 2,
+/// $nope: 3)` does not, and dart rejects `$nope` only in the second. A row
+/// cannot express that, so these six accept a leftover name where dart's body
+/// would have complained about it instead. The gap is one message, not one
+/// answer, and it is the same gap #213 records for user callables.
+const fn f_kw(
+    name: &'static str,
+    global: Option<&'static str>,
+    params: &'static [&'static str],
+    required: usize,
+) -> Fun {
+    Fun {
+        name,
+        global,
+        params: Some(params),
+        required,
+        reads_keywords: true,
     }
 }
 
@@ -643,10 +756,12 @@ const fn f(
 /// verified for it and its behaviour is unchanged. Three members, each for a
 /// measured reason:
 ///
-/// - `color.hwb` and `map.remove` are OVERLOADED by arity —
-///   `hwb($channels)` or `hwb($hue, $whiteness, $blackness, $alpha: 1)`,
-///   `remove($map)` or `remove($map, $key, $keys...)` — and a single row
-///   cannot say which applies before counting the arguments.
+/// - `color.hwb` is OVERLOADED by arity — `hwb($channels)` or
+///   `hwb($hue, $whiteness, $blackness, $alpha: 1)` — and the two declare
+///   DIFFERENT names, so a single row cannot say which applies before counting
+///   the arguments. (`map.remove` is overloaded too and does not need this: its
+///   overloads declare the same names and differ only in arity, which a rest
+///   parameter allows.)
 /// - `color.alpha` never prints a declaration at all: dart answers both
 ///   `alpha(red, blue)` and `alpha(red, $x: 1)` with the self-contradictory
 ///   `Only 1 argument allowed, but 1 were passed.`, from the legacy
@@ -657,6 +772,7 @@ const fn no_sig(name: &'static str, global: Option<&'static str>) -> Fun {
         global,
         params: None,
         required: 0,
+        reads_keywords: false,
     }
 }
 
@@ -805,9 +921,9 @@ static COLOR_MEMBERS: Members = Members {
             2,
         ),
         f("complement", Some("complement"), &["color", "space"], 1),
-        f("adjust", Some("adjust-color"), &["color", "kwargs..."], 1),
-        f("scale", Some("scale-color"), &["color", "kwargs..."], 1),
-        f("change", Some("change-color"), &["color", "kwargs..."], 1),
+        f_kw("adjust", Some("adjust-color"), &["color", "kwargs..."], 1),
+        f_kw("scale", Some("scale-color"), &["color", "kwargs..."], 1),
+        f_kw("change", Some("change-color"), &["color", "kwargs..."], 1),
         f("ie-hex-str", Some("ie-hex-str"), &["color"], 1),
     ],
     mixins: &[],
@@ -843,9 +959,13 @@ static MAP_MEMBERS: Members = Members {
     functions: &[
         f("get", Some("map-get"), &["map", "key", "keys..."], 2),
         // Module-only: no global alias in dart.
-        f("set", None, &["map", "args..."], 1),
-        f("merge", Some("map-merge"), &["map1", "args..."], 1),
-        no_sig("remove", Some("map-remove")),
+        f_kw("set", None, &["map", "args..."], 1),
+        f_kw("merge", Some("map-merge"), &["map1", "args..."], 1),
+        // dart overloads this by arity — `remove($map)` or
+        // `remove($map, $key, $keys...)` — and the two collapse into one row
+        // because they declare the SAME names and differ only in how many
+        // positional arguments they take, which a rest parameter already allows.
+        f("remove", Some("map-remove"), &["map", "key", "keys..."], 1),
         f("keys", Some("map-keys"), &["map"], 1),
         f("values", Some("map-values"), &["map"], 1),
         f("has-key", Some("map-has-key"), &["map", "key", "keys..."], 2),
@@ -926,7 +1046,7 @@ static META_MEMBERS: Members = Members {
         f("module-mixins", None, &["module"], 1),
         f("get-function", None, &["name", "css", "module"], 1),
         f("get-mixin", None, &["name", "module"], 1),
-        f("call", None, &["function", "args..."], 1),
+        f_kw("call", None, &["function", "args..."], 1),
     ],
     mixins: &["load-css", "apply"],
     variables: &[],
@@ -1025,7 +1145,26 @@ pub(crate) fn call_module(
     // and here for every member, not only the ones that name a global.
     if let Some(f) = member_of(module, member) {
         verify_args(f, pos_args, named, pos)?;
+        if f.rest().is_some() {
+            return reject_leftover(
+                f,
+                named,
+                pos,
+                call_module_body(module, member, pos_args, named, pos),
+            );
+        }
     }
+    call_module_body(module, member, pos_args, named, pos)
+}
+
+/// [`call_module`]'s dispatch, split out as [`call_body`] is.
+fn call_module_body(
+    module: &str,
+    member: &str,
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+) -> Result<Value, Error> {
     // `math.div(a, b)` is true (always-divide) division, unit-aware.
     if module == "math" && member == "div" {
         return math::module_div(pos_args, named, pos);
@@ -1035,8 +1174,8 @@ pub(crate) fn call_module(
     if module == "math" {
         match member {
             "clamp" => return math::module_clamp(pos_args, named, pos),
-            "min" => return math::module_min_max(pos_args, named, pos, true),
-            "max" => return math::module_min_max(pos_args, named, pos, false),
+            "min" => return math::module_min_max(pos_args, pos, true),
+            "max" => return math::module_min_max(pos_args, pos, false),
             "round" => return math::module_round(pos_args, named, pos),
             _ => {}
         }
@@ -1056,7 +1195,7 @@ pub(crate) fn call_module(
     }
     // `sass:list` members without a global alias (`slash`).
     if module == "list" {
-        if let Some(r) = list::call_module_member(member, pos_args, named, pos) {
+        if let Some(r) = list::call_module_member(member, pos_args, pos) {
             return r;
         }
     }
@@ -1383,6 +1522,8 @@ mod tests {
         // arguments that would break any of the three rules still get through.
         ("color", "hwb", &["red"]),
         ("map", "remove", &["(a: 1, b: 2)", "b"]),
+        ("map", "remove", &["(a: 1)"]),
+        ("map", "remove", &["(a: 1, b: 2)", "$key: b"]),
         ("color", "alpha", &["red"]),
         ("math", "log", &["8", "$base: 2"]),
         ("color", "invert", &["red", "$weight: 100%"]),
@@ -1454,7 +1595,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(unverified, ["color.hwb", "color.alpha", "map.remove"]);
+        assert_eq!(unverified, ["color.hwb", "color.alpha"]);
     }
 
     /// A rest parameter is not addressable by its own name, and dart says so:

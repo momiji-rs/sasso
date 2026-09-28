@@ -43,21 +43,16 @@ pub(super) fn try_call(
         "index" => fn_index(pos_args, named, pos),
         "list-separator" => fn_list_separator(pos_args, named, pos),
         "is-bracketed" => fn_is_bracketed(pos_args, named, pos),
-        "zip" => fn_zip(pos_args, named),
+        "zip" => fn_zip(pos_args),
         _ => return None,
     })
 }
 
 /// Dispatch a `sass:list` member that has no global alias (`slash`). Returns
 /// `None` for any other member so the caller can report it as undefined.
-pub(super) fn call_module_member(
-    member: &str,
-    pos_args: &[Value],
-    named: &[(String, Value)],
-    pos: Pos,
-) -> Option<Result<Value, Error>> {
+pub(super) fn call_module_member(member: &str, pos_args: &[Value], pos: Pos) -> Option<Result<Value, Error>> {
     Some(match member {
-        "slash" => fn_slash(pos_args, named, pos),
+        "slash" => fn_slash(pos_args, pos),
         _ => return None,
     })
 }
@@ -65,13 +60,12 @@ pub(super) fn call_module_member(
 /// `list.slash($elements...)`: a slash-separated list of the arguments
 /// (e.g. `list.slash(1, 2, 3)` → `1 / 2 / 3`). dart-sass requires at least two
 /// elements.
-fn fn_slash(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    if !named.is_empty() {
-        return Err(Error::at(
-            "No arguments named ($".to_string() + &named[0].0 + ").",
-            pos,
-        ));
-    }
+fn fn_slash(pos_args: &[Value], pos: Pos) -> Result<Value, Error> {
+    // Both the wording and the ORDER were wrong here: this said
+    // `No arguments named ($x).`, which is no sentence dart produces, and it
+    // said it before the element count. dart answers `list.slash(1, $x: 2)`
+    // with `At least two elements are required.` and only
+    // `list.slash(1, 2, $x: 3)` with `No parameter named $x.` (#62).
     if pos_args.len() < 2 {
         return Err(Error::at("At least two elements are required.".to_string(), pos));
     }
@@ -361,14 +355,8 @@ fn fn_is_bracketed(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> R
 /// comma-separated list of space-separated sublists, truncating to the
 /// shortest input. With a single element per row the row is that bare value;
 /// when any input is empty (length 0) the result is the empty list.
-fn fn_zip(pos_args: &[Value], named: &[(String, Value)]) -> Result<Value, Error> {
-    // `zip` takes only the variadic positional `$lists`; any trailing named
-    // arguments are treated as further lists, matching dart-sass's rest list.
-    let lists: Vec<Vec<Value>> = pos_args
-        .iter()
-        .chain(named.iter().map(|(_, v)| v))
-        .map(|v| as_items(v).0)
-        .collect();
+fn fn_zip(pos_args: &[Value]) -> Result<Value, Error> {
+    let lists: Vec<Vec<Value>> = pos_args.iter().map(|v| as_items(v).0).collect();
     let rows = lists.iter().map(|l| l.len()).min().unwrap_or(0);
     let mut out = Vec::with_capacity(rows);
     for i in 0..rows {
