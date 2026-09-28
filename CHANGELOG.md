@@ -44,6 +44,45 @@ Conformance is tracked separately as a ratchet against the official
   compile. An unchanged stylesheet writes and prints nothing, so without it
   a wasted recompile is invisible — the tests assert on it.
 
+- **Built-in modules have a member table** (#64). `meta.module-functions()`,
+  `meta.module-mixins()` and `meta.module-variables()` listed members for
+  `sass:meta` and answered every other built-in with an empty map, because
+  there was no table to enumerate — only a `match` that could say whether
+  `get` is in `sass:map` and not what `sass:map` contains.
+
+  One `(member, global alias)` table per module now answers all three
+  questions, and the order is dart's: the result is a map, a Sass map keeps
+  insertion order, and dart returns members as declared rather than sorted.
+  Measured against dart-sass 1.104.1 — all seven modules identical, names and
+  order, 116 function members in total:
+
+  ```
+    sass:math      24    sass:selector   8
+    sass:color     37    sass:string    10
+    sass:list      10    sass:meta      18
+    sass:map        9
+  ```
+
+  And the members that are not functions: `sass:meta`'s two mixins
+  (`load-css`, `apply`) and `sass:math`'s seven variables.
+
+  Three membership differences went with it:
+
+  ```
+    math.exp     sasso had it, dart does not
+    math.sign    sasso had it, dart does not
+    list.slash   dart had it, sasso's predicate said no (the call worked)
+  ```
+
+  `exp` and `sign` still COMPUTE in both compilers — `exp(1)` is
+  `2.7182818285` — because they are CSS math functions, which is a different
+  thing from a Sass function. What changes is that
+  `meta.function-exists("exp", $module: "math")` answers `false`, as dart does.
+
+  `meta.module-variables("math")` also carries values now instead of `null`
+  for every key: `("e": 2.7182818285, "pi": 3.1415926536, …)`. `module_var`
+  already owned them and nothing was asking it.
+
 - **A deleted dependency is no longer resurrected through the output symlink**
   (#177). With `out.css -> _v.scss` under `--watch`, deleting `_v.scss` made
   the compile fail — and writing the error stylesheet through the link
