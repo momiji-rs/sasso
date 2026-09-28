@@ -665,8 +665,9 @@ struct Fun {
     name: &'static str,
     global: Option<&'static str>,
     /// dart's parameters, in order, a rest parameter written with dart's own
-    /// `...` suffix (`&["map", "key", "keys..."]`). `None` for the three
-    /// members this table does not describe — see [`no_sig`].
+    /// `...` suffix (`&["map", "key", "keys..."]`). `None` for the two members
+    /// this table does not describe — see [`no_sig`], and
+    /// `only_the_overloaded_members_go_unverified`, which pins which two.
     params: Option<&'static [&'static str]>,
     /// How many leading `params` have no default, so omitting one is
     /// `Missing argument $x.`. A rest parameter requires nothing.
@@ -753,7 +754,7 @@ const fn f_kw(
 }
 
 /// A member whose parameters this table does NOT describe, so nothing is
-/// verified for it and its behaviour is unchanged. Three members, each for a
+/// verified for it and its behaviour is unchanged. Two members, each for a
 /// measured reason:
 ///
 /// - `color.hwb` is OVERLOADED by arity — `hwb($channels)` or
@@ -881,6 +882,12 @@ static COLOR_MEMBERS: Members = Members {
         f("adjust-hue", None, &["color", "amount"], 2),
         f("lighten", None, &["color", "amount"], 2),
         f("darken", None, &["color", "amount"], 2),
+        // Two parameters, measured: `color.saturate($nope: 1)` is
+        // `Missing argument $color.` and `color.saturate(10%)` is
+        // `Missing argument $amount.`. The GLOBAL `saturate` is a different
+        // declaration — `saturate($amount)`, the CSS filter function, asymmetric
+        // with `desaturate($color, $amount)` — which is why this row must keep
+        // `global: None`; `the_global_saturate_is_not_this_declaration` pins it.
         f("saturate", None, &["color", "amount"], 2),
         f("desaturate", None, &["color", "amount"], 2),
         f("grayscale", Some("grayscale"), &["color"], 1),
@@ -1518,8 +1525,11 @@ mod tests {
         ("string", "slice", &["$string: \"abcd\"", "$start_at: 2"]),
         ("list", "set-nth", &["$list: 1 2", "$n: 1", "$value: 9"]),
         ("map", "has-key", &["$map: (a: 1)", "$key: a"]),
-        // The three with no recorded signature are verified for nothing, so
+        // The two with no recorded signature are verified for nothing, so
         // arguments that would break any of the three rules still get through.
+        // `map.remove` is NOT one of them — its overloads collapse into a rest
+        // parameter — so these cases check that it is verified and still accepts
+        // every arity and its `$key`.
         ("color", "hwb", &["red"]),
         ("map", "remove", &["(a: 1, b: 2)", "b"]),
         ("map", "remove", &["(a: 1)"]),
@@ -1580,6 +1590,33 @@ mod tests {
         super::verify_args(f, &pos_args, &named, super::Pos::NONE)
             .err()
             .map(|e| e.message)
+    }
+
+    /// `saturate` names two DIFFERENT declarations, and only one of them is
+    /// this table's.
+    ///
+    /// `color.saturate($color, $amount)` is the module member; the global
+    /// `saturate($amount)` is the CSS filter function, asymmetric with
+    /// `desaturate($color, $amount)`. Measured against dart-sass 1.104.1 on
+    /// 2026-09-28: `color.saturate($nope: 1)` is `Missing argument $color.`,
+    /// `color.saturate(10%)` is `Missing argument $amount.`, and the global
+    /// `saturate(1%)` is preserved as CSS.
+    ///
+    /// So giving this row a global alias would verify the filter function
+    /// against the member's parameters and answer `Missing argument $color.`
+    /// where dart answers about `$amount` — which is exactly the reading a
+    /// review arrived at (r4127788923), so the distinction is pinned rather
+    /// than left to the comment beside the row.
+    #[test]
+    fn the_global_saturate_is_not_this_declaration() {
+        let member = super::member_of("color", "saturate").unwrap();
+        assert_eq!(member.params, Some(&["color", "amount"][..]));
+        assert_eq!(member.required, 2);
+        assert_eq!(member.global, None, "the global saturate is a different function");
+        assert!(
+            super::global_member("saturate").is_none(),
+            "the global `saturate` must not be verified against the member's parameters",
+        );
     }
 
     /// The three members with no recorded signature are exactly the three

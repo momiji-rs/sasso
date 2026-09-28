@@ -608,9 +608,9 @@ fn parse_arg_selector(v: &Value, pos: Pos) -> Result<Vec<Complex>, Error> {
 /// merges onto the trailing compound of the accumulator (dart-sass `append`).
 fn fn_append(pos_args: &[Value], pos: Pos) -> Result<Value, Error> {
     // `pos_args` only: a named argument is not part of `$selectors...`, and
-    // folding its VALUE in made `selector.nest("a", "b", $x: 1)` report
+    // folding its VALUE in made `selector.append("a", "b", $x: 1)` report
     // `1 is not a valid selector` — a misleading message about an argument the
-    // caller never passed as a selector (#62).
+    // caller never passed as a selector (#62). Same as `fn_nest` above.
     let all: Vec<Value> = pos_args.to_vec();
     if all.is_empty() {
         return Err(Error::at(
