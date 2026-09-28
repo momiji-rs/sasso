@@ -9642,6 +9642,32 @@ fn builtin_module_members_are_enumerable_end_to_end() {
            filled: map.get(meta.module-variables(\"math\"), \"e\") != null;\n\
          }}\n"
     ));
+    // Every ENUMERATED member resolves through its own API, which is the
+    // invariant that keeps the table from drifting away from the three
+    // functions that answer from it (r4119082581). `module-mixins` is answered
+    // by `is_builtin_mixin` and `module-variables` by `module_var`, each a
+    // separate function from the enumeration, so a row added to one and not
+    // the other shows up here as a `false` — and dart says `true` for all of
+    // them, so it is parity rather than self-agreement.
+    //
+    // `global-variable-exists`, not `variable-exists`: the module-qualified
+    // question is the global one, and dart's `variable-exists` has no
+    // `$module` parameter at all (#210).
+    assert_parity(&format!(
+        "{USES}$mok: ();\n\
+         @each $n in map.keys(meta.module-mixins(\"meta\")) {{\n  \
+           $mok: list.append($mok, meta.mixin-exists($n, $module: \"meta\"));\n\
+         }}\n\
+         $vok: ();\n\
+         @each $n in map.keys(meta.module-variables(\"math\")) {{\n  \
+           $vok: list.append($vok, meta.global-variable-exists($n, $module: \"math\"));\n\
+         }}\n\
+         $fok: ();\n\
+         @each $n in map.keys(meta.module-functions(\"color\")) {{\n  \
+           $fok: list.append($fok, meta.function-exists($n, $module: \"color\"));\n\
+         }}\n\
+         a {{m: meta.inspect($mok); v: meta.inspect($vok); f: meta.inspect($fok)}}\n"
+    ));
     // The divergence the line above sidesteps, pinned so that fixing #203
     // fails HERE rather than quietly changing what a stylesheet sees. dart
     // prints 3.141592653589793.

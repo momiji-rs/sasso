@@ -871,25 +871,39 @@ pub(crate) fn call_module(
     }
 }
 
-/// Resolve a built-in module variable (`math.$pi`, etc.). dart-sass exposes
-/// these only on `sass:math`; an unknown member is "Undefined variable.".
+/// Resolve a built-in module variable (`math.$pi`, etc.). An unknown member is
+/// "Undefined variable.".
+///
+/// The TABLE decides which names exist and the match below decides what they
+/// are worth, so the two cannot disagree about membership — which they could
+/// when this hard-coded its own list beside [`Members::variables`], and
+/// `meta.module-variables()` enumerated from one while `global-variable-exists`
+/// answered from the other (r4119082581). `sass:math` is no longer named here
+/// either: it is the only module the table gives variables, so the lookup says
+/// so instead of a second place repeating it.
 pub(crate) fn module_var(module: &str, name: &str, pos: Pos) -> Result<Value, Error> {
-    let number = |value: f64| Ok(Value::Number(Number::unitless(value)));
-    if module == "math" {
-        return match name {
-            "pi" => number(std::f64::consts::PI),
-            "e" => number(std::f64::consts::E),
-            "epsilon" => number(f64::EPSILON),
-            "max-safe-integer" => number(9_007_199_254_740_991.0),
-            "min-safe-integer" => number(-9_007_199_254_740_991.0),
-            "max-number" => number(f64::MAX),
-            // The smallest positive (subnormal) double, matching dart-sass's
-            // `$min-number` (`5e-324`), not the smallest *normal* value.
-            "min-number" => number(f64::from_bits(1)),
-            _ => Err(Error::at("Undefined variable.".to_string(), pos)),
-        };
+    let undefined = || Error::at("Undefined variable.".to_string(), pos);
+    let canonical = canonical_name(name);
+    let name = canonical.as_ref();
+    if !module_variable_names(module).contains(&name) {
+        return Err(undefined());
     }
-    Err(Error::at("Undefined variable.".to_string(), pos))
+    let number = |value: f64| Ok(Value::Number(Number::unitless(value)));
+    match name {
+        "pi" => number(std::f64::consts::PI),
+        "e" => number(std::f64::consts::E),
+        "epsilon" => number(f64::EPSILON),
+        "max-safe-integer" => number(9_007_199_254_740_991.0),
+        "min-safe-integer" => number(-9_007_199_254_740_991.0),
+        "max-number" => number(f64::MAX),
+        // The smallest positive (subnormal) double, matching dart-sass's
+        // `$min-number` (`5e-324`), not the smallest *normal* value.
+        "min-number" => number(f64::from_bits(1)),
+        // A name the table lists and this does not answer. Unreachable while
+        // they agree, which `every_listed_variable_has_a_value` is what makes
+        // true rather than hoped for.
+        _ => Err(undefined()),
+    }
 }
 
 #[cfg(test)]
@@ -1078,6 +1092,49 @@ mod tests {
         // `list.length(map.keys(meta.module-{functions,mixins,variables}($m)))`
         // summed over the seven modules.
         assert_eq!(counts, (116, 2, 7), "(functions, mixins, variables)");
+    }
+
+    /// Every variable the table lists resolves to a value.
+    ///
+    /// `module_var` decides what a variable is worth and the table decides
+    /// which exist; this is what stops a row being added to one without the
+    /// other. Before it, a listed name `module_var` did not answer reached
+    /// `meta.module-variables()` as a `null` value under an `unwrap_or`, which
+    /// is drift that looks like data (r4119082581).
+    #[test]
+    fn every_listed_variable_has_a_value() {
+        for (module, _) in DART_FUNCTIONS {
+            for name in super::module_variable_names(module) {
+                assert!(
+                    super::module_var(module, name, super::Pos::NONE).is_ok(),
+                    "sass:{module}.${name} is listed but does not resolve",
+                );
+                // …and the underscore spelling reaches the same value, because
+                // the guard canonicalizes before it looks.
+                let under = name.replace('-', "_");
+                assert!(
+                    super::module_var(module, &under, super::Pos::NONE).is_ok(),
+                    "sass:{module}.${under} should resolve too",
+                );
+            }
+        }
+    }
+
+    /// …and a name the table does not list resolves to nothing, so the table is
+    /// what is being consulted rather than the match falling through.
+    #[test]
+    fn an_unlisted_variable_has_no_value() {
+        for (module, name) in [
+            ("math", "tau"), // plausible, and not a dart member
+            ("math", "abs"), // a FUNCTION of the same module
+            ("color", "pi"), // a real variable, wrong module
+            ("nope", "pi"),  // no such module
+        ] {
+            assert!(
+                super::module_var(module, name, super::Pos::NONE).is_err(),
+                "sass:{module}.${name} should not resolve",
+            );
+        }
     }
 
     /// `meta.module-functions()` answers with dart's names, in dart's order.

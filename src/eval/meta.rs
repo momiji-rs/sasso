@@ -914,13 +914,19 @@ impl<'a> Evaluator<'a> {
                             // used to answer `("e": null, …)` — the keys were
                             // right and every value was wrong. `module_var`
                             // already owned these; nothing was asking it.
-                            MemberKind::Variable => {
-                                crate::builtins::module_var(builtin, name, pos).unwrap_or(Value::Null)
-                            }
+                            //
+                            // PROPAGATED, where this was `unwrap_or(Null)`: a
+                            // name the table lists that `module_var` cannot
+                            // answer is a bug in this build, and `null` is a
+                            // legitimate Sass value, so swallowing it dressed
+                            // the bug up as data (r4119082581).
+                            // `every_listed_variable_has_a_value` is what keeps
+                            // this from firing.
+                            MemberKind::Variable => crate::builtins::module_var(builtin, name, pos)?,
                         };
-                        (key, val)
+                        Ok((key, val))
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, Error>>()?;
                 return Ok(Value::Map(Map::new(entries)));
             }
             // dart drops the article in the `module-*` functions ONLY: every
