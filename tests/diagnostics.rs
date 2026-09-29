@@ -241,9 +241,12 @@ fn the_duplicate_argument_diagnostic_has_a_single_span() {
 /// A host function's arguments are verified against its signature, and the
 /// callback does not run when they fail.
 ///
-/// `Options::with_function("foo($a, $b: 2)", …)` parses a real parameter list,
-/// so it is the third binder in the tree with a declaration to measure a call
-/// against — and it was the one this rule missed (r4130220838).
+/// `Options::with_function("foo($a, $b)", …)` parses a real parameter list, so
+/// it is the third binder in the tree with a declaration to measure a call
+/// against — and it was the one this rule missed (r4130220838). Written without
+/// a default on purpose: `with_function` rejects one outright, which the
+/// paragraph below says of dart's signatures and this line did not
+/// (r4130662197).
 ///
 /// dart's JS API parses a `functions:` signature the same way and verifies it.
 /// Measured 2026-09-29 through
