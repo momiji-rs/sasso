@@ -370,6 +370,28 @@ fn reject_leftover(
     Ok(value)
 }
 
+/// Verify a module member's arguments for a caller that dispatches the member
+/// ITSELF rather than through [`call_module`].
+///
+/// `sass:meta`'s evaluator-owned members are the case: `try_meta_eval_call`
+/// answers thirteen of them from the evaluator's own state and returns before
+/// `call_module` is reached, so without this they were the one part of the table
+/// nothing checked — `meta.variable-exists("v", $nope: 1)` answered `true`
+/// (r4128127579), and that is one of the shapes #62 was filed about.
+pub(crate) fn verify_member_args(
+    module: &str,
+    member: &str,
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+) -> Result<(), Error> {
+    let canonical = canonical_name(member);
+    match member_of(module, canonical.as_ref()) {
+        Some(f) => verify_args(f, pos_args, named, pos),
+        None => Ok(()),
+    }
+}
+
 /// The `Fun` row for a module member, for [`verify_args`].
 fn member_of(module: &str, member: &str) -> Option<&'static Fun> {
     members_of(module)?.functions.iter().find(|f| f.name == member)

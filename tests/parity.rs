@@ -9688,9 +9688,26 @@ fn builtin_module_members_are_enumerable_end_to_end() {
 /// error are both available.
 #[test]
 fn a_built_in_rejects_an_unrecognized_named_argument() {
+    // The rejection loop below reads dart's MESSAGE directly rather than through
+    // `assert_parity`, so it has to gate itself: opted in, and dart actually
+    // reachable. Without the second check `None` from `dart_sass_error` means
+    // both "dart accepted it" and "there is no dart here", and treating them
+    // alike made the nix sandbox — which sets the env var and has no network for
+    // `npx` — fail this test rather than skip it.
+    if !enabled() {
+        return;
+    }
+    if dart_sass("a {b: 1}\n").is_none() {
+        eprintln!("skipping named-argument parity: dart-sass unavailable");
+        return;
+    }
+
+    // `$v`, `f` and `m` exist so that the `meta.*-exists` cases are about the
+    // unrecognized NAME and not about the thing they ask after.
     const USES: &str = "@use \"sass:meta\";\n@use \"sass:math\";\n@use \"sass:color\";\n\
                         @use \"sass:list\";\n@use \"sass:map\";\n@use \"sass:selector\";\n\
-                        @use \"sass:string\";\n";
+                        @use \"sass:string\";\n$v: 1;\n@function f($a) {@return $a}\n\
+                        @mixin m {c: 1}\n";
 
     // Rejected, with dart's own sentence and dart's own precedence.
     for expr in [
@@ -9732,6 +9749,17 @@ fn a_built_in_rejects_an_unrecognized_named_argument() {
         // wording difference that predates this change and has nothing to do
         // with the ordering these cases are here for (#212).
         "math.max(\"a\", $nope: 1)",
+        // `sass:meta`'s evaluator-owned members, which answer from the
+        // evaluator's own state and never reach `call_module` — the one part of
+        // the table nothing checked (r4128127579).
+        "meta.variable-exists(\"v\", $nope: 1)",
+        "meta.global-variable-exists(\"v\", $nope: 1)",
+        "meta.function-exists(\"f\", $nope: 1)",
+        "meta.mixin-exists(\"m\", $nope: 1)",
+        "meta.content-exists($nope: 1)",
+        "meta.get-function(\"f\", $nope: 1)",
+        "meta.module-functions(\"math\", $nope: 1)",
+        "meta.inspect(1, $nope: 2)",
         // The emptiness check, not a type error: for a REST parameter dart quotes
         // no parameter name in a type error (`1 is not a valid selector`, where
         // sasso says `$selectors: 1 is not …`) because the value came from the
@@ -9754,9 +9782,20 @@ fn a_built_in_rejects_an_unrecognized_named_argument() {
                     "\n--- scss ---\n{scss}--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
                 );
             }
-            None => panic!("dart-sass accepted this, or is unavailable:\n{scss}"),
+            // Unreachable: the probe above established that dart runs here, so
+            // `None` can only mean dart ACCEPTED what it should have rejected.
+            None => panic!("dart-sass accepted this:\n{scss}"),
         }
     }
+
+    // Every way in, not just the direct call: the check sits in
+    // `try_meta_eval_call`, which a `@forward`ed member, an `as *` one and a
+    // first-class reference all route through (r4128127579).
+    assert_error_parity("@use \"sass:meta\" as *;\n$v: 1;\na {b: variable-exists(\"v\", $nope: 1)}\n");
+    assert_error_parity(
+        "@use \"sass:meta\";\n$v: 1;\n\
+         a {b: meta.call(meta.get-function(\"variable-exists\", $module: \"meta\"), \"v\", $nope: 1)}\n",
+    );
 
     // NOT here, and the reason is worth naming: `map.set((a: 1), b, 2, $nope: 3)`
     // is `No parameter named $nope.` in dart and
