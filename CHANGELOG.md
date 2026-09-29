@@ -41,6 +41,9 @@ Conformance is tracked separately as a ratchet against the official
   compound was deleted there too: `:is(\u{a0}b)` came out `:is(b)`,
   `selector.append(".a", "\u{a0}.c")` gave `.a.c` for dart's `.a\u{a0}.c`,
   and `:nth-child(2n \u{a0}+ 1)` compiled to `2n+1` where dart rejects it.
+  The attribute validator was the mirror image: it rejected the valid
+  `[a=x\u{a0}yz]` (reading `yz` as a modifier) and accepted the invalid
+  `[a="x"\u{a0}]`.
 
 ## [0.19.2] - 2026-09-29
 

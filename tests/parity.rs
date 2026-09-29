@@ -3452,6 +3452,63 @@ fn an_nbsp_inside_an_nth_argument_is_not_whitespace() {
 }
 
 #[test]
+fn an_attribute_selector_is_validated_with_css_whitespace() {
+    // The `[…]` validator and its emit canonicalizer ended an unquoted value,
+    // and skipped around the operator and modifier, at any
+    // `char::is_whitespace`. An NBSP inside the value ended it, so the rest
+    // was read as a (too long) modifier and a valid selector was rejected;
+    // an NBSP where only whitespace may go was skipped, so an invalid one was
+    // accepted. Byte-matched to dart-sass 1.104.1, in both styles. Offline.
+    for (scss, expanded, compressed) in [
+        (
+            "[a=x\u{a0}yz] { c: d }\n",
+            "@charset \"UTF-8\";\n[a=x\u{a0}yz] {\n  c: d;\n}",
+            "\u{feff}[a=x\u{a0}yz]{c:d}",
+        ),
+        (
+            "[a=x\u{a0}y i] { c: d }\n",
+            "@charset \"UTF-8\";\n[a=x\u{a0}y i] {\n  c: d;\n}",
+            "\u{feff}[a=x\u{a0}y i]{c:d}",
+        ),
+        (
+            "[a = x\u{a0}y i] { c: d }\n",
+            "@charset \"UTF-8\";\n[a=x\u{a0}y i] {\n  c: d;\n}",
+            "\u{feff}[a=x\u{a0}y i]{c:d}",
+        ),
+        (
+            "[ a=x\u{a0}y ] { c: d }\n",
+            "@charset \"UTF-8\";\n[a=x\u{a0}y] {\n  c: d;\n}",
+            "\u{feff}[a=x\u{a0}y]{c:d}",
+        ),
+        (
+            ".p { &[a=x\u{a0}yz] { c: d } }\n",
+            "@charset \"UTF-8\";\n.p[a=x\u{a0}yz] {\n  c: d;\n}",
+            "\u{feff}.p[a=x\u{a0}yz]{c:d}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.parse(\"[a=x\u{a0}yz]\"); }\n",
+            "@charset \"UTF-8\";\na {\n  b: [a=x\u{a0}yz];\n}",
+            "\u{feff}a{b:[a=x\u{a0}yz]}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+    // An NBSP after the value is a character, not the space before a
+    // modifier, so dart rejects each of these.
+    for scss in [
+        "[a=x \u{a0}] { c: d }\n",
+        "[a=\"x\" \u{a0}i] { c: d }\n",
+        "[a=\"x\"\u{a0}] { c: d }\n",
+    ] {
+        let err = compile(scss, &Options::default()).unwrap_err().to_string();
+        assert!(err.contains("expected \"]\"."), "{scss}: {err}");
+    }
+}
+
+#[test]
 fn a_non_finite_hue_never_reaches_the_hsl_conversion() {
     // The hsl -> rgb arithmetic has no answer for a non-finite hue: it picks
     // the fallback sector and hands back a NaN component. dart-sass 1.104.0

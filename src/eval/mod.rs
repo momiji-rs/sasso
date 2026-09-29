@@ -6199,7 +6199,7 @@ fn validate_attribute(inner: &[char]) -> Result<(), Error> {
     let err = || Error::unpositioned("expected \"]\".");
     let mut i = 0;
     let skip_ws = |i: &mut usize| {
-        while *i < inner.len() && inner[*i].is_whitespace() {
+        while *i < inner.len() && is_css_whitespace(inner[*i]) {
             *i += 1;
         }
     };
@@ -6240,7 +6240,7 @@ fn validate_attribute(inner: &[char]) -> Result<(), Error> {
                 let c = inner[i];
                 if c == '\\' {
                     i += 2;
-                } else if c.is_whitespace() {
+                } else if is_css_whitespace(c) {
                     break;
                 } else {
                     i += 1;
@@ -6302,10 +6302,10 @@ fn is_plain_css_identifier(s: &str) -> bool {
 fn normalize_attribute_text(inner: &str) -> String {
     let chars_buf = CharBuf::of(inner);
     let chars: &[char] = &chars_buf;
-    let fallback = || inner.trim().to_string();
+    let fallback = || inner.trim_matches(is_css_whitespace).to_string();
     let mut i = 0;
     let skip_ws = |i: &mut usize| {
-        while *i < chars.len() && chars[*i].is_whitespace() {
+        while *i < chars.len() && is_css_whitespace(chars[*i]) {
             *i += 1;
         }
     };
@@ -6352,7 +6352,7 @@ fn normalize_attribute_text(inner: &str) -> String {
                 let c = chars[i];
                 if c == '\\' {
                     i += 2;
-                } else if c.is_whitespace() {
+                } else if is_css_whitespace(c) {
                     break;
                 } else {
                     i += 1;
