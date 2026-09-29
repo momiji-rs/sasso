@@ -8775,25 +8775,33 @@ fn css_media_parse_one(t: &str) -> Result<ResolvedQuery, Error> {
         chars[start..*i].iter().collect()
     };
     skip_ws(&mut i);
-    // Condition-only form: `(c) [and|or (c)]*` (possibly `not (c)`).
+    // Condition-only form: `(c) [and (c)]*` or `(c) [or (c)]*` (possibly
+    // `not (c)`). The first operator fixes the rest, as in dart's
+    // `_mediaLogicSequence`: anything else ends the query, and trailing
+    // input is then an error.
     if i < chars.len() && chars[i] == '(' {
         let mut conditions = vec![take_paren(&mut i)?];
         let mut conjunction_and = true;
+        let mut operator = None;
         loop {
             skip_ws(&mut i);
             if i >= chars.len() {
                 break;
             }
-            let word = take_ident(&mut i);
-            skip_ws(&mut i);
-            match word.to_ascii_lowercase().as_str() {
-                "and" => conditions.push(take_paren(&mut i)?),
-                "or" => {
-                    conjunction_and = false;
-                    conditions.push(take_paren(&mut i)?);
-                }
-                _ => return Err(Error::unpositioned("expected \"and\" or \"or\".")),
+            let word = take_ident(&mut i).to_ascii_lowercase();
+            let op = operator.get_or_insert_with(|| word.clone());
+            if word != *op || !matches!(op.as_str(), "and" | "or") {
+                return Err(Error::unpositioned("expected no more input."));
             }
+            conjunction_and = op == "and";
+            if i >= chars.len() || !is_css_whitespace(chars[i]) {
+                return Err(Error::unpositioned("Expected whitespace."));
+            }
+            skip_ws(&mut i);
+            if i >= chars.len() || chars[i] != '(' {
+                return Err(Error::unpositioned("expected media condition in parentheses."));
+            }
+            conditions.push(take_paren(&mut i)?);
         }
         return Ok(ResolvedQuery {
             modifier: None,

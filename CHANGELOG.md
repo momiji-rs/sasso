@@ -97,6 +97,12 @@ Conformance is tracked separately as a ratchet against the official
   rewrites the whitespace after a leading identifier as one space, so there
   `.p { a\nb, c {…} }` stays `.p a b, .p c`, and sasso now does the same.
 
+- **An interpolated media condition may not mix `and` and `or`.**
+  `@media #{"(a) and (b) or (c)"}` compiled to `(a) or (b) or (c)`; it is an
+  error, as it is when written out. A word other than the first operator now
+  gets dart's "expected no more input.", `and(b)` needs its whitespace, and
+  `and foo` asks for a condition in parentheses.
+
 ## [0.19.2] - 2026-09-29
 
 _Faster again through the npm package, on the paths 0.19.1 missed. The wasm

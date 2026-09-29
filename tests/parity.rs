@@ -11211,6 +11211,57 @@ fn media_interpolation_reparses_resolved_text() {
 }
 
 #[test]
+fn a_resolved_media_condition_keeps_its_first_operator() {
+    // An interpolated query is re-parsed as dart's `_mediaLogicSequence`: the
+    // first `and` or `or` fixes the rest, and anything else ends the query, so
+    // the input left over is an error. sasso read each word afresh, so a mix
+    // came out as an `or` list and a stray word got the wrong message.
+    // Outputs and messages are dart-sass 1.104.1's. Offline.
+    for (scss, expanded, compressed) in [
+        (
+            "@media #{\"(a) and (b) and (c)\"} { a { b: c } }\n",
+            "@media (a) and (b) and (c) {\n  a {\n    b: c;\n  }\n}",
+            "@media(a)and (b)and (c){a{b:c}}",
+        ),
+        (
+            "@media #{\"(a) or (b) or (c)\"} { a { b: c } }\n",
+            "@media (a) or (b) or (c) {\n  a {\n    b: c;\n  }\n}",
+            "@media(a)or (b)or (c){a{b:c}}",
+        ),
+        (
+            "@media #{\"(a) AND (b) And (c)\"} { a { b: c } }\n",
+            "@media (a) and (b) and (c) {\n  a {\n    b: c;\n  }\n}",
+            "@media(a)and (b)and (c){a{b:c}}",
+        ),
+        (
+            "@media #{\"(a) and (b), (c) or (d)\"} { a { b: c } }\n",
+            "@media (a) and (b), (c) or (d) {\n  a {\n    b: c;\n  }\n}",
+            "@media(a)and (b),(c)or (d){a{b:c}}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+    for (query, message) in [
+        ("(a) foo", "expected no more input."),
+        ("(a) (b)", "expected no more input."),
+        ("(a)\u{a0}", "expected no more input."),
+        ("(a) and (b) foo", "expected no more input."),
+        ("(a) and (b) or (c)", "expected no more input."),
+        ("(a) or (b) and (c)", "expected no more input."),
+        ("(a) and(b)", "Expected whitespace."),
+        ("(a) or", "Expected whitespace."),
+        ("(a) and foo", "expected media condition in parentheses."),
+    ] {
+        let scss = format!("@media #{{\"{query}\"}} {{ a {{ b: c }} }}\n");
+        let err = compile(&scss, &Options::default()).unwrap_err().to_string();
+        assert!(err.contains(message), "{scss}: {err}");
+    }
+}
+
+#[test]
 fn import_subtree_clones_and_extension_store_order() {
     let dir = std::env::temp_dir().join("sasso_parity_impclone");
     let _ = std::fs::remove_dir_all(&dir);
