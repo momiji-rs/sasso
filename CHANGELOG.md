@@ -64,6 +64,10 @@ Conformance is tracked separately as a ratchet against the official
   split a compound: `list.nth(list.nth(&, 1), 1)` of `:not(.a .b) .c` was
   `:not(.a`, and `list.length` of `.a\ b .c`'s first complex was 3, not 2.
 
+- **Compressed output drops the space before a quoted attribute value's
+  modifier**, as dart does: `[a="x y" i]` is `[a="x y"i]`. After an unquoted
+  value the space stays (`[a=x i]`).
+
 - **A missing attribute operator gets dart's message.** `[a b]` failed with
   `expected "]".`; dart says `Expected "]".` when no operator follows the
   name, and `expected "=".` for `[a~b]`, where only an operator's first

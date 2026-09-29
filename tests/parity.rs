@@ -3811,6 +3811,74 @@ fn a_pseudo_selector_list_is_not_split_inside_a_quoted_string() {
 }
 
 #[test]
+fn a_quoted_attribute_value_meets_its_modifier_in_compressed_output() {
+    // In compressed style dart drops the space between a QUOTED attribute value
+    // and its modifier (`[a="x y"i]`) — the closing quote already ends the
+    // value — and keeps it after an unquoted one (`[a=x i]`), where the space is
+    // what ends it. sasso kept it in both. Byte-matched to dart-sass 1.104.1, in
+    // both styles. Offline.
+    for (scss, expanded, compressed) in [
+        (
+            "[a=\"x y\" i] { c: d }\n",
+            "[a=\"x y\" i] {\n  c: d;\n}",
+            "[a=\"x y\"i]{c:d}",
+        ),
+        (
+            "[a='x y' s] { c: d }\n",
+            "[a=\"x y\" s] {\n  c: d;\n}",
+            "[a=\"x y\"s]{c:d}",
+        ),
+        (
+            "[a=\"1\" i] { c: d }\n",
+            "[a=\"1\" i] {\n  c: d;\n}",
+            "[a=\"1\"i]{c:d}",
+        ),
+        ("[a=\"x\" i] { c: d }\n", "[a=x i] {\n  c: d;\n}", "[a=x i]{c:d}"),
+        ("[a=x i] { c: d }\n", "[a=x i] {\n  c: d;\n}", "[a=x i]{c:d}"),
+        (
+            "[a=\"x y\"] { c: d }\n",
+            "[a=\"x y\"] {\n  c: d;\n}",
+            "[a=\"x y\"]{c:d}",
+        ),
+        (
+            ":is([a=\"x y\" i]) { c: d }\n",
+            ":is([a=\"x y\" i]) {\n  c: d;\n}",
+            ":is([a=\"x y\"i]){c:d}",
+        ),
+        (
+            "[a=\"x y\" i] > b { c: d }\n",
+            "[a=\"x y\" i] > b {\n  c: d;\n}",
+            "[a=\"x y\"i]>b{c:d}",
+        ),
+        (
+            "[a=\"x\\\" y\" i] { c: d }\n",
+            "[a='x\" y' i] {\n  c: d;\n}",
+            "[a='x\" y'i]{c:d}",
+        ),
+        (
+            "[a=\"x y\" I] { c: d }\n",
+            "[a=\"x y\" I] {\n  c: d;\n}",
+            "[a=\"x y\"I]{c:d}",
+        ),
+        (
+            "[a|=\"x y\" i] { c: d }\n",
+            "[a|=\"x y\" i] {\n  c: d;\n}",
+            "[a|=\"x y\"i]{c:d}",
+        ),
+        (
+            "[a=\"x   y\" i] { c: d }\n",
+            "[a=\"x   y\" i] {\n  c: d;\n}",
+            "[a=\"x   y\"i]{c:d}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+}
+
+#[test]
 fn a_missing_attribute_operator_has_darts_message() {
     // dart's attribute-operator reader has its own sentences: capitalized
     // `Expected "]".` when no operator follows the name, and `expected "=".`

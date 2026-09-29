@@ -111,25 +111,31 @@ impl Simple {
 
 /// A resolved selector as dart-sass writes it in COMPRESSED style.
 ///
-/// Two kinds of whitespace go, and no others:
+/// Three kinds of whitespace go, and no others:
 ///
 /// * the space on either side of a COMBINATOR — `.a > .b` is `.a>.b`, and a
 ///   combinator that opens a relative selector loses its trailing space too
 ///   (`:has(+ .b)` is `:has(+.b)`);
 /// * the space after the comma of a SELECTOR LIST — the list a `:not()`,
 ///   `:is()`, `:where()`, `:has()` … carries, or the `of` tail of an
-///   `:nth-child()`.
+///   `:nth-child()`;
+/// * the space between a QUOTED attribute value and its modifier —
+///   `[a="x y" i]` is `[a="x y"i]`.
 ///
 /// Every other space is structure (`.a .b` IS the descendant combinator) and
 /// every other comma is opaque: `:lang(en, fr)` keeps its space, because its
 /// argument is an identifier list and not a selector list. Attribute values and
-/// quoted strings are copied through untouched.
+/// quoted strings are otherwise copied through untouched.
 ///
 /// The top-level list's own commas never reach here — emit joins the complexes
 /// with `,` itself.
 pub(crate) fn compress_selector(sel: &str) -> std::borrow::Cow<'_, str> {
-    // Nothing to do unless the selector has a combinator or a pseudo argument.
-    if !sel.bytes().any(|b| matches!(b, b'>' | b'+' | b'~' | b'(')) {
+    // Nothing to do unless the selector has a combinator, a pseudo argument
+    // or a quote (a quoted attribute value may have a modifier).
+    if !sel
+        .bytes()
+        .any(|b| matches!(b, b'>' | b'+' | b'~' | b'(' | b'"' | b'\''))
+    {
         return std::borrow::Cow::Borrowed(sel);
     }
     let chars: Vec<char> = sel.chars().collect();
@@ -157,7 +163,7 @@ fn compress_into(out: &mut String, chars: &[char]) {
             '[' => {
                 // An attribute selector: its insides are not selector structure.
                 let end = skip_attribute(chars, i);
-                out.extend(&chars[i..end.min(chars.len())]);
+                push_attribute(out, &chars[i..end.min(chars.len())]);
                 i = end;
             }
             c if is_css_whitespace(c) => {
@@ -212,6 +218,30 @@ fn compress_into(out: &mut String, chars: &[char]) {
             }
         }
     }
+}
+
+/// Append one `[…]` attribute selector, compressed. Its insides are copied
+/// through, except that a QUOTED value loses the space before its modifier:
+/// dart writes `[a="x y"i]`, because the closing quote already ends the
+/// value. An unquoted value keeps it (`[a=x i]`), since there the space is
+/// what ends it.
+fn push_attribute(out: &mut String, attr: &[char]) {
+    // The normalized form ends `…<quote> <letter>]` when a quoted value has a
+    // modifier; the quote has to be the value's own close, found by skipping
+    // the string from its open (the name and operator hold no quote).
+    let n = attr.len();
+    if n >= 5 && attr[n - 1] == ']' && attr[n - 2].is_ascii_alphabetic() && attr[n - 3] == ' ' {
+        let mut k = 1;
+        while k < n && !matches!(attr[k], '"' | '\'') {
+            k += if attr[k] == '\\' { 2 } else { 1 };
+        }
+        if k < n && skip_quoted(attr, k) == n - 3 {
+            out.extend(&attr[..n - 3]);
+            out.extend(&attr[n - 2..]);
+            return;
+        }
+    }
+    out.extend(attr);
 }
 
 /// Append one pseudo's argument, compressed according to what that pseudo
