@@ -15,6 +15,7 @@ use crate::ast::{
 };
 use crate::error::Error;
 use crate::scanner::{Mark, Pos, Scanner};
+use crate::selector::is_css_whitespace;
 use crate::value::{named_color, Color, ListSep};
 
 mod at_rules;
@@ -629,7 +630,7 @@ fn is_reserved_function_name(name: &str) -> bool {
 /// so `#{--b}` namespaces normally while a written `--b` is a custom property.
 fn property_is_literal_custom(property: &[TplPiece]) -> bool {
     match property.first() {
-        Some(TplPiece::Lit(s)) => s.trim_start().starts_with("--"),
+        Some(TplPiece::Lit(s)) => s.trim_start_matches(is_css_whitespace).starts_with("--"),
         _ => false,
     }
 }
@@ -641,7 +642,7 @@ fn value_is_only_comments(span: &[char]) -> bool {
     let mut i = 0;
     while i < span.len() {
         let c = span[i];
-        if c.is_whitespace() {
+        if is_css_whitespace(c) {
             i += 1;
         } else if c == '/' && span.get(i + 1) == Some(&'*') {
             i += 2;
@@ -666,7 +667,7 @@ impl Parser {
         let mut any = false;
         loop {
             match self.sc.peek() {
-                Some(c) if c.is_whitespace() => {
+                Some(c) if is_css_whitespace(c) => {
                     self.sc.bump();
                     any = true;
                 }
@@ -856,7 +857,7 @@ impl Parser {
                                 && lit
                                     .chars()
                                     .last()
-                                    .map_or(!pieces.is_empty(), |p| !p.is_whitespace());
+                                    .map_or(!pieces.is_empty(), |p| !is_css_whitespace(p));
                             if comments == CommentMode::UnknownPrelude || glue_to_name {
                                 let text = self.consume_loud_comment();
                                 lit.push_str(&text);
@@ -887,9 +888,9 @@ impl Parser {
             // its first newline (`@asdf a  b` → `a b`; `c \n   d` →
             // `c\n   d`). Comments terminate a run, so `foo //\n  bar`
             // keeps foo's trailing space AND the newline indent.
-            if comments == CommentMode::UnknownPrelude && c.is_whitespace() {
+            if comments == CommentMode::UnknownPrelude && is_css_whitespace(c) {
                 let mut run = String::new();
-                while matches!(self.sc.peek(), Some(w) if w.is_whitespace()) {
+                while matches!(self.sc.peek(), Some(w) if is_css_whitespace(w)) {
                     if let Some(w) = self.sc.bump() {
                         run.push(w);
                     }

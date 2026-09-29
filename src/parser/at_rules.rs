@@ -415,7 +415,7 @@ impl Parser {
     fn skip_ws_trivia(&mut self) {
         loop {
             match self.sc.peek() {
-                Some(c) if c.is_whitespace() => {
+                Some(c) if is_css_whitespace(c) => {
                     self.sc.bump();
                 }
                 Some('/') if self.sc.peek_at(1) == Some('/') => {
@@ -514,7 +514,7 @@ impl Parser {
             }
             // Trailing whitespace before the `,`/`;` is not part of the url,
             // and the deprecation caret is sized from the trimmed token.
-            let path = raw.trim_end().to_string();
+            let path = raw.trim_end_matches(is_css_whitespace).to_string();
             if path.is_empty() {
                 return Err(Error::at("expected a string after @import", self.sc.position()));
             }
@@ -1563,7 +1563,7 @@ impl Parser {
         let value = self.parse_template(&[')', ','])?;
         if value
             .iter()
-            .all(|p| matches!(p, TplPiece::Lit(s) if s.trim().is_empty()))
+            .all(|p| matches!(p, TplPiece::Lit(s) if s.trim_matches(is_css_whitespace).is_empty()))
         {
             return Err(Error::at("Expected expression.", value_pos));
         }
@@ -1715,7 +1715,7 @@ impl Parser {
         let mut any = false;
         loop {
             match self.sc.peek() {
-                Some(c) if c.is_whitespace() => {
+                Some(c) if is_css_whitespace(c) => {
                     self.sc.bump();
                     any = true;
                 }
@@ -2259,7 +2259,7 @@ impl Parser {
     pub(super) fn peek_callable_name_is_custom(&self) -> bool {
         let cs = self.sc.rest();
         let mut i = 0;
-        while i < cs.len() && cs[i].is_whitespace() {
+        while i < cs.len() && is_css_whitespace(cs[i]) {
             i += 1;
         }
         cs.get(i) == Some(&'-') && cs.get(i + 1) == Some(&'-')
@@ -2458,8 +2458,8 @@ impl Parser {
                         }
                     }
                 }
-                Some(c) if c.is_whitespace() => {
-                    while matches!(self.sc.peek(), Some(c) if c.is_whitespace()) {
+                Some(c) if is_css_whitespace(c) => {
+                    while matches!(self.sc.peek(), Some(c) if is_css_whitespace(c)) {
                         self.sc.bump();
                     }
                     lit.push(' ');

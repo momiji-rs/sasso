@@ -363,7 +363,7 @@ impl Parser {
                     // Whitespace OR a comment (`/* */`, `//`) immediately
                     // after the operator counts as separation, matching
                     // dart-sass's `1 /**/+/**/ 2` handling.
-                    let ws_after = matches!(self.sc.peek_at(1), Some(c) if c.is_whitespace())
+                    let ws_after = matches!(self.sc.peek_at(1), Some(c) if is_css_whitespace(c))
                         || (self.sc.peek_at(1) == Some('/')
                             && matches!(self.sc.peek_at(2), Some('*') | Some('/')));
                     // dart-sass: `+`/`-` in operator position is binary unless
@@ -433,7 +433,7 @@ impl Parser {
     /// something that can start an operand — otherwise it's a lone `%` token.
     fn percent_has_rhs(&self) -> bool {
         let mut i = 1;
-        while matches!(self.sc.peek_at(i), Some(c) if c.is_whitespace()) {
+        while matches!(self.sc.peek_at(i), Some(c) if is_css_whitespace(c)) {
             i += 1;
         }
         !matches!(
@@ -552,7 +552,7 @@ impl Parser {
                         operand: Box::new(operand),
                     });
                 }
-                if matches!(self.sc.peek_at(1), Some(c) if c.is_whitespace()) {
+                if matches!(self.sc.peek_at(1), Some(c) if is_css_whitespace(c)) {
                     if in_calc {
                         return Err(Error::at(
                             "This expression can't be used in a calculation.",
@@ -603,7 +603,7 @@ impl Parser {
                         || c == '+'
                         || c == '-'
                         || is_ident_char(c));
-                if starts_operand || matches!(next, Some(c) if c.is_whitespace()) {
+                if starts_operand || matches!(next, Some(c) if is_css_whitespace(c)) {
                     self.sc.bump();
                     self.skip_ws_inline();
                     let operand = self.unary()?;
@@ -1800,8 +1800,8 @@ impl Parser {
                     }
                 }
                 // Whitespace run collapses to a single space.
-                Some(c) if c.is_whitespace() => {
-                    while matches!(self.sc.peek(), Some(c) if c.is_whitespace()) {
+                Some(c) if is_css_whitespace(c) => {
+                    while matches!(self.sc.peek(), Some(c) if is_css_whitespace(c)) {
                         self.sc.bump();
                     }
                     lit.push(' ');

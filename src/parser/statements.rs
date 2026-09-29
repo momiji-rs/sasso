@@ -101,7 +101,7 @@ impl Parser {
     pub(super) fn skip_trivia(&mut self, out: &mut Vec<Stmt>) -> Result<(), Error> {
         loop {
             match self.sc.peek() {
-                Some(c) if c.is_whitespace() => {
+                Some(c) if is_css_whitespace(c) => {
                     self.sc.bump();
                 }
                 Some('/') if self.sc.peek_at(1) == Some('/') => {
@@ -167,7 +167,7 @@ impl Parser {
         // custom-property name. With a top-level `:` it is always a custom
         // declaration (`--ambiguous:foo {…}`), never a style rule.
         let starts_custom = {
-            let first = cs.iter().position(|c| !c.is_whitespace());
+            let first = cs.iter().position(|&c| !is_css_whitespace(c));
             matches!(first, Some(p) if cs.get(p) == Some(&'-') && cs.get(p + 1) == Some(&'-'))
         };
         while i < cs.len() {
@@ -231,7 +231,7 @@ impl Parser {
                     after_colon = Some(i + 1);
                     ws_after_colon = matches!(
                         cs.get(i + 1),
-                        Some(c) if c.is_whitespace())
+                        Some(&c) if is_css_whitespace(c))
                         || matches!(
                             (cs.get(i + 1), cs.get(i + 2)),
                             (Some('/'), Some('*')) | (Some('/'), Some('/'))
@@ -245,7 +245,7 @@ impl Parser {
                         // value is empty, or whitespace/comment followed the
                         // colon; otherwise (`a:hover {`) a style rule.
                         Some(start) => {
-                            let empty_value = cs[start..i].iter().all(|c| c.is_whitespace())
+                            let empty_value = cs[start..i].iter().all(|&c| is_css_whitespace(c))
                                 || value_is_only_comments(&cs[start..i]);
                             if empty_value || ws_after_colon {
                                 NextKind::Declaration

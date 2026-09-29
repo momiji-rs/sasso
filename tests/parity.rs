@@ -3879,6 +3879,214 @@ fn a_quoted_attribute_value_meets_its_modifier_in_compressed_output() {
 }
 
 #[test]
+fn the_parser_skips_css_whitespace_only() {
+    // The statement and value parser skipped whitespace with
+    // `char::is_whitespace`, which also matches NBSP and the other Unicode
+    // spaces, so one was dropped wherever a space may go: before a rule, after
+    // a `:`, inside an argument list or an interpolation. dart-sass reads it as
+    // a name character (#237), so it starts an identifier (`\u{a0}1px` is one
+    // token, `1 == \u{a0}1` is false). Offline; outputs are dart-sass 1.104.1's.
+    for (scss, expanded, compressed) in [
+        (
+            "\u{a0}a { c: d }\n",
+            "@charset \"UTF-8\";\n\u{a0}a {\n  c: d;\n}",
+            "\u{feff}\u{a0}a{c:d}",
+        ),
+        (
+            "a { c:\u{a0}d }\n",
+            "@charset \"UTF-8\";\na {\n  c: \u{a0}d;\n}",
+            "\u{feff}a{c:\u{a0}d}",
+        ),
+        (
+            "$v:\u{a0}1px; a { c: $v }\n",
+            "@charset \"UTF-8\";\na {\n  c: \u{a0}1px;\n}",
+            "\u{feff}a{c:\u{a0}1px}",
+        ),
+        (
+            "a { c: 1px +\u{a0}2px }\n",
+            "@charset \"UTF-8\";\na {\n  c: 1px\u{a0}2px;\n}",
+            "\u{feff}a{c:1px\u{a0}2px}",
+        ),
+        (
+            "a { c: foo(\u{a0}1px) }\n",
+            "@charset \"UTF-8\";\na {\n  c: foo(\u{a0}1px);\n}",
+            "\u{feff}a{c:foo(\u{a0}1px)}",
+        ),
+        (
+            "a { c: foo(1px,\u{a0}2px) }\n",
+            "@charset \"UTF-8\";\na {\n  c: foo(1px, \u{a0}2px);\n}",
+            "\u{feff}a{c:foo(1px, \u{a0}2px)}",
+        ),
+        (
+            "a { c: #{\u{a0}1 + 1} }\n",
+            "@charset \"UTF-8\";\na {\n  c: \u{a0}11;\n}",
+            "\u{feff}a{c:\u{a0}11}",
+        ),
+        (
+            "@mixin m($x) { c: $x } a { @include m(\u{a0}1px); }\n",
+            "@charset \"UTF-8\";\na {\n  c: \u{a0}1px;\n}",
+            "\u{feff}a{c:\u{a0}1px}",
+        ),
+        (
+            "@media (min-width:\u{a0}1px) { a { c: d } }\n",
+            "@charset \"UTF-8\";\n@media (min-width: \u{a0}1px) {\n  a {\n    c: d;\n  }\n}",
+            "\u{feff}@media(min-width: \u{a0}1px){a{c:d}}",
+        ),
+        (
+            "@supports (\u{a0}a: b) { a { c: d } }\n",
+            "@charset \"UTF-8\";\n@supports (\u{a0}a: b) {\n  a {\n    c: d;\n  }\n}",
+            "\u{feff}@supports(\u{a0}a: b){a{c:d}}",
+        ),
+        (
+            "a { b:\u{a0}{ c: d } }\n",
+            "@charset \"UTF-8\";\na b:\u{a0} {\n  c: d;\n}",
+            "\u{feff}a b:\u{a0}{c:d}",
+        ),
+        (
+            "@use \"sass:math\"; a { c: math.div(\u{a0}1, 2) }\n",
+            "@charset \"UTF-8\";\na {\n  c: \u{a0}1/2;\n}",
+            "\u{feff}a{c:\u{a0}1/2}",
+        ),
+        ("a { c: 1 ==\u{a0}1 }\n", "a {\n  c: false;\n}", "a{c:false}"),
+        (
+            "%p { c: d }\u{a0}a { @extend %p; }\n",
+            "@charset \"UTF-8\";\n\u{a0}a {\n  c: d;\n}",
+            "\u{feff}\u{a0}a{c:d}",
+        ),
+        (
+            "a { c: 1 /\u{a0}2 }\n",
+            "@charset \"UTF-8\";\na {\n  c: 1/\u{a0}2;\n}",
+            "\u{feff}a{c:1/\u{a0}2}",
+        ),
+        (
+            "a { c: 1 +\u{a0}2 }\n",
+            "@charset \"UTF-8\";\na {\n  c: 1\u{a0}2;\n}",
+            "\u{feff}a{c:1\u{a0}2}",
+        ),
+        (
+            "a { c: -\u{a0}1 }\n",
+            "@charset \"UTF-8\";\na {\n  c: -\u{a0}1;\n}",
+            "\u{feff}a{c:-\u{a0}1}",
+        ),
+        (
+            "a { c: calc(-\u{a0}1px) }\n",
+            "@charset \"UTF-8\";\na {\n  c: calc(-\u{a0}1px);\n}",
+            "\u{feff}a{c:calc(-\u{a0}1px)}",
+        ),
+        (
+            "a { c: +\u{a0}1 }\n",
+            "@charset \"UTF-8\";\na {\n  c: +\u{a0}1;\n}",
+            "\u{feff}a{c:+\u{a0}1}",
+        ),
+        (
+            "a { c: +\u{a0}x }\n",
+            "@charset \"UTF-8\";\na {\n  c: +\u{a0}x;\n}",
+            "\u{feff}a{c:+\u{a0}x}",
+        ),
+        (
+            "a { c: 1 + +\u{a0}1 }\n",
+            "@charset \"UTF-8\";\na {\n  c: 1+\u{a0}1;\n}",
+            "\u{feff}a{c:1+\u{a0}1}",
+        ),
+        (
+            "a { c: var(--x,\u{a0}y) }\n",
+            "@charset \"UTF-8\";\na {\n  c: var(--x, \u{a0}y);\n}",
+            "\u{feff}a{c:var(--x, \u{a0}y)}",
+        ),
+        ("a { \u{a0}--x:foo{} }\n", "", ""),
+        (
+            "@import url(a.css)\u{a0};\n",
+            "@charset \"UTF-8\";\n@import url(a.css) \u{a0};",
+            "\u{feff}@import\"a.css\"\u{a0}",
+        ),
+        (
+            "@import \"a.css\"\u{a0};\n",
+            "@charset \"UTF-8\";\n@import \"a.css\" \u{a0};",
+            "\u{feff}@import\"a.css\"\u{a0}",
+        ),
+        (
+            "@at-root (with:\u{a0}) { a { c: d } }\n",
+            "a {\n  c: d;\n}",
+            "a{c:d}",
+        ),
+        (
+            "@media screen,\u{a0}print { a { c: d } }\n",
+            "@charset \"UTF-8\";\n@media screen, \u{a0}print {\n  a {\n    c: d;\n  }\n}",
+            "\u{feff}@media screen,\u{a0}print{a{c:d}}",
+        ),
+        (
+            "@function --f() { result: a\u{a0}  b }\n",
+            "@charset \"UTF-8\";\n@function --f() {\n  result: a\u{a0} b ;\n}",
+            "\u{feff}@function --f(){result: a\u{a0} b }",
+        ),
+        (
+            "@foo a\u{a0} b;\n",
+            "@charset \"UTF-8\";\n@foo a\u{a0} b;",
+            "\u{feff}@foo a\u{a0} b",
+        ),
+        (
+            "@foo a\u{a0}\n  b;\n",
+            "@charset \"UTF-8\";\n@foo a\u{a0}\n  b;",
+            "\u{feff}@foo a\u{a0}\n  b",
+        ),
+        (
+            "@foo a \u{a0}b;\n",
+            "@charset \"UTF-8\";\n@foo a \u{a0}b;",
+            "\u{feff}@foo a \u{a0}b",
+        ),
+        (
+            "a { c\u{a0}/**/: d }\n",
+            "@charset \"UTF-8\";\na {\n  c\u{a0}/**/: d;\n}",
+            "\u{feff}a{c\u{a0}/**/:d}",
+        ),
+        (
+            "a { c: expression(a\u{a0} b) }\n",
+            "@charset \"UTF-8\";\na {\n  c: expression(a\u{a0} b);\n}",
+            "\u{feff}a{c:expression(a\u{a0} b)}",
+        ),
+        (
+            "@function --f() { result: a \u{a0}b }\n",
+            "@charset \"UTF-8\";\n@function --f() {\n  result: a \u{a0}b ;\n}",
+            "\u{feff}@function --f(){result: a \u{a0}b }",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+}
+
+#[test]
+fn an_nbsp_in_a_value_is_not_whitespace_where_dart_rejects_it() {
+    // The same NBSP, read as a name character, makes these values invalid in
+    // dart-sass; sasso skipped it and accepted them. dart-sass 1.104.1's
+    // messages. Offline.
+    for (scss, message) in [
+        (
+            "a { c: rgba(0,\u{a0}0, 0, 0.5) }\n",
+            "$green: \u{a0}0 is not a number.",
+        ),
+        (
+            "a { c: (\u{a0}a: 1)\u{a0}}\n",
+            "(\u{a0}a: 1) isn't a valid CSS value.",
+        ),
+        (
+            "a { c: calc(1px\u{a0}+ 2px) }\n",
+            "\"+\" and \"-\" must be surrounded by whitespace in calculations.",
+        ),
+        ("a { c: 1 *\u{a0}2 }\n", "Undefined operation \"1 * \u{a0}2\"."),
+        ("a { c: 1 %\u{a0}}\n", "Undefined operation \"1 % \u{a0}\"."),
+        ("a { c: 1 %\u{a0}2 }\n", "Undefined operation \"1 % \u{a0}2\"."),
+        ("a { c: 1 % \u{a0}2 }\n", "Undefined operation \"1 % \u{a0}2\"."),
+        ("@media (min-width: 1px)\u{a0}{ a { c: d } }\n", "expected \"{\"."),
+    ] {
+        let err = compile(scss, &Options::default()).unwrap_err().to_string();
+        assert!(err.contains(message), "{scss}: {err}");
+    }
+}
+
+#[test]
 fn a_missing_attribute_operator_has_darts_message() {
     // dart's attribute-operator reader has its own sentences: capitalized
     // `Expected "]".` when no operator follows the name, and `expected "=".`

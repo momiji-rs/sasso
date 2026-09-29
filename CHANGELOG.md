@@ -73,6 +73,13 @@ Conformance is tracked separately as a ratchet against the official
   name, and `expected "=".` for `[a~b]`, where only an operator's first
   character does.
 
+- **A non-ASCII space outside a selector is kept too** (#237). The
+  statement and value parser skipped NBSP and the other Unicode spaces as
+  whitespace, so one was dropped before a rule, after a `:`, inside an
+  argument list, a media query or an interpolation. dart-sass reads it as a
+  name character: `c:\u{a0}d` is the value `\u{a0}d`, `1 ==\u{a0}1` is
+  false, and `rgba(0,\u{a0}0, 0, 0.5)` is an error.
+
 ## [0.19.2] - 2026-09-29
 
 _Faster again through the npm package, on the paths 0.19.1 missed. The wasm
