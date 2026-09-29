@@ -47,6 +47,12 @@ Conformance is tracked separately as a ratchet against the official
   `list.length(list.nth(&, 1))` was 2 for `.a\u{a0}b`, and `x: &` printed
   `.a b`.
 
+- **A paren or bracket inside a quoted attribute value no longer swallows the
+  rest of the selector list.** The top-level comma splitter did not skip
+  strings, so after `[a="("]` every following comma looked nested: `[a="("],
+  b { &.c {} }` produced `[a="("], b.c`, and `@extend` from that rule failed
+  with "The target selector was not found".
+
 - **A missing attribute operator gets dart's message.** `[a b]` failed with
   `expected "]".`; dart says `Expected "]".` when no operator follows the
   name, and `expected "=".` for `[a~b]`, where only an operator's first

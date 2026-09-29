@@ -7504,14 +7504,26 @@ fn split_commas(s: &str) -> Segments<'_> {
     let mut bracket = 0i32;
     let mut start = 0usize;
     let mut escaped = false;
+    // The open quote of the string being skipped: a comma, paren or bracket
+    // inside `[a="(,"]` is string content, not structure.
+    let mut quote: Option<char> = None;
     for (idx, c) in s.char_indices() {
         // `\,` is a comma IN AN IDENTIFIER, not a list separator.
         if escaped {
             escaped = false;
             continue;
         }
+        if let Some(q) = quote {
+            match c {
+                '\\' => escaped = true,
+                _ if c == q => quote = None,
+                _ => {}
+            }
+            continue;
+        }
         match c {
             '\\' => escaped = true,
+            '"' | '\'' => quote = Some(c),
             '(' => paren += 1,
             ')' => paren -= 1,
             '[' => bracket += 1,

@@ -3550,6 +3550,57 @@ fn the_parent_selector_value_splits_compounds_at_css_whitespace() {
 }
 
 #[test]
+fn a_selector_list_is_not_split_inside_a_quoted_string() {
+    // The top-level comma splitter counted parens and brackets but not
+    // quotes, so `[a="("]` left it one paren deep and the rest of the list
+    // was a single selector: `, b` never became its own complex, a nested
+    // `&.c` was appended to `b` alone, and `@extend` found no target.
+    // Byte-matched to dart-sass 1.104.1, in both styles. Offline.
+    for (scss, expanded, compressed) in [
+        (
+            "[a=\"(\"],\n  b { c: d }\n",
+            "[a=\"(\"],\nb {\n  c: d;\n}",
+            "[a=\"(\"],b{c:d}",
+        ),
+        (
+            "[a=\"(\"], b,\n  c { c: d }\n",
+            "[a=\"(\"], b,\nc {\n  c: d;\n}",
+            "[a=\"(\"],b,c{c:d}",
+        ),
+        (
+            "[a=\"]\"], b { c: d }\n",
+            "[a=\"]\"], b {\n  c: d;\n}",
+            "[a=\"]\"],b{c:d}",
+        ),
+        (
+            "[a=\")\"], b { c: d }\n",
+            "[a=\")\"], b {\n  c: d;\n}",
+            "[a=\")\"],b{c:d}",
+        ),
+        (
+            "[a=\"(\"], b { &.c { d: e } }\n",
+            "[a=\"(\"].c, b.c {\n  d: e;\n}",
+            "[a=\"(\"].c,b.c{d:e}",
+        ),
+        (
+            "[a=\"(\"], b { @extend .q; } .q { e: f }\n",
+            ".q, [a=\"(\"], b {\n  e: f;\n}",
+            ".q,[a=\"(\"],b{e:f}",
+        ),
+        (
+            "@use \"sass:list\"; [a=\"(\"], b { x: list.length(&); }\n",
+            "[a=\"(\"], b {\n  x: 2;\n}",
+            "[a=\"(\"],b{x:2}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+}
+
+#[test]
 fn a_missing_attribute_operator_has_darts_message() {
     // dart's attribute-operator reader has its own sentences: capitalized
     // `Expected "]".` when no operator follows the name, and `expected "=".`
