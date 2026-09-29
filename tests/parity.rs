@@ -3550,6 +3550,92 @@ fn the_parent_selector_value_splits_compounds_at_css_whitespace() {
 }
 
 #[test]
+fn the_selector_normalizer_copies_a_quoted_string_verbatim() {
+    // The normalizer's whitespace pass collapsed every run of whitespace to
+    // one space, inside quoted strings too, so `[a="x   y"]` came out
+    // `[a="x y"]` and a tab in a value became a space: a different string,
+    // matching different elements. A string is one token; dart-sass keeps
+    // it byte for byte. Byte-matched to dart-sass 1.104.1, in both styles.
+    // Offline.
+    for (scss, expanded, compressed) in [
+        (
+            "[a=\"x   y\"] { c: d }\n",
+            "[a=\"x   y\"] {\n  c: d;\n}",
+            "[a=\"x   y\"]{c:d}",
+        ),
+        (
+            "[a=\"x\ty\"] { c: d }\n",
+            "[a=\"x\ty\"] {\n  c: d;\n}",
+            "[a=\"x\ty\"]{c:d}",
+        ),
+        (
+            ":is([a=\"x   y\"]) { c: d }\n",
+            ":is([a=\"x   y\"]) {\n  c: d;\n}",
+            ":is([a=\"x   y\"]){c:d}",
+        ),
+        (
+            "[a=\"x   y\"] { &.b { c: d } }\n",
+            "[a=\"x   y\"].b {\n  c: d;\n}",
+            "[a=\"x   y\"].b{c:d}",
+        ),
+        (
+            "[a=\"x   y\"] { @extend .q; } .q { e: f }\n",
+            ".q, [a=\"x   y\"] {\n  e: f;\n}",
+            ".q,[a=\"x   y\"]{e:f}",
+        ),
+        (
+            "[a=\"x  y\"] > b { c: d }\n",
+            "[a=\"x  y\"] > b {\n  c: d;\n}",
+            "[a=\"x  y\"]>b{c:d}",
+        ),
+        (
+            ":unknown(\"a   b\") { c: d }\n",
+            ":unknown(\"a   b\") {\n  c: d;\n}",
+            ":unknown(\"a   b\"){c:d}",
+        ),
+        (
+            "[a='x   y'] { c: d }\n",
+            "[a=\"x   y\"] {\n  c: d;\n}",
+            "[a=\"x   y\"]{c:d}",
+        ),
+        (
+            "[a=\"x   y\"], b { c: d }\n",
+            "[a=\"x   y\"], b {\n  c: d;\n}",
+            "[a=\"x   y\"],b{c:d}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.parse('[a=\"x   y\"]'); }\n",
+            "a {\n  b: [a=\"x   y\"];\n}",
+            "a{b:[a=\"x   y\"]}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.append('[a=\"x   y\"]', \".c\"); }\n",
+            "a {\n  b: [a=\"x   y\"].c;\n}",
+            "a{b:[a=\"x   y\"].c}",
+        ),
+        (
+            "[a=\"x\\\"   y\"] { c: d }\n",
+            "[a='x\"   y'] {\n  c: d;\n}",
+            "[a='x\"   y']{c:d}",
+        ),
+        (
+            ".a { [a=\"x   y\"] & { c: d } }\n",
+            "[a=\"x   y\"] .a {\n  c: d;\n}",
+            "[a=\"x   y\"] .a{c:d}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+    // A paren inside a string no longer counts toward the depth that keeps
+    // a pseudo argument's line break after a comma.
+    let css = compile(":is([a=\")\"],\n  b) { c: d }\n", &Options::default()).unwrap();
+    assert_eq!(css, ":is([a=\")\"],\nb) {\n  c: d;\n}");
+}
+
+#[test]
 fn a_selector_list_is_not_split_inside_a_quoted_string() {
     // The top-level comma splitter counted parens and brackets but not
     // quotes, so `[a="("]` left it one paren deep and the rest of the list

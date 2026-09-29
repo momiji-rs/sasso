@@ -53,6 +53,11 @@ Conformance is tracked separately as a ratchet against the official
   b { &.c {} }` produced `[a="("], b.c`, and `@extend` from that rule failed
   with "The target selector was not found".
 
+- **Whitespace inside a quoted string in a selector is kept.** The
+  normalizer collapsed it like the whitespace between compounds, so
+  `[a="x   y"]` came out `[a="x y"]` and `[a="x\ty"]` lost its tab — a
+  different string, matching different elements.
+
 - **A missing attribute operator gets dart's message.** `[a b]` failed with
   `expected "]".`; dart says `Expected "]".` when no operator follows the
   name, and `expected "=".` for `[a~b]`, where only an operator's first

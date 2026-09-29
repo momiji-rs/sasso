@@ -7748,6 +7748,26 @@ fn normalize_selector_slow(s: &str) -> String {
             prev_space = false;
             continue;
         }
+        // A quoted string is one token, copied verbatim to its close: the
+        // whitespace inside it is its content (`[a="x   y"]` keeps all three
+        // spaces), and a paren inside it is no paren.
+        if c == '"' || c == '\'' {
+            collapsed.push(c);
+            ci += 1;
+            while ci < cs.len() {
+                let d = cs[ci];
+                collapsed.push(d);
+                ci += 1;
+                if d == '\\' && ci < cs.len() {
+                    collapsed.push(cs[ci]);
+                    ci += 1;
+                } else if d == c {
+                    break;
+                }
+            }
+            prev_space = false;
+            continue;
+        }
         if is_css_whitespace(c) {
             let mut has_nl = c == '\n';
             ci += 1;
