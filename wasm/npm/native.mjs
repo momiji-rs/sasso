@@ -517,9 +517,10 @@ function compileBatch(entries, options, threads, stopOnError) {
   // One config for the batch; the entry, its syntax and the map differ per job.
   const base = buildCfg(options, 0, undefined);
   const logger = options.logger ?? null;
-  // An entry that cannot be read fails before compiling, as `compile` does.
-  const unreadable = [];
-  // The addon's job k is entry `sent[k]`.
+  // The addon's job i is entry i. One that cannot be read goes in without a
+  // source and keeps its read error here: it fails where the addon claims it,
+  // so with --stop-on-error a compile failure before it still skips it, and
+  // it still stops what comes after.
   const sent = [];
   const jobs = [];
   for (let i = 0; i < entries.length; i++) {
@@ -527,12 +528,13 @@ function compileBatch(entries, options, threads, stopOnError) {
     try {
       entry = entryFor(entries[i].path, options);
     } catch (error) {
-      unreadable.push({ i, settle: () => { throw error; } });
-      // With --stop-on-error, nothing after it starts.
-      if (stopOnError) break;
+      sent.push({ error });
+      // Present and `undefined`: the addon's object decoding rejects a missing
+      // field, and a `null` one as "not a string".
+      jobs.push({ source: undefined, cfg: base });
       continue;
     }
-    sent.push({ i, href: entry.entryHref });
+    sent.push({ href: entry.entryHref });
     jobs.push({
       source: entry.source,
       cfg: { ...base, syntax: entry.syntax, url: entry.entryHref, wantMap: !!entries[i].sourceMap },
@@ -541,13 +543,14 @@ function compileBatch(entries, options, threads, stopOnError) {
   const run = jobs.length ? native.compileBatch(jobs, threads, !!stopOnError) : null;
   return {
     next() {
-      if (unreadable.length) return unreadable.shift();
       const out = run?.next();
       if (!out) return undefined;
-      const { i, href } = sent[out.index];
+      const i = out.index;
+      const { href, error } = sent[i];
       return {
         i,
         settle() {
+          if (error) throw error;
           for (const w of out.warnings) dispatchWarn(logger, JSON.parse(w));
           if (out.error != null) throw toException(out.error, href, href);
           const result = makeResult(out.result, href);
@@ -561,6 +564,10 @@ function compileBatch(entries, options, threads, stopOnError) {
           return result;
         },
       };
+    },
+    // Stop claiming; what is already running still comes back from `next`.
+    stop() {
+      run?.stop();
     },
     finish() {
       run?.finish();

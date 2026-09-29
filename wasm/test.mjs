@@ -1890,8 +1890,8 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
 
   // On the native engine a parallel run compiles on the addon's own threads
   // and takes results as they finish, not in command-line order. What the
-  // user sees must not depend on that: warnings, errors and `--update`-style
-  // output in command-line order, and maps whose embedded sources survive
+  // user sees must not depend on that: warnings, errors and `--update` lines
+  // in command-line order, and maps whose embedded sources survive
   // characters JSON has to escape. `-j 1` is the in-order reference.
   {
     const src = join(dir, "mixed");
@@ -1899,13 +1899,13 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     const names = [];
     for (let i = 0; i < 12; i++) {
       const body = i === 4 ? `@warn "before ${i}";\n.e { a: $nope; }\n`
-        : i === 9 ? `/* tab\tff\fx \u0001 q" bs\\ café */\n.m${i} { a: b; }\n`
+        : i === 9 ? `/* tab\tff\fx bsp\bx \u0001 ls\u2028x q" bs\\ café */\n.m${i} { a: b; }\n`
         : `.m${i} { a: ${i}; }\n@warn "w${i}";\n`;
       writeFileSync(join(src, `m${i}.scss`), body);
       names.push(`m${i}`);
     }
     const runMixed = (out, extra) => {
-      const args = [cliPath, "--no-color", "--embed-sources", ...extra];
+      const args = [cliPath, "--no-color", "--embed-sources", "--update", ...extra];
       for (const n of names) args.push(`${join(src, `${n}.scss`)}:${join(out, `${n}.css`)}`);
       return spawnSync(process.execPath, args, { encoding: "utf8", env: engineEnv({}), timeout: 60000 });
     };
@@ -1918,6 +1918,8 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     assert.equal(ref.status, EXIT_COMPILE, "cli: the mixed run fails on its broken entry");
     assert.equal(par.status, ref.status, "cli: parallel and -j 1 agree on the exit status");
     assert.equal(par.stderr.replaceAll(parOut, refOut), ref.stderr, "cli: parallel stderr is in command-line order");
+    assert.match(ref.stdout, /m0\.scss[\s\S]*m11\.scss/, "cli: --update reports the written files");
+    assert.equal(par.stdout.replaceAll(parOut, refOut), ref.stdout, "cli: parallel --update lines are in command-line order");
     assert.deepEqual(filesOf(parOut).map((t) => t && t.replaceAll("mixed-j4", "mixed-j1")), filesOf(refOut), "cli: parallel output and maps match -j 1");
     JSON.parse(readFileSync(join(parOut, "m9.css.map"), "utf8"));
   }

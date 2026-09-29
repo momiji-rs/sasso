@@ -2612,7 +2612,7 @@ async function runJobs(jobs, opts, common) {
     const batch = cliBatch(entries, { ...common, ...syntaxOf(opts) }, workers, opts.stopOnError);
     let outcome;
     try {
-      outcome = compileSlice(listOf(jobs), opts, common, null, undefined, diagnostics, compiled, batch.next);
+      outcome = compileSlice(listOf(jobs), opts, common, null, undefined, diagnostics, compiled, batch);
     } finally {
       batch.finish();
     }
@@ -2884,8 +2884,8 @@ function captureStderr(fn) {
  * `jobs` is a `{ length, at(i) }` view — a plain array in this thread, shared
  * bytes in a worker. Diagnostics go into the `diagnostics` map under the job's
  * index, not to stderr, so the caller can put them back in job order.
- * With `precompiled` (`cliBatch`'s `next`), the compiles run elsewhere and
- * this loop only reports each job, in the order they finish.
+ * With `precompiled` (a `cliBatch`), the compiles run elsewhere and this
+ * loop only reports each job, in the order they finish.
  * Returns `{ failed, worst }` — how many failed, and the most severe cause
  * as an exit code. It never exits the process, so a worker can report back
  * and the parent can decide.
@@ -2926,7 +2926,7 @@ function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics, compiled
     let i;
     let done;
     if (precompiled) {
-      done = precompiled();
+      done = precompiled.next();
       if (!done) break;
       i = done.i;
     } else if (ctl) {
@@ -3059,6 +3059,13 @@ function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics, compiled
       failed++;
       worst = Math.max(worst, EXIT_IO);
       if (opts.stopOnError) {
+        // Precompiled, the jobs the addon has already started finish and are
+        // still reported below, as a pool's in-flight ones are; only the
+        // claiming stops.
+        if (precompiled) {
+          precompiled.stop();
+          continue;
+        }
         if (ctl) Atomics.store(ctl, 1, 1);
         break;
       }

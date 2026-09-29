@@ -787,9 +787,12 @@ pub fn compile_string_async(
 // ------------------------------------------------------------------ batch API
 
 /// One stylesheet of a `compileBatch`: its source, read JS-side, and its config.
+/// No `source` is an entry the caller could not read. It still takes its place
+/// in the claim order and fails where it is claimed, so `stop_on_error` stops
+/// at it, or skips it, exactly as it would a compile error there.
 #[napi(object)]
 pub struct BatchJob {
-    pub source: String,
+    pub source: Option<String>,
     pub cfg: CompileConfig,
 }
 
@@ -855,7 +858,8 @@ struct BatchShared {
 struct BatchState {
     /// The next job to claim.
     next: usize,
-    /// A compile error under `stop_on_error`: nothing more is claimed.
+    /// A failed job under `stop_on_error`, or `stop`/`finish`: nothing more is
+    /// claimed.
     stopped: bool,
     /// Threads that have left the claim loop, however they left it.
     exited: usize,
@@ -977,6 +981,17 @@ fn batch_thread(shared: &BatchShared) {
 }
 
 fn batch_one(index: usize, job: &BatchJob) -> BatchDone {
+    let Some(source) = &job.source else {
+        // The caller holds the read error and reports it; this only has to
+        // fail, so that `run` stops the claiming.
+        return BatchDone {
+            index: index as u32,
+            result: None,
+            map: None,
+            error: Some(String::new()),
+            warnings: Vec::new(),
+        };
+    };
     let chain = NapiChain::new(UserBridge::None, &job.cfg.load_paths);
     let warnings: Rc<RefCell<Vec<String>>> = Rc::default();
     let warn = job.cfg.want_warn.then(|| {
@@ -984,7 +999,7 @@ fn batch_one(index: usize, job: &BatchJob) -> BatchDone {
         Rc::new(move |ev: &WarnEvent<'_>| sink.borrow_mut().push(warn_json(ev))) as sasso::WarnHandler
     });
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        compile_parts(&job.source, &job.cfg, &chain, warn, Vec::new())
+        compile_parts(source, &job.cfg, &chain, warn, Vec::new())
     }));
     let (result, map, error) = match out {
         Ok(Ok((css, map))) => {
@@ -1048,6 +1063,15 @@ impl BatchRun {
             }
             st = shared.changed.wait(st).unwrap_or_else(|p| p.into_inner());
         }
+    }
+
+    /// Stop claiming, without waiting: the jobs already claimed still finish
+    /// and `next` still returns them. For a failure only the caller sees —
+    /// the CLI's output write — under `--stop-on-error`.
+    #[napi]
+    pub fn stop(&self) {
+        self.shared.lock().stopped = true;
+        self.shared.changed.notify_all();
     }
 
     /// Stop claiming and wait for the jobs in hand. The caller calls it once

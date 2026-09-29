@@ -115,10 +115,10 @@ Conformance is tracked separately as a ratchet against the official
   finish, so writing one file overlaps compiling the next. Warnings, errors
   and `--update` output are still printed in command-line order, and
   `--stop-on-error` stops claiming new files at the first failure. Source maps
-  come back pre-serialised rather than rebuilt in JavaScript. On Lichess's
-  stylesheets on Linux/x86_64, a full dev build (296 entries) drops from 265 to
-  182 ms and a production build (148) from 240 to 170 ms; output is
-  byte-identical. The wasm engine, stdin input and `-j 1` keep their old
+  come back pre-serialised rather than rebuilt in JavaScript. On Lichess's 148
+  entry points on Linux/x86_64, a full dev build (CSS plus source maps, 296
+  files) drops from 265 to 182 ms and a production build from 240 to 170 ms;
+  output is byte-identical. The wasm engine, stdin input and `-j 1` keep their old
   paths.
 
 ## [0.19.0] - 2026-09-28
