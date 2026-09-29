@@ -102,6 +102,14 @@ Conformance is tracked separately as a ratchet against the official
   target selector was not found.", and `.a \u{a0}` and `\u{a0}.a` are the
   complex and compound selectors they are.
 
+- **A keyframe selector is parsed as stops** (#238). A block inside
+  `@keyframes` may be named `from`, `to` (in any case, escaped or not) or a
+  percentage, in a comma list, and nothing else. sasso passed anything through
+  — `foo`, `10px`, `10% 20%`, `from,` and an NBSP beside `from` all compiled —
+  and ran the CSS selector checks on the stops instead, which rejected the
+  valid `.5%` with "Expected identifier.". Each now fails with dart's message,
+  in a plain CSS module too, and `\74o` and `1E1%` come out `to` and `1e1%`.
+
 - **An interpolated media condition may not mix `and` and `or`.**
   `@media #{"(a) and (b) or (c)"}` compiled to `(a) or (b) or (c)`; it is an
   error, as it is when written out. A word other than the first operator now

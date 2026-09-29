@@ -11183,6 +11183,225 @@ fn load_css_subtree_clone_and_blank_gating() {
 }
 
 #[test]
+fn a_keyframe_selector_is_parsed_as_stops() {
+    // dart parses a keyframe block's resolved selector with its
+    // `KeyframeSelectorParser`: a comma list of `from`, `to` (either may be
+    // escaped) or a percentage, and nothing else. sasso passed anything
+    // through (`foo`, `10px`, `from,`, an NBSP beside `from`), and ran the CSS
+    // selector checks, which rejected `.5%` with "Expected identifier.".
+    // Outputs and messages are dart-sass 1.104.1's. Offline.
+    for (scss, expanded, compressed) in [
+        (
+            "@keyframes k { FROM { c: d } }\n",
+            "@keyframes k {\n  from {\n    c: d;\n  }\n}",
+            "@keyframes k{from{c:d}}",
+        ),
+        (
+            "@keyframes k { 1e1% { c: d } }\n",
+            "@keyframes k {\n  1e1% {\n    c: d;\n  }\n}",
+            "@keyframes k{1e1%{c:d}}",
+        ),
+        (
+            "@keyframes k { +10% { c: d } }\n",
+            "@keyframes k {\n  +10% {\n    c: d;\n  }\n}",
+            "@keyframes k{+10%{c:d}}",
+        ),
+        (
+            "@keyframes k { .5% { c: d } }\n",
+            "@keyframes k {\n  .5% {\n    c: d;\n  }\n}",
+            "@keyframes k{.5%{c:d}}",
+        ),
+        (
+            "@keyframes k { 10%, 20% { c: d } }\n",
+            "@keyframes k {\n  10%, 20% {\n    c: d;\n  }\n}",
+            "@keyframes k{10%,20%{c:d}}",
+        ),
+        (
+            "@keyframes k { 10% , 20% { c: d } }\n",
+            "@keyframes k {\n  10%, 20% {\n    c: d;\n  }\n}",
+            "@keyframes k{10%,20%{c:d}}",
+        ),
+        (
+            "@keyframes k { 10%,20% { c: d } }\n",
+            "@keyframes k {\n  10%, 20% {\n    c: d;\n  }\n}",
+            "@keyframes k{10%,20%{c:d}}",
+        ),
+        (
+            "@keyframes k { FROM, TO { c: d } }\n",
+            "@keyframes k {\n  from, to {\n    c: d;\n  }\n}",
+            "@keyframes k{from,to{c:d}}",
+        ),
+        (
+            "@keyframes k { 130E-1% { c: d } }\n",
+            "@keyframes k {\n  130e-1% {\n    c: d;\n  }\n}",
+            "@keyframes k{130e-1%{c:d}}",
+        ),
+        (
+            "@keyframes k { 1e+2% { c: d } }\n",
+            "@keyframes k {\n  1e+2% {\n    c: d;\n  }\n}",
+            "@keyframes k{1e+2%{c:d}}",
+        ),
+        (
+            "@keyframes k { 10.% { c: d } }\n",
+            "@keyframes k {\n  10.% {\n    c: d;\n  }\n}",
+            "@keyframes k{10.%{c:d}}",
+        ),
+        (
+            "@keyframes k { from/**/ { c: d } }\n",
+            "@keyframes k {\n  from {\n    c: d;\n  }\n}",
+            "@keyframes k{from{c:d}}",
+        ),
+        (
+            "@keyframes k { #{\"10%, to\"} { c: d } }\n",
+            "@keyframes k {\n  10%, to {\n    c: d;\n  }\n}",
+            "@keyframes k{10%,to{c:d}}",
+        ),
+        (
+            "@keyframes k { \\66rom { c: d } }\n",
+            "@keyframes k {\n  from {\n    c: d;\n  }\n}",
+            "@keyframes k{from{c:d}}",
+        ),
+        (
+            "@keyframes k { \\74o { c: d } }\n",
+            "@keyframes k {\n  to {\n    c: d;\n  }\n}",
+            "@keyframes k{to{c:d}}",
+        ),
+        (
+            "@keyframes k { \\74 o { c: d } }\n",
+            "@keyframes k {\n  to {\n    c: d;\n  }\n}",
+            "@keyframes k{to{c:d}}",
+        ),
+        (
+            "@keyframes k { \\46ROM { c: d } }\n",
+            "@keyframes k {\n  from {\n    c: d;\n  }\n}",
+            "@keyframes k{from{c:d}}",
+        ),
+        (
+            "@keyframes k { \\74\\6f { c: d } }\n",
+            "@keyframes k {\n  to {\n    c: d;\n  }\n}",
+            "@keyframes k{to{c:d}}",
+        ),
+        (
+            "@keyframes k { t\\6f  , from { c: d } }\n",
+            "@keyframes k {\n  to, from {\n    c: d;\n  }\n}",
+            "@keyframes k{to,from{c:d}}",
+        ),
+        (
+            "@keyframes k { #{\".5%\"} { c: d } }\n",
+            "@keyframes k {\n  .5% {\n    c: d;\n  }\n}",
+            "@keyframes k{.5%{c:d}}",
+        ),
+        (
+            "@keyframes k { #{\"10.%\"} { c: d } }\n",
+            "@keyframes k {\n  10.% {\n    c: d;\n  }\n}",
+            "@keyframes k{10.%{c:d}}",
+        ),
+        (
+            "@keyframes k { #{\"1.5E+2%\"} { c: d } }\n",
+            "@keyframes k {\n  1.5e+2% {\n    c: d;\n  }\n}",
+            "@keyframes k{1.5e+2%{c:d}}",
+        ),
+        (
+            "@keyframes k { #{\"\\\\74o\"} { c: d } }\n",
+            "@keyframes k {\n  to {\n    c: d;\n  }\n}",
+            "@keyframes k{to{c:d}}",
+        ),
+        (
+            "@keyframes k { \\to { c: d } }\n",
+            "@keyframes k {\n  to {\n    c: d;\n  }\n}",
+            "@keyframes k{to{c:d}}",
+        ),
+        (
+            "@keyframes k { fr\\om { c: d } }\n",
+            "@keyframes k {\n  from {\n    c: d;\n  }\n}",
+            "@keyframes k{from{c:d}}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+    for (scss, message) in [
+        ("@keyframes k { foo { c: d } }\n", "Expected \"to\" or \"from\"."),
+        ("@keyframes k { 10 { c: d } }\n", "expected \"%\"."),
+        ("@keyframes k { 10% 20% { c: d } }\n", "expected no more input."),
+        ("@keyframes k { from to { c: d } }\n", "expected no more input."),
+        (
+            "@keyframes k { from, foo { c: d } }\n",
+            "Expected \"to\" or \"from\".",
+        ),
+        (
+            "@keyframes k { #{\"foo\"} { c: d } }\n",
+            "Expected \"to\" or \"from\".",
+        ),
+        ("@keyframes k { 10px { c: d } }\n", "expected \"%\"."),
+        ("@keyframes k { -foo { c: d } }\n", "Expected \"to\" or \"from\"."),
+        ("@keyframes k { % { c: d } }\n", "Expected number."),
+        ("@keyframes k { from, { c: d } }\n", "Expected number."),
+        ("@keyframes k { ,from { c: d } }\n", "Expected number."),
+        ("@keyframes k { 10 % { c: d } }\n", "expected \"%\"."),
+        ("@keyframes k { 1e% { c: d } }\n", "Expected digit."),
+        (
+            "@keyframes k { from \u{a0} { c: d } }\n",
+            "expected no more input.",
+        ),
+        (
+            "@keyframes k { \u{a0}from { c: d } }\n",
+            "Expected \"to\" or \"from\".",
+        ),
+        ("@keyframes k { 10%\u{a0} { c: d } }\n", "expected no more input."),
+        (
+            "@keyframes k { #{\"from\" + \",\"} { c: d } }\n",
+            "Expected number.",
+        ),
+        (
+            "@keyframes k { fromx { c: d } }\n",
+            "Expected \"to\" or \"from\".",
+        ),
+        (
+            "@keyframes k { to\u{a0} { c: d } }\n",
+            "Expected \"to\" or \"from\"",
+        ),
+        ("@keyframes k { tox { c: d } }\n", "Expected \"to\" or \"from\""),
+        (
+            "@keyframes k { \\74o\\78 { c: d } }\n",
+            "Expected \"to\" or \"from\"",
+        ),
+        ("@keyframes k { #{\"%\"} { c: d } }\n", "Expected number."),
+        ("@keyframes k { #{\",from\"} { c: d } }\n", "Expected number."),
+        ("@keyframes k { #{\"10 %\"} { c: d } }\n", "expected \"%\"."),
+        ("@keyframes k { #{\"1e%\"} { c: d } }\n", "Expected digit."),
+        ("@keyframes k { #{\"-5%\"} { c: d } }\n", "Expected number."),
+        ("@keyframes k { #{\"1e-%\"} { c: d } }\n", "Expected digit."),
+        ("@keyframes k { #{\"\"} { c: d } }\n", "Expected number."),
+        ("@keyframes k { #{\" \"} { c: d } }\n", "Expected number."),
+        ("@keyframes k { #{\"\"}, from { c: d } }\n", "Expected number."),
+        ("@keyframes k { #{\"from,,to\"} { c: d } }\n", "Expected number."),
+        (
+            "@keyframes k { from\u{a0} { c: d } }\n",
+            "Expected \"to\" or \"from\".",
+        ),
+        (
+            "@keyframes k { #{\"from\u{a0}\"} { c: d } }\n",
+            "Expected \"to\" or \"from\".",
+        ),
+        (
+            "@keyframes k { \\FROM { c: d } }\n",
+            "Expected \"to\" or \"from\".",
+        ),
+        ("@keyframes k { \\tox { c: d } }\n", "Expected \"to\" or \"from\""),
+        (
+            "@keyframes k { \\-5% { c: d } }\n",
+            "Expected \"to\" or \"from\".",
+        ),
+    ] {
+        let err = compile(scss, &Options::default()).unwrap_err();
+        assert_eq!(err.message, message, "{scss}");
+    }
+}
+
+#[test]
 fn keyframes_nested_at_rules_and_selector_normalization() {
     // A keyframe block is not a style rule: a nested at-rule stays inside
     // the frame instead of bubbling out.

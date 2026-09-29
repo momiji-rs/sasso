@@ -622,23 +622,10 @@ impl<'a> Evaluator<'a> {
     /// re-serializes the stops joined with `", "`: the author's line breaks do
     /// not survive it, none of the selector normalization applies (`+5%` is a
     /// stop, not a sibling combinator), and `from`/`to` and a percentage's
-    /// exponent marker come back lowercased.
+    /// exponent marker come back lowercased. Anything else in a frame is the
+    /// stop parser's error, as in dart: no CSS-selector check runs first.
     fn css_frame_selectors(&mut self, sel: &[crate::ast::TplPiece]) -> Result<Vec<String>, Error> {
-        let s = self.eval_template(sel)?;
-        let mut stops = Vec::new();
-        for part in split_commas(&s).iter() {
-            let part = part.trim_matches(is_css_whitespace);
-            if part.is_empty() {
-                continue;
-            }
-            // The stop grammar is `from` | `to` | `<number>%`, stricter than
-            // this: dart rejects `foo`, `&` and `50 %` in a frame, where the
-            // checks below only catch the Sass-only selector forms. The
-            // remaining strictness gap is recorded in the plan.
-            validate_plain_css_selector(part, false)?;
-            stops.push(normalize_keyframe_selector(part));
-        }
-        Ok(stops)
+        parse_keyframe_selector(&self.eval_template(sel)?)
     }
 
     /// Build the body of a `@keyframes` below the bubbling level: as

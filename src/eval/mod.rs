@@ -3293,10 +3293,13 @@ impl<'a> Evaluator<'a> {
         let (sel_str, interp_bounds) = self.eval_template_bounds(&rule.selector)?;
         // A selector that resolves to nothing (e.g. `#{&}` at the document root,
         // where `&` is null) is rejected by dart-sass with "expected selector".
-        if sel_str.trim_matches(is_css_whitespace).is_empty() {
-            return Err(Error::unpositioned("expected selector."));
+        // A keyframe block's is parsed as stops instead, below.
+        if !self.in_keyframes {
+            if sel_str.trim_matches(is_css_whitespace).is_empty() {
+                return Err(Error::unpositioned("expected selector."));
+            }
+            validate_selector(&sel_str, !parents.is_empty())?;
         }
-        validate_selector(&sel_str, !parents.is_empty())?;
         // A `@` has no legal position in a CSS selector: dart's selector
         // parser fails with "expected selector." — pointed at the source when
         // the offending character maps to literal text, or rendered as the
@@ -3349,16 +3352,7 @@ impl<'a> Evaluator<'a> {
         // keyframe stop really does carry a `%`.
         let (current, full_lbs, maybe_bogus, any_percent): (Vec<String>, Vec<bool>, bool, bool) =
             if self.in_keyframes {
-                (
-                    split_commas(&sel_str)
-                        .iter()
-                        .map(|p| p.trim_matches(is_css_whitespace).to_string())
-                        .filter(|p| !p.is_empty())
-                        .collect(),
-                    Vec::new(),
-                    true,
-                    true,
-                )
+                (parse_keyframe_selector(&sel_str)?, Vec::new(), true, true)
             } else {
                 let resolved = resolve_selectors_opt(
                     &sel_str,
@@ -3446,14 +3440,7 @@ impl<'a> Evaluator<'a> {
                     continue;
                 }
                 self.note_placeholder_rule(s);
-                // A keyframe stop is re-serialized: `FROM` -> `from`, and a
-                // percentage's exponent marker `130E-1%` -> `130e-1%`.
-                let s = if self.in_keyframes {
-                    normalize_keyframe_selector(s)
-                } else {
-                    s.clone()
-                };
-                emit_selectors.push(s);
+                emit_selectors.push(s.clone());
                 if !full_lbs.is_empty() {
                     emit_linebreaks.push(full_lbs.get(i).copied().unwrap_or(false));
                 }
@@ -5659,27 +5646,145 @@ impl AtRootQuery {
     }
 }
 
-/// Normalize a keyframe selector the way dart re-serializes a stop: the
-/// `from`/`to` keywords are lowercased (`FROM` -> `from`), and so is a
-/// percentage stop's scientific-notation marker (`130E-1%` -> `130e-1%`);
-/// the digits are left verbatim.
-pub(super) fn normalize_keyframe_selector(s: &str) -> String {
-    let t = s.trim_matches(is_css_whitespace);
-    if t.eq_ignore_ascii_case("from") || t.eq_ignore_ascii_case("to") {
-        return t.to_ascii_lowercase();
+/// Parse a keyframe block's resolved selector as dart's
+/// `KeyframeSelectorParser` does: a comma list of `from`, `to` or a
+/// percentage, each re-serialized. The keywords are lowercased
+/// (`FROM` -> `from`), and so is a percentage's exponent marker
+/// (`130E-1%` -> `130e-1%`); the digits are left verbatim. Anything else is
+/// dart's error (`foo`, `10px`, `10% 20%`, a trailing comma).
+pub(super) fn parse_keyframe_selector(s: &str) -> Result<Vec<String>, Error> {
+    let cs: Vec<char> = s.chars().collect();
+    let at = |i: usize| cs.get(i).copied();
+    let digits = |i: &mut usize, out: &mut String| {
+        while let Some(c) = at(*i).filter(char::is_ascii_digit) {
+            out.push(c);
+            *i += 1;
+        }
+    };
+    let skip_ws = |i: &mut usize| {
+        while at(*i).is_some_and(is_css_whitespace) {
+            *i += 1;
+        }
+    };
+    let mut i = 0;
+    let mut stops = Vec::new();
+    loop {
+        skip_ws(&mut i);
+        let ident = match at(i) {
+            Some('\\') => true,
+            Some('-') => matches!(at(i + 1), Some(c) if c == '-' || c == '\\' || is_name_start(c)),
+            Some(c) => is_name_start(c),
+            None => false,
+        };
+        if ident {
+            // dart's `scanIdentifier("from")`, then `expectIdentifier("to")`:
+            // each letter may be escaped, and a name character right after
+            // `to` drops the message's final period.
+            match (scan_keyword(&cs, i, "from"), scan_keyword(&cs, i, "to")) {
+                (Some(j), _) if !ident_body_at(&cs, j) => {
+                    stops.push("from".to_string());
+                    i = j;
+                }
+                (_, Some(j)) if !ident_body_at(&cs, j) => {
+                    stops.push("to".to_string());
+                    i = j;
+                }
+                (_, Some(_)) => return Err(Error::unpositioned("Expected \"to\" or \"from\"")),
+                (_, None) => return Err(Error::unpositioned("Expected \"to\" or \"from\".")),
+            }
+        } else {
+            let mut stop = String::new();
+            if at(i) == Some('+') {
+                stop.push('+');
+                i += 1;
+            }
+            if !at(i).is_some_and(|c| c.is_ascii_digit() || c == '.') {
+                return Err(Error::unpositioned("Expected number."));
+            }
+            digits(&mut i, &mut stop);
+            if at(i) == Some('.') {
+                stop.push('.');
+                i += 1;
+                digits(&mut i, &mut stop);
+            }
+            if matches!(at(i), Some('e' | 'E')) {
+                stop.push('e');
+                i += 1;
+                if let Some(sign @ ('+' | '-')) = at(i) {
+                    stop.push(sign);
+                    i += 1;
+                }
+                if !at(i).is_some_and(|c| c.is_ascii_digit()) {
+                    return Err(Error::unpositioned("Expected digit."));
+                }
+                digits(&mut i, &mut stop);
+            }
+            if at(i) != Some('%') {
+                return Err(Error::unpositioned("expected \"%\"."));
+            }
+            stop.push('%');
+            i += 1;
+            stops.push(stop);
+        }
+        skip_ws(&mut i);
+        if at(i) != Some(',') {
+            break;
+        }
+        i += 1;
     }
-    if !s.contains('E') {
-        return s.to_string();
+    if i < cs.len() {
+        return Err(Error::unpositioned("expected no more input."));
     }
-    let is_pct = t.ends_with('%')
-        && t[..t.len() - 1]
-            .chars()
-            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | 'e' | 'E'));
-    if is_pct {
-        s.replace('E', "e")
-    } else {
-        s.to_string()
+    Ok(stops)
+}
+
+/// Match `word` case-insensitively at `cs[i..]`, a letter at a time, where
+/// each letter may be written as an escape (`\66rom`); the index after it.
+fn scan_keyword(cs: &[char], mut i: usize, word: &str) -> Option<usize> {
+    for letter in word.chars() {
+        let (c, next) = ident_char_at(cs, i)?;
+        if !c.eq_ignore_ascii_case(&letter) {
+            return None;
+        }
+        i = next;
     }
+    Some(i)
+}
+
+/// The identifier character at `cs[i]`, with an escape decoded as dart's
+/// `escapeCharacter` does, and the index after it.
+fn ident_char_at(cs: &[char], i: usize) -> Option<(char, usize)> {
+    match *cs.get(i)? {
+        '\\' => {
+            let hex = cs[i + 1..]
+                .iter()
+                .take(6)
+                .take_while(|c| c.is_ascii_hexdigit())
+                .count();
+            if hex == 0 {
+                let c = *cs.get(i + 1).filter(|&&c| !matches!(c, '\n' | '\r' | '\u{c}'))?;
+                return Some((c, i + 2));
+            }
+            let value: String = cs[i + 1..i + 1 + hex].iter().collect();
+            let c = u32::from_str_radix(&value, 16)
+                .ok()
+                .filter(|&v| v != 0)
+                .and_then(char::from_u32)
+                .unwrap_or('\u{fffd}');
+            let mut next = i + 1 + hex;
+            if cs.get(next).is_some_and(|&c| is_css_whitespace(c)) {
+                next += 1;
+            }
+            Some((c, next))
+        }
+        c => Some((c, i + 1)),
+    }
+}
+
+/// Whether an identifier's body continues at `cs[i]` (dart's
+/// `lookingAtIdentifierBody`).
+fn ident_body_at(cs: &[char], i: usize) -> bool {
+    cs.get(i).is_some_and(|&c| is_name_char(c) || c == '\\')
 }
 
 /// Convert an at-rule-body node list (as produced by `eval_at_body` with no
