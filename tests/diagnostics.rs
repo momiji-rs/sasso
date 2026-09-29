@@ -238,6 +238,90 @@ fn the_duplicate_argument_diagnostic_has_a_single_span() {
     assert!(missing.contains("invocation"), "{missing}");
 }
 
+/// A host function's arguments are verified against its signature, and the
+/// callback does not run when they fail.
+///
+/// `Options::with_function("foo($a, $b: 2)", …)` parses a real parameter list,
+/// so it is the third binder in the tree with a declaration to measure a call
+/// against — and it was the one this rule missed (r4130220838).
+///
+/// dart's JS API parses a `functions:` signature the same way and verifies it.
+/// Measured 2026-09-29 through
+/// `sass.compileString(…, {functions: {'foo($a, $b: 2)': …}})`, recording
+/// whether the callback ran:
+///
+/// ```text
+///   foo($a, $b: 2)     foo(1, $a: 2)             ran=no   Argument $a was passed both …
+///   foo($a, $b: 2)     foo(1, 2, $a: 9, $b: 9)   ran=no   Argument $a was passed both …
+///   bar($x, $rest...)  bar(1, 2, $x: 9)          ran=no   Argument $x was passed both …
+///   bar($x, $rest...)  bar(1, $nope: 2)          ran=YES  No parameter named $nope.
+///   foo($a, $b: 2)     foo(1, $nope: 2)          ran=no   No parameter named $nope.
+///   foo($a, $b: 2)     foo(1, $b: 5)             ran=YES  (compiles)
+/// ```
+///
+/// The fourth row is dart's rest-parameter post-check — the callback runs and
+/// the leftover name is reported afterwards — which sasso does not model for a
+/// host function either (#225 is the same mechanism for a user callable).
+#[test]
+fn a_host_function_verifies_its_arguments_before_running() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let run = |sig: &str, call: &str| -> (bool, String) {
+        let ran = Rc::new(RefCell::new(false));
+        let flag = Rc::clone(&ran);
+        let cb: sasso::HostFunction = Rc::new(move |_args: &[u8]| {
+            *flag.borrow_mut() = true;
+            // An unquoted string `ok`, encoded as the host ABI expects, so a
+            // call that BINDS compiles and the only errors are the rule's.
+            let mut v = vec![3u8, 0u8];
+            v.extend_from_slice(&2u32.to_le_bytes());
+            v.extend_from_slice(b"ok");
+            Ok(v)
+        });
+        let opts = Options::default().with_url("in.scss").with_function(sig, cb);
+        let out = match compile(&format!("a {{b: {call}}}\n"), &opts) {
+            Ok(_) => "(compiles)".to_string(),
+            Err(e) => e.to_string().trim_start_matches("Error: ").to_string(),
+        };
+        let did_run = *ran.borrow();
+        (did_run, out)
+    };
+
+    for (sig, call, want) in [
+        (
+            "foo($a, $b)",
+            "foo(1, $a: 2)",
+            "Argument $a was passed both by position and by name.",
+        ),
+        (
+            "foo($a, $b)",
+            "foo(1, 2, $a: 9, $b: 9)",
+            "Argument $a was passed both by position and by name.",
+        ),
+        (
+            "bar($x, $rest...)",
+            "bar(1, 2, $x: 9)",
+            "Argument $x was passed both by position and by name.",
+        ),
+    ] {
+        let (ran, out) = run(sig, call);
+        assert!(
+            out.starts_with(want),
+            "{sig} / {call}\n  want: {want}\n  got:  {out}"
+        );
+        assert!(
+            !ran,
+            "the callback ran before the call was rejected: {sig} / {call}"
+        );
+    }
+
+    // …and a name that IS a parameter still binds, with the callback running.
+    let (ran, out) = run("foo($a, $b)", "foo(1, $b: 5)");
+    assert_eq!(out, "(compiles)", "foo(1, $b: 5) should bind");
+    assert!(ran, "the callback should have run");
+}
+
 /// A rejected `meta.call` does not run the function it was given.
 ///
 /// dart verifies the arguments before the body, so the target never runs. The
