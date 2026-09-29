@@ -4049,6 +4049,21 @@ fn the_parser_skips_css_whitespace_only() {
             "@charset \"UTF-8\";\n@function --f() {\n  result: a \u{a0}b ;\n}",
             "\u{feff}@function --f(){result: a \u{a0}b }",
         ),
+        (
+            "@foo bar\u{a0};\n",
+            "@charset \"UTF-8\";\n@foo bar\u{a0};",
+            "\u{feff}@foo bar\u{a0}",
+        ),
+        (
+            "@foo \u{a0}bar;\n",
+            "@charset \"UTF-8\";\n@foo \u{a0}bar;",
+            "\u{feff}@foo \u{a0}bar",
+        ),
+        (
+            "@media screen { a { @foo bar\u{a0}; } }\n",
+            "@charset \"UTF-8\";\n@media screen {\n  a {\n    @foo bar\u{a0};\n  }\n}",
+            "\u{feff}@media screen{a{@foo bar\u{a0}}}",
+        ),
     ] {
         let css = compile(scss, &Options::default()).unwrap();
         assert_eq!(css, expanded, "{scss}");

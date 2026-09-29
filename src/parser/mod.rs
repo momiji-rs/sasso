@@ -82,7 +82,7 @@ fn trim_prelude(pieces: Vec<TplPiece>) -> Vec<TplPiece> {
     if let Some(TplPiece::Lit(first)) = pieces.first_mut() {
         // A prelude written without leading padding — the usual one — has
         // nothing to trim, and keeps the buffer it was parsed into.
-        if let Some(trimmed) = trimmed_lit(first, str::trim_start) {
+        if let Some(trimmed) = trimmed_lit(first, |s| s.trim_start_matches(is_css_whitespace)) {
             *first = trimmed;
         }
         if first.is_empty() {
@@ -90,7 +90,7 @@ fn trim_prelude(pieces: Vec<TplPiece>) -> Vec<TplPiece> {
         }
     }
     if let Some(TplPiece::Lit(last)) = pieces.last_mut() {
-        if let Some(trimmed) = trimmed_lit(last, str::trim_end) {
+        if let Some(trimmed) = trimmed_lit(last, |s| s.trim_end_matches(is_css_whitespace)) {
             *last = trimmed;
         }
         if last.is_empty() {

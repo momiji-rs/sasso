@@ -78,7 +78,8 @@ Conformance is tracked separately as a ratchet against the official
   whitespace, so one was dropped before a rule, after a `:`, inside an
   argument list, a media query or an interpolation. dart-sass reads it as a
   name character: `c:\u{a0}d` is the value `\u{a0}d`, `1 ==\u{a0}1` is
-  false, and `rgba(0,\u{a0}0, 0, 0.5)` is an error.
+  false, and `rgba(0,\u{a0}0, 0, 0.5)` is an error. An unknown at-rule's
+  prelude keeps a leading or trailing one (`@foo bar\u{a0};`).
 
 - **A unit may be non-ASCII.** `1µs` was the list `1 µs`, and `math.unit(1é)`
   an error; a unit, like any name, may begin with any non-ASCII character,
