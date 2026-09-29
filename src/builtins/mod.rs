@@ -1666,9 +1666,23 @@ mod tests {
                 "the global `{name}` is a calculation, not a Sass function",
             );
         }
-        // …and the eleven it answers about as Sass functions still are
-        // verified, so the exclusion did not take the whole family with it.
-        for name in ["abs", "ceil", "floor", "percentage", "unit", "unitless", "random"] {
+        // …and the ones it answers about as Sass functions still are verified,
+        // so the exclusion did not take the whole family with it. Eight of the
+        // eleven measured SASS names: `max`, `min` and `round` are left out
+        // because they name no member with a global alias, so they never reach
+        // this lookup either — dart answers those as Sass functions for some
+        // argument shapes and as calculations for others, which is #215's and
+        // #220's selection problem rather than this exclusion's.
+        for name in [
+            "abs",
+            "ceil",
+            "floor",
+            "percentage",
+            "unit",
+            "unitless",
+            "random",
+            "comparable",
+        ] {
             assert!(
                 super::global_member(name).is_some(),
                 "the global `{name}` is a Sass function and must be verified",
@@ -1707,8 +1721,14 @@ mod tests {
         );
     }
 
-    /// The three members with no recorded signature are exactly the three
-    /// measured reasons, and nothing has quietly joined them.
+    /// The members with no recorded signature are exactly the ones there is a
+    /// measured reason for, and nothing has quietly joined them.
+    ///
+    /// The list, not a count: `no_sig`'s prose says two and nothing can make
+    /// that prose fail, which is why the assertion below names them. Four
+    /// stale "three"s were left behind when `map.remove` stopped needing
+    /// `no_sig` (r4127788954, r4127788989, r4128127606) and a fifth was this
+    /// very comment (r4128395163) — the count is the part that drifts.
     #[test]
     fn only_the_overloaded_members_go_unverified() {
         let mut unverified = Vec::new();

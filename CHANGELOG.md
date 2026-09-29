@@ -65,13 +65,28 @@ Conformance is tracked separately as a ratchet against the official
   declaration at all (dart answers `alpha(red, blue)` with the
   self-contradictory `Only 1 argument allowed, but 1 were passed.`).
 
-  Not fixed here, each measured and filed: dart's fourth rule,
+  **The overloaded colour constructors are NOT covered** (#220), and that
+  includes the shape #62 was opened with:
+
+  ```
+    rgb(1, 2, 3, $nope: 4)                          still returns the colour
+    color.hwb($channels: (240 10% 20%), $nope: 2)   still returns the colour
+  ```
+
+  dart chooses an overload and then verifies against that one, so the same
+  name is a parameter or not depending on its company —
+  `rgb(1, 2, 3, $channels: 1)` is `No parameter named $channels.` while
+  `rgb($red: 1, $green: 2, $blue: 3, $channels: 1)` is
+  `No parameters named $red, $green or $blue.`. Guessing that rule would
+  REJECT valid stylesheets, which is worse than the silence it replaces.
+
+  Also not fixed here, each measured and filed: dart's fourth rule,
   `Argument $x was passed both by position and by name.` (#213, which sasso
   implements nowhere and which outranks all three); the CSS math functions,
   whose named-argument error is `Keyword arguments can't be used with
-  calculations.` (#215); and the deprecated global spellings, where `lighten`
-  shares a name with a module-only member and `max`/`min`/`clamp`/`round` are
-  also calculations.
+  calculations.` (#215) — the bare `sin(…)` is one of those, while
+  `math.sin(…)` is verified here; and the deprecated global spellings, where
+  `lighten` shares a name with a module-only member.
 
 ## [0.19.0] - 2026-09-28
 
