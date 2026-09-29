@@ -110,6 +110,15 @@ Conformance is tracked separately as a ratchet against the official
   valid `.5%` with "Expected identifier.". Each now fails with dart's message,
   in a plain CSS module too, and `\74o` and `1E1%` come out `to` and `1e1%`.
 
+- **An unescaped line break ends no quoted string** (#238). A raw LF, CR or
+  form feed inside quotes is dart's `Expected "<quote>".` wherever the string
+  is; the value parser already said so, but the readers that copy a string
+  verbatim let it through. `[a="x` + newline + `y"]` compiled to
+  `[a="x\ay"]`, and a custom property value, an unknown at-rule's prelude, an
+  `@supports (--a: …)` declaration, a plain CSS `@function` body and
+  `expression()` kept the raw line break. A `\` line continuation is still
+  dropped.
+
 - **An interpolated media condition may not mix `and` and `or`.**
   `@media #{"(a) and (b) or (c)"}` compiled to `(a) or (b) or (c)`; it is an
   error, as it is when written out. A word other than the first operator now

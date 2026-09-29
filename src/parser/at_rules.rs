@@ -1170,6 +1170,9 @@ impl Parser {
                                 self.reject_plain_css_interp(interp_mark)?;
                                 pieces.push(TplPiece::Interp(e));
                             }
+                            Some('\n' | '\r' | '\u{c}') => {
+                                return Err(Error::at(format!("Expected {c}."), self.sc.position()));
+                            }
                             Some(ch) => {
                                 lit.push(ch);
                                 self.sc.bump();
@@ -2457,6 +2460,9 @@ impl Parser {
                                 self.reject_plain_css_interp(interp_mark)?;
                                 pieces.push(TplPiece::Interp(e));
                             }
+                            Some('\n' | '\r' | '\u{c}') => {
+                                return Err(Error::at(format!("Expected {q}."), self.sc.position()));
+                            }
                             Some(ch) => {
                                 lit.push(ch);
                                 self.sc.bump();
@@ -2596,6 +2602,12 @@ impl Parser {
                                 }
                                 self.reject_plain_css_interp(interp_mark)?;
                                 pieces.push(TplPiece::Interp(e));
+                            }
+                            // As in any other string, dart's
+                            // `_interpolatedString` fails on an unescaped
+                            // line break.
+                            Some('\n' | '\r' | '\u{c}') => {
+                                return Err(Error::at(format!("Expected {q}."), self.sc.position()));
                             }
                             Some(c) => {
                                 lit.push(c);

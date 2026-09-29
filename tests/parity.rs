@@ -11183,6 +11183,85 @@ fn load_css_subtree_clone_and_blank_gating() {
 }
 
 #[test]
+fn an_unescaped_line_break_ends_no_quoted_string() {
+    // A quoted string may not hold a raw LF, CR or FF: dart's
+    // `_interpolatedString` fails on one with `Expected "<quote>".`, wherever
+    // the string is. The value parser already did; the readers that copy a
+    // string verbatim (selectors, unknown at-rule preludes, custom property
+    // values, `@supports` custom declarations, plain CSS `@function` bodies,
+    // `expression()` and its kin) passed it through. A `\` line continuation
+    // is still dropped. Outputs and messages are dart-sass 1.104.1's. Offline.
+    for (scss, expanded, compressed) in [
+        ("[a=\"x\\\ny\"] { c: d }\n", "[a=xy] {\n  c: d;\n}", "[a=xy]{c:d}"),
+        (
+            "a { --x: \"a\\\nb\"; }\n",
+            "a {\n  --x: \"a\\\n  b\";\n}",
+            "a{--x: \"a\\ b\"}",
+        ),
+        (
+            "@supports (--a: \"x\\\ny\") { a { b: c } }\n",
+            "@supports (--a: \"x\\ y\") {\n  a {\n    b: c;\n  }\n}",
+            "@supports(--a: \"x\\ y\"){a{b:c}}",
+        ),
+        (
+            "a { b: expression(\"x\\\ny\") }\n",
+            "a {\n  b: expression(\"x\\ y\");\n}",
+            "a{b:expression(\"x\\ y\")}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+    for (scss, message) in [
+        ("[a=\"x\ny\"] { c: d }\n", "Expected \"."),
+        ("[a='x\ny'] { c: d }\n", "Expected '."),
+        ("[a=\"x\u{d}y\"] { c: d }\n", "Expected \"."),
+        ("[a=\"x\u{c}y\"] { c: d }\n", "Expected \"."),
+        (":is([a=\"x\ny\"]) { c: d }\n", "Expected \"."),
+        (".a:not([a=\"x\ny\"]) { c: d }\n", "Expected \"."),
+        (".b { @extend [a=\"x\ny\"]; }\n", "Expected \"."),
+        ("@foo \"x\ny\";\n", "Expected \"."),
+        ("@foo \"x\ny\" { a { b: c } }\n", "Expected \"."),
+        ("a { \"x\ny\": c }\n", "Expected \"."),
+        ("[a=\"#{1}\ny\"] { c: d }\n", "Expected \"."),
+        ("[a=\"x\n#{1}\"] { c: d }\n", "Expected \"."),
+        ("@at-root [a=\"x\ny\"] { c: d }\n", "Expected \"."),
+        ("@keyframes \"x\ny\" { from { c: d } }\n", "Expected \"."),
+        ("@at-root (with: \"x\ny\") { a { c: d } }\n", "Expected \"."),
+        ("a { --x: \"a\nb\"; }\n", "Expected \"."),
+        ("a { --x: 'a\u{d}b'; }\n", "Expected '."),
+        ("a { --x: \"a\u{c}b\"; }\n", "Expected \"."),
+        ("a { --x: [\"a\nb\"]; }\n", "Expected \"."),
+        ("a { --x: \"a#{1}\nb\"; }\n", "Expected \"."),
+        ("@supports (--a: \"x\ny\") { a { b: c } }\n", "Expected \"."),
+        ("@supports (--a: 'x\ny') { a { b: c } }\n", "Expected '."),
+        ("@function --f() { result: \"x\ny\"; }\n", "Expected \"."),
+        ("@function --f() { result: 'x\u{d}y'; }\n", "Expected '."),
+        ("a { b: expression(\"x\ny\") }\n", "Expected \"."),
+        ("a { b: progid:x(\"x\ny\") }\n", "Expected \"."),
+        ("a { b: element(\"x\ny\") }\n", "Expected \"."),
+        ("a { b: expression('x\u{d}y') }\n", "Expected '."),
+    ] {
+        let err = compile(scss, &Options::default()).unwrap_err();
+        assert_eq!(err.message, message, "{scss}");
+    }
+    for (css, message) in [
+        ("[a=\"x\ny\"] { c: d }\n", "Expected \"."),
+        ("a { --x: \"a\nb\"; }\n", "Expected \"."),
+        ("@foo \"x\ny\";\n", "Expected \"."),
+        ("a { b: expression(\"x\ny\") }\n", "Expected \"."),
+        ("@supports (--a: \"x\ny\") { a { b: c } }\n", "Expected \"."),
+        ("@function --f() { result: \"x\ny\"; }\n", "Expected \"."),
+        ("a { b: \"x\ny\"; }\n", "Expected \"."),
+    ] {
+        let err = compile(css, &Options::default().with_syntax(sasso::Syntax::Css)).unwrap_err();
+        assert_eq!(err.message, message, "{css} (plain CSS)");
+    }
+}
+
+#[test]
 fn a_keyframe_selector_is_parsed_as_stops() {
     // dart parses a keyframe block's resolved selector with its
     // `KeyframeSelectorParser`: a comma list of `from`, `to` (either may be

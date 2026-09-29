@@ -1746,6 +1746,9 @@ impl Parser {
                                     lit.push(esc);
                                 }
                             }
+                            Some('\n' | '\r' | '\u{c}') => {
+                                return Err(Error::at(format!("Expected {q}."), self.sc.position()));
+                            }
                             Some(ch) => {
                                 lit.push(ch);
                                 self.sc.bump();

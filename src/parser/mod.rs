@@ -992,6 +992,12 @@ impl Parser {
                             pieces.push(TplPiece::Interp(e));
                             continue;
                         }
+                        // An unescaped line break ends no string: dart's
+                        // `_interpolatedString` fails on it as on EOF, where
+                        // this passed it through into the selector.
+                        if matches!(ch, '\n' | '\r' | '\u{c}') {
+                            return Err(Error::at(format!("Expected {c}."), self.sc.position()));
+                        }
                         lit.push(ch);
                         self.sc.bump();
                         if ch == c {
