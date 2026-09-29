@@ -1934,7 +1934,7 @@ impl<'a> Evaluator<'a> {
         e
     }
 
-    /// Build the "expected selector." error for a `@` in a resolved selector:
+    /// Build the error `msg` for a stray character in a resolved selector:
     /// when the offending column falls inside an interpolation's output the
     /// error renders dart's dual-span "error in interpolated output" block;
     /// when it maps to literal selector text the source column is recovered
@@ -1945,8 +1945,8 @@ impl<'a> Evaluator<'a> {
         sel_str: &str,
         interp_bounds: &InterpBounds,
         at_idx: usize,
+        msg: &str,
     ) -> Error {
-        const MSG: &str = "expected selector.";
         let spans = &rule.selector_interp_spans;
         let single_line = !sel_str.contains('\n');
         // Inside an interpolation's output -> dual-span rendering, positioned
@@ -1960,11 +1960,11 @@ impl<'a> Evaluator<'a> {
                         line: line as usize,
                         col: col_start as usize,
                     };
-                    let mut e = Error::at(MSG, pos);
+                    let mut e = Error::at(msg, pos);
                     if self.diag_enabled() {
                         let source = Rc::clone(&self.current_source);
                         let frames = self.frames_for(pos);
-                        let mut rendered = format!("Error: {MSG}\n");
+                        let mut rendered = format!("Error: {msg}\n");
                         rendered.push_str(&crate::diag::render_interp_error_snippet(
                             &source,
                             line as usize,
@@ -2008,14 +2008,14 @@ impl<'a> Evaluator<'a> {
             }
             let col = (rule.selector_pos.col as i64 + at_idx as i64 + shift).max(1) as usize;
             return Error::at(
-                MSG,
+                msg,
                 Pos {
                     line: rule.selector_pos.line,
                     col,
                 },
             );
         }
-        Error::at(MSG, rule.selector_pos)
+        Error::at(msg, rule.selector_pos)
     }
 
     /// How a frame names its file: a path relative to the working directory,
@@ -3300,14 +3300,14 @@ impl<'a> Evaluator<'a> {
             }
             validate_selector(&sel_str, !parents.is_empty())?;
         }
-        // A `@` has no legal position in a CSS selector: dart's selector
-        // parser fails with "expected selector." — pointed at the source when
-        // the offending character maps to literal text, or rendered as the
-        // dual-span "error in interpolated output" diagnostic when it came
-        // from an interpolation (todo_single_escape).
+        // A character no selector may hold (`@`, `$`, a control character):
+        // dart's selector parser fails there, pointed at the source when the
+        // character maps to literal text, or rendered as the dual-span "error
+        // in interpolated output" diagnostic when it came from an
+        // interpolation (todo_single_escape).
         if !self.in_keyframes {
-            if let Some(at_idx) = find_unquoted_at(&sel_str) {
-                return Err(self.interp_selector_error(rule, &sel_str, &interp_bounds, at_idx));
+            if let Some((idx, msg)) = find_stray_selector_char(&sel_str) {
+                return Err(self.interp_selector_error(rule, &sel_str, &interp_bounds, idx, &msg));
             }
         }
         // A selector starting with a digit is dart's "expected selector."
@@ -7084,33 +7084,131 @@ fn part_has_parent_ref(part: &str) -> bool {
     false
 }
 
-/// The char index of the first `@` outside quoted strings in a resolved
-/// selector, if any — `@` has no legal position in a CSS selector.
-fn find_unquoted_at(sel: &str) -> Option<usize> {
-    // `@` is ASCII: no `@` byte means no occurrence at all — skip the
-    // quote-tracking walk that otherwise runs for every resolved selector.
-    if !sel.as_bytes().contains(&b'@') {
+/// The first character of a resolved selector that no selector may hold,
+/// with its char index and dart's message. dart's `_complexSelector` stops
+/// at a character that starts neither a compound selector nor a combinator:
+/// at the top level `parse` then reports "expected selector.", and in a
+/// selector pseudo's argument `expectChar(')')` reports `expected ")".`,
+/// unless the complex selector is still empty, which is "expected
+/// selector." again. Such a character is a C0 control other than CSS
+/// whitespace, DEL, a quote, or one of `` $ ^ ` ? < = @ / ``. An escape makes
+/// it part of an identifier, an attribute value may be a string, and an
+/// unknown pseudo's argument is dart's `declarationValue`, which takes any
+/// of them. Every attribute is validated
+/// on the way, so this alone serves where [`validate_selector`] is not run
+/// (plain CSS, `@extend`, the selector functions) and inside a pseudo's
+/// argument, which [`validate_selector_tail`] skips.
+pub(crate) fn find_stray_selector_char(sel: &str) -> Option<(usize, String)> {
+    if !sel.bytes().any(|b| b == b'[' || is_stray_selector_byte(b)) {
         return None;
     }
-    let mut quote: Option<char> = None;
-    let mut iter = sel.chars().enumerate();
-    while let Some((i, c)) = iter.next() {
-        match quote {
-            Some(q) => {
-                if c == '\\' {
-                    iter.next();
-                } else if c == q {
-                    quote = None;
-                }
+    let chars_buf = CharBuf::of(sel);
+    stray_in_selector(&chars_buf, 0, false)
+}
+
+fn is_stray_selector_byte(b: u8) -> bool {
+    matches!(
+        b,
+        0..=0x08
+            | 0x0b
+            | 0x0e..=0x1f
+            | 0x7f
+            | b'"'
+            | b'\''
+            | b'$'
+            | b'^'
+            | b'`'
+            | b'?'
+            | b'<'
+            | b'='
+            | b'@'
+            | b'/'
+    )
+}
+
+/// dart's `_selectorPseudoClasses`, matched unvendored.
+const SELECTOR_PSEUDO_CLASSES: [&str; 9] = [
+    "not",
+    "is",
+    "matches",
+    "where",
+    "current",
+    "any",
+    "has",
+    "host",
+    "host-context",
+];
+
+/// [`find_stray_selector_char`] over `cs`, a selector list that starts at
+/// char index `base`; `in_arg` when it is a pseudo's argument.
+fn stray_in_selector(cs: &[char], base: usize, in_arg: bool) -> Option<(usize, String)> {
+    // Whether the current complex selector has nothing in it yet.
+    let mut empty = true;
+    let mut i = 0;
+    while i < cs.len() {
+        match cs[i] {
+            '\\' => {
+                i += 2;
+                empty = false;
             }
-            None => match c {
-                '"' | '\'' => quote = Some(c),
-                '\\' => {
-                    iter.next();
+            '[' => {
+                let end = matching_bracket(cs, i);
+                if let Err(e) = validate_attribute(&cs[i + 1..end]) {
+                    return Some((base + i, e.message));
                 }
-                '@' => return Some(i),
-                _ => {}
-            },
+                i = end + 1;
+                empty = false;
+            }
+            ',' => {
+                i += 1;
+                empty = true;
+            }
+            ':' => {
+                empty = false;
+                let element = cs.get(i + 1) == Some(&':');
+                let name_start = i + 1 + usize::from(element);
+                let mut j = name_start;
+                while cs.get(j).is_some_and(|&c| is_name_char(c)) {
+                    j += 1;
+                }
+                i = j;
+                if cs.get(j) != Some(&'(') {
+                    continue;
+                }
+                // dart's `_pseudo`: only these read their argument as a
+                // selector list, `nth-child` after its `of`.
+                let close = crate::selector::matching_paren(cs, j);
+                let inner = &cs[j + 1..close.min(cs.len())];
+                let name: String = cs[name_start..j].iter().collect();
+                let unvendored = crate::selector::unvendor(&name);
+                let found = if element {
+                    (unvendored == "slotted").then(|| stray_in_selector(inner, base + j + 1, true))
+                } else if matches!(unvendored, "nth-child" | "nth-last-child") {
+                    crate::selector::nth_of_offset(inner)
+                        .map(|k| stray_in_selector(&inner[k..], base + j + 1 + k, true))
+                } else {
+                    SELECTOR_PSEUDO_CLASSES
+                        .contains(&unvendored)
+                        .then(|| stray_in_selector(inner, base + j + 1, true))
+                };
+                if let Some(found) = found.flatten() {
+                    return Some(found);
+                }
+                i = close + 1;
+            }
+            c if is_css_whitespace(c) => i += 1,
+            c if c.is_ascii() && is_stray_selector_byte(c as u8) => {
+                let msg = if in_arg && !empty {
+                    "expected \")\"."
+                } else {
+                    "expected selector."
+                };
+                return Some((base + i, msg.to_string()));
+            }
+            _ => {
+                i += 1;
+                empty = false;
+            }
         }
     }
     None

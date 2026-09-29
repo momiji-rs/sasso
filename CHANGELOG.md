@@ -126,6 +126,18 @@ Conformance is tracked separately as a ratchet against the official
   compiled. Each now fails with dart's message: "Expected identifier.",
   `expected "|".` or `expected "]".`.
 
+- **A character that starts no selector is an error** (#238). A C0 control
+  character other than CSS whitespace (the vertical tab from #238 among
+  them), DEL, a quote, and `` $ ^ ` ? < = / `` compiled in a selector:
+  `a^b`, `:is(a$b)`, `a"b"`. A quoted string is only a selector's part
+  inside an attribute value or an unknown pseudo's argument. dart's message depends on where the character is:
+  "expected selector." at the top level, and `expected ")".` inside `:is()`
+  and the other selector pseudos, unless nothing comes before it there.
+  sasso now gives the same messages, in plain CSS, in `@extend` and in the
+  selector functions too. `@` was already an error, but it now gets the
+  same messages, and `:x(a@b)`, an unknown pseudo whose argument dart does
+  not parse as a selector, compiles.
+
 - **An interpolated media condition may not mix `and` and `or`.**
   `@media #{"(a) and (b) or (c)"}` compiled to `(a) or (b) or (c)`; it is an
   error, as it is when written out. A word other than the first operator now

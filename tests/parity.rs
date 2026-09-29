@@ -14245,3 +14245,231 @@ fn an_attribute_selector_follows_dart_grammar() {
         assert_eq!(err.message, message, "{scss}");
     }
 }
+
+#[test]
+fn a_character_that_starts_no_selector_is_an_error() {
+    // dart's `_complexSelector` stops at a character that starts neither a
+    // compound selector nor a combinator: a C0 control other than CSS
+    // whitespace, DEL, a quote, or one of `` $ ^ ` ? < = @ / ``. At the top level that
+    // is "expected selector."; in a selector pseudo's argument it is
+    // `expected ")".`, or "expected selector." while the complex selector is
+    // still empty. sasso accepted all of them but `@` (and a `/` outside an
+    // argument), and rejected `@` even in an unknown pseudo's argument, which
+    // dart reads as a declaration value. Outputs and messages are dart-sass
+    // 1.104.1's. Offline.
+    for (scss, expanded, compressed) in [
+        (":x(a@b) { c: d }\n", ":x(a@b) {\n  c: d;\n}", ":x(a@b){c:d}"),
+        (":x(a^b) { c: d }\n", ":x(a^b) {\n  c: d;\n}", ":x(a^b){c:d}"),
+        (":x(a/b) { c: d }\n", ":x(a/b) {\n  c: d;\n}", ":x(a/b){c:d}"),
+        ("::x(a@b) { c: d }\n", "::x(a@b) {\n  c: d;\n}", "::x(a@b){c:d}"),
+        (
+            ":lang(a$) { c: d }\n",
+            ":lang(a$) {\n  c: d;\n}",
+            ":lang(a$){c:d}",
+        ),
+        (
+            ":dir(a@b) { c: d }\n",
+            ":dir(a@b) {\n  c: d;\n}",
+            ":dir(a@b){c:d}",
+        ),
+        (":IS(a$b) { c: d }\n", ":IS(a$b) {\n  c: d;\n}", ":IS(a$b){c:d}"),
+        (
+            "::is(a$b) { c: d }\n",
+            "::is(a$b) {\n  c: d;\n}",
+            "::is(a$b){c:d}",
+        ),
+        (
+            ":slotted(a$b) { c: d }\n",
+            ":slotted(a$b) {\n  c: d;\n}",
+            ":slotted(a$b){c:d}",
+        ),
+        (
+            ":nth-of-type(2n$) { c: d }\n",
+            ":nth-of-type(2n$) {\n  c: d;\n}",
+            ":nth-of-type(2n$){c:d}",
+        ),
+        (
+            ":x(\"$\") { c: d }\n",
+            ":x(\"$\") {\n  c: d;\n}",
+            ":x(\"$\"){c:d}",
+        ),
+        ("a\\$b { c: d }\n", "a\\$b {\n  c: d;\n}", "a\\$b{c:d}"),
+        ("a\\@b { c: d }\n", "a\\@b {\n  c: d;\n}", "a\\@b{c:d}"),
+        (
+            ":is(a\\$b) { c: d }\n",
+            ":is(a\\$b) {\n  c: d;\n}",
+            ":is(a\\$b){c:d}",
+        ),
+        (
+            "[a=\"$\"] { c: d }\n",
+            "[a=\"$\"] {\n  c: d;\n}",
+            "[a=\"$\"]{c:d}",
+        ),
+        (
+            "[a=\"@\"] { c: d }\n",
+            "[a=\"@\"] {\n  c: d;\n}",
+            "[a=\"@\"]{c:d}",
+        ),
+        (
+            ":x(a\"$\"b) { c: d }\n",
+            ":x(a\"$\"b) {\n  c: d;\n}",
+            ":x(a\"$\"b){c:d}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+    for (scss, message) in [
+        ("a\u{1}b { c: d }\n", "expected selector."),
+        ("a\u{b}b { c: d }\n", "expected selector."),
+        ("a\u{7f} { c: d }\n", "expected selector."),
+        ("\u{1f}a { c: d }\n", "expected selector."),
+        ("a\u{0}b { c: d }\n", "expected selector."),
+        ("a$b { c: d }\n", "expected selector."),
+        ("a^b { c: d }\n", "expected selector."),
+        ("a`b { c: d }\n", "expected selector."),
+        ("a?b { c: d }\n", "expected selector."),
+        ("a<b { c: d }\n", "expected selector."),
+        ("a=b { c: d }\n", "expected selector."),
+        ("a@b { c: d }\n", "expected selector."),
+        ("a > ^b { c: d }\n", "expected selector."),
+        ("a, ?b { c: d }\n", "expected selector."),
+        (".a$ { c: d }\n", "expected selector."),
+        ("#a` { c: d }\n", "expected selector."),
+        ("%p<b { c: d }\n", "expected selector."),
+        (":hover= { c: d }\n", "expected selector."),
+        ("a:hover$ { c: d }\n", "expected selector."),
+        ("&$ { c: d }\n", "expected selector."),
+        (":is(a) $b { c: d }\n", "expected selector."),
+        (":is(a\u{b}b) { c: d }\n", "expected \")\"."),
+        (":is(a$b) { c: d }\n", "expected \")\"."),
+        (":is(a@b) { c: d }\n", "expected \")\"."),
+        (":is(a/b) { c: d }\n", "expected \")\"."),
+        (":is(a$) { c: d }\n", "expected \")\"."),
+        (":not(a /b) { c: d }\n", "expected \")\"."),
+        (":is($a) { c: d }\n", "expected selector."),
+        (":is( $a) { c: d }\n", "expected selector."),
+        (":is(/a) { c: d }\n", "expected selector."),
+        (":is(a, $b) { c: d }\n", "expected selector."),
+        (":is(a,$b) { c: d }\n", "expected selector."),
+        (":is(> $a) { c: d }\n", "expected \")\"."),
+        (":is(a > $b) { c: d }\n", "expected \")\"."),
+        (":is(:not(a$b)) { c: d }\n", "expected \")\"."),
+        (":-webkit-any(a$b) { c: d }\n", "expected \")\"."),
+        (":-moz-is(a$b) { c: d }\n", "expected \")\"."),
+        (":host(a$b) { c: d }\n", "expected \")\"."),
+        (":host-context(a$b) { c: d }\n", "expected \")\"."),
+        (":current(a$b) { c: d }\n", "expected \")\"."),
+        (":has(> a$b) { c: d }\n", "expected \")\"."),
+        (":where(a$b) { c: d }\n", "expected \")\"."),
+        (":matches(a$b) { c: d }\n", "expected \")\"."),
+        (":any(a$b) { c: d }\n", "expected \")\"."),
+        ("::slotted(a$b) { c: d }\n", "expected \")\"."),
+        ("::slotted(a/b) { c: d }\n", "expected \")\"."),
+        (":nth-child(2n of a$b) { c: d }\n", "expected \")\"."),
+        (":nth-child(2n of $a) { c: d }\n", "expected selector."),
+        (":nth-last-child(2n of a, $b) { c: d }\n", "expected selector."),
+        (":is([a=1]) { c: d }\n", "Expected identifier."),
+        (":is([a=b$]) { c: d }\n", "expected \"]\"."),
+        (":is(a[b]$c) { c: d }\n", "expected \")\"."),
+        (".p { a$b { c: d } }\n", "expected selector."),
+        (".q { #{\"a$b\"} { c: d } }\n", "expected selector."),
+        (".q { #{\"a\"}$b { c: d } }\n", "expected selector."),
+        (".q { :is(#{\"a$b\"}) { c: d } }\n", "expected \")\"."),
+        ("@media screen { a$b { c: d } }\n", "expected selector."),
+        ("@mixin m { a$b { c: d } } @include m;\n", "expected selector."),
+        ("@at-root a$b { c: d }\n", "expected selector."),
+        (".a { x: y } .b { @extend a$b; }\n", "expected selector."),
+        (".a { x: y } .b { @extend :is(a$b); }\n", "expected \")\"."),
+        (".a { x: y } .b { @extend a\u{b}b; }\n", "expected selector."),
+        (".a { x: y } .b { @extend [a=1]; }\n", "Expected identifier."),
+        ("a\"b\" { c: d }\n", "expected selector."),
+        ("a\"$\" { c: d }\n", "expected selector."),
+        (":is(\"x\") { c: d }\n", "expected selector."),
+        (":is(\"a$b\") { c: d }\n", "expected selector."),
+        (":is(a\"b\"c) { c: d }\n", "expected \")\"."),
+        (":is(a \"b\") { c: d }\n", "expected \")\"."),
+        (":is('x') { c: d }\n", "expected selector."),
+        (":not(a, \"b\") { c: d }\n", "expected selector."),
+        (":is(:hover $a) { c: d }\n", "expected \")\"."),
+        (":is(:hover$) { c: d }\n", "expected \")\"."),
+        (":is(::before $a) { c: d }\n", "expected \")\"."),
+        (":nth-child(2n of :not()) { c: d }\n", "expected selector."),
+        (":nth-child(2n of :is(a$b)) { c: d }\n", "expected \")\"."),
+        ("a\u{8}b { c: d }\n", "expected selector."),
+        (":is(a\u{8}b) { c: d }\n", "expected \")\"."),
+        ("[a=\"$\"]$ { c: d }\n", "expected selector."),
+        (".a { x: y } .b { @extend [-1]; }\n", "Expected identifier."),
+        (".a { x: y } .b { @extend a\"b\"; }\n", "expected selector."),
+        (
+            "@use \"sass:selector\"; a { b: selector.parse(\"a$b\") }\n",
+            "$selector: expected selector.",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.parse(\":is(a$b)\") }\n",
+            "$selector: expected \")\".",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.parse(\"[a=1]\") }\n",
+            "$selector: Expected identifier.",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.is-superselector(\"a$\", \"a\") }\n",
+            "$super: expected selector.",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.parse(\"[-1]\") }\n",
+            "$selector: Expected identifier.",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.parse('a\"b\"') }\n",
+            "$selector: expected selector.",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.parse(':is(\"x\")') }\n",
+            "$selector: expected selector.",
+        ),
+    ] {
+        let err = compile(scss, &Options::default()).unwrap_err();
+        assert_eq!(err.message, message, "{scss}");
+    }
+    let css = compile(
+        ":x(a@b) { c: d }\n",
+        &Options::default().with_syntax(sasso::Syntax::Css),
+    )
+    .unwrap();
+    assert_eq!(css, ":x(a@b) {\n  c: d;\n}");
+    for (css, message) in [
+        ("a$b { c: d }\n", "expected selector."),
+        ("a@b { c: d }\n", "expected selector."),
+        ("a\u{b}b { c: d }\n", "expected selector."),
+        (":is(a$b) { c: d }\n", "expected \")\"."),
+        ("[a=1] { c: d }\n", "Expected identifier."),
+        ("a { b$c { d: e } }\n", "expected selector."),
+        ("[-1] { c: d }\n", "Expected identifier."),
+        ("[1a] { c: d }\n", "Expected identifier."),
+        ("a\"b\" { c: d }\n", "expected selector."),
+        (":is(\"x\") { c: d }\n", "expected selector."),
+        ("a\u{8}b { c: d }\n", "expected selector."),
+    ] {
+        let err = compile(css, &Options::default().with_syntax(sasso::Syntax::Css)).unwrap_err();
+        assert_eq!(err.message, message, "{css} (plain CSS)");
+    }
+    // The error points at the character, and one that came out of an
+    // interpolation gets the dual-span block, with the message it has.
+    let err = compile(":is(a$b) { c: d }\n", &Options::default()).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("1:6"), "{msg}");
+    let scss = "$x: \"a$b\";\n.q:is(#{$x}) { c: d }\n";
+    let err = compile(scss, &Options::default()).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("2:9"), "{msg}");
+    let options = Options::new()
+        .with_url("file:///work/main.scss")
+        .with_cwd("/work");
+    let msg = compile(scss, &options).unwrap_err().to_string();
+    assert!(msg.starts_with("Error: expected \")\".\n"), "{msg}");
+    assert!(msg.contains("error in interpolated output"), "{msg}");
+}

@@ -600,6 +600,9 @@ impl<'a> Evaluator<'a> {
         top_level: bool,
     ) -> Result<(Vec<String>, Vec<bool>), Error> {
         let s = self.eval_template(&rule.selector)?;
+        if let Some((idx, msg)) = find_stray_selector_char(&s) {
+            return Err(self.interp_selector_error(rule, &s, &InterpBounds::None, idx, &msg));
+        }
         let parts: Vec<String> = split_commas(&s)
             .iter()
             .map(|p| p.trim_matches(is_css_whitespace).to_string())

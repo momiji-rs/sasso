@@ -38,6 +38,10 @@ impl<'a> Evaluator<'a> {
         if target.trim_start_matches(is_css_whitespace).starts_with(',') {
             return Err(Error::at("expected selector.", pos));
         }
+        // dart parses the whole list before it looks at any target.
+        if let Some((_, msg)) = super::find_stray_selector_char(&target) {
+            return Err(Error::at(msg, pos));
+        }
         let in_media = !self.media_queries.is_empty();
         for t in split_commas(&target).iter() {
             let t = t.trim_matches(is_css_whitespace);
