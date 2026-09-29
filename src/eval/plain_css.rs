@@ -180,7 +180,10 @@ impl<'a> Evaluator<'a> {
                     if body.is_none() && name.eq_ignore_ascii_case("charset") {
                         continue;
                     }
-                    let prelude_s = self.eval_template(prelude)?.trim().to_string();
+                    let prelude_s = self
+                        .eval_template(prelude)?
+                        .trim_matches(is_css_whitespace)
+                        .to_string();
                     let lines = self.stamp(*lines);
                     match body {
                         None => sink.push_at_rule(OutNode::AtRule {
@@ -210,7 +213,10 @@ impl<'a> Evaluator<'a> {
                     body,
                     lines,
                 } => {
-                    let prelude_s = self.eval_template(prelude)?.trim().to_string();
+                    let prelude_s = self
+                        .eval_template(prelude)?
+                        .trim_matches(is_css_whitespace)
+                        .to_string();
                     let out_body = self.css_at_body(body, true)?;
                     let lines = self.stamp(*lines);
                     sink.push_at_rule(OutNode::AtRule {
@@ -369,7 +375,10 @@ impl<'a> Evaluator<'a> {
                     body,
                     lines,
                 } => {
-                    let prelude_s = self.eval_template(prelude)?.trim().to_string();
+                    let prelude_s = self
+                        .eval_template(prelude)?
+                        .trim_matches(is_css_whitespace)
+                        .to_string();
                     let lines = self.stamp(*lines);
                     match body {
                         None => out.push(OutNode::AtRule {
@@ -419,7 +428,10 @@ impl<'a> Evaluator<'a> {
                     body,
                     lines,
                 } => {
-                    let prelude_s = self.eval_template(prelude)?.trim().to_string();
+                    let prelude_s = self
+                        .eval_template(prelude)?
+                        .trim_matches(is_css_whitespace)
+                        .to_string();
                     let out_body = self.css_at_body(body, true)?;
                     let lines = self.stamp(*lines);
                     out.push(OutNode::AtRule {
@@ -510,7 +522,10 @@ impl<'a> Evaluator<'a> {
                     body: Some(b),
                     ..
                 } => {
-                    let prelude_s = self.eval_template(prelude)?.trim().to_string();
+                    let prelude_s = self
+                        .eval_template(prelude)?
+                        .trim_matches(is_css_whitespace)
+                        .to_string();
                     let inner = self.css_body(b)?;
                     bubble(name, AtRuleKind::Generic, prelude_s, inner, &mut bubbled);
                 }
@@ -524,7 +539,10 @@ impl<'a> Evaluator<'a> {
                     body,
                     lines,
                 } => {
-                    let prelude_s = self.eval_template(prelude)?.trim().to_string();
+                    let prelude_s = self
+                        .eval_template(prelude)?
+                        .trim_matches(is_css_whitespace)
+                        .to_string();
                     let out_body = self.css_at_body(body, true)?;
                     let lines = self.stamp(*lines);
                     bubbled.push(OutNode::AtRule {
@@ -584,7 +602,7 @@ impl<'a> Evaluator<'a> {
         let s = self.eval_template(&rule.selector)?;
         let parts: Vec<String> = split_commas(&s)
             .iter()
-            .map(|p| p.trim().to_string())
+            .map(|p| p.trim_matches(is_css_whitespace).to_string())
             .filter(|p| !p.is_empty())
             .collect();
         for p in &parts {
@@ -609,7 +627,7 @@ impl<'a> Evaluator<'a> {
         let s = self.eval_template(sel)?;
         let mut stops = Vec::new();
         for part in split_commas(&s).iter() {
-            let part = part.trim();
+            let part = part.trim_matches(is_css_whitespace);
             if part.is_empty() {
                 continue;
             }
@@ -793,7 +811,10 @@ impl<'a> Evaluator<'a> {
                 body,
                 lines,
             } => {
-                let prelude_s = self.eval_template(prelude)?.trim().to_string();
+                let prelude_s = self
+                    .eval_template(prelude)?
+                    .trim_matches(is_css_whitespace)
+                    .to_string();
                 match body {
                     None => {
                         let lines = self.stamp(*lines);
@@ -827,7 +848,10 @@ impl<'a> Evaluator<'a> {
                 body,
                 lines,
             } => {
-                let prelude_s = self.eval_template(prelude)?.trim().to_string();
+                let prelude_s = self
+                    .eval_template(prelude)?
+                    .trim_matches(is_css_whitespace)
+                    .to_string();
                 let inner = self.css_frames_body(body)?;
                 let lines = self.stamp(*lines);
                 items.push(OutItem::NestedAtRule {

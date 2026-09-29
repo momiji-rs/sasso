@@ -3293,7 +3293,7 @@ impl<'a> Evaluator<'a> {
         let (sel_str, interp_bounds) = self.eval_template_bounds(&rule.selector)?;
         // A selector that resolves to nothing (e.g. `#{&}` at the document root,
         // where `&` is null) is rejected by dart-sass with "expected selector".
-        if sel_str.trim().is_empty() {
+        if sel_str.trim_matches(is_css_whitespace).is_empty() {
             return Err(Error::unpositioned("expected selector."));
         }
         validate_selector(&sel_str, !parents.is_empty())?;
@@ -3311,7 +3311,10 @@ impl<'a> Evaluator<'a> {
         // (`1a {}`, issue_2023) — except keyframe stops (`50%`, `13E2%`).
         if !self.in_keyframes {
             for part in split_commas(&sel_str).iter() {
-                if part.trim_start().starts_with(|c: char| c.is_ascii_digit()) {
+                if part
+                    .trim_start_matches(is_css_whitespace)
+                    .starts_with(|c: char| c.is_ascii_digit())
+                {
                     return Err(Error::unpositioned("expected selector."));
                 }
             }
@@ -3349,7 +3352,7 @@ impl<'a> Evaluator<'a> {
                 (
                     split_commas(&sel_str)
                         .iter()
-                        .map(|p| p.trim().to_string())
+                        .map(|p| p.trim_matches(is_css_whitespace).to_string())
                         .filter(|p| !p.is_empty())
                         .collect(),
                     Vec::new(),
@@ -4170,7 +4173,7 @@ impl<'a> Evaluator<'a> {
 /// `--b` is not.
 fn literal_name_is_custom_property(property: &[TplPiece]) -> bool {
     match property.first() {
-        Some(TplPiece::Lit(s)) => s.trim_start().starts_with("--"),
+        Some(TplPiece::Lit(s)) => s.trim_start_matches(is_css_whitespace).starts_with("--"),
         _ => false,
     }
 }
@@ -4184,7 +4187,7 @@ fn expr_has_substitution(e: &Expr) -> bool {
         Expr::Ident(pieces) => pieces.iter().any(|p| match p {
             TplPiece::Interp(_) => true,
             TplPiece::Lit(s) => {
-                let lower = s.trim_start().to_ascii_lowercase();
+                let lower = s.trim_start_matches(is_css_whitespace).to_ascii_lowercase();
                 lower.starts_with("var(") || lower.starts_with("env(")
             }
         }),
@@ -4399,20 +4402,20 @@ fn nested_calc_needs_parens(s: &str) -> bool {
     if is_complete_calculation(s) {
         return false;
     }
-    let trimmed = s.trim_start();
+    let trimmed = s.trim_start_matches(is_css_whitespace);
     let is_var = trimmed.len() >= 4 && trimmed[..4].eq_ignore_ascii_case("var(");
     is_var
         || s.chars()
-            .any(|c| c.is_whitespace() || matches!(c, '*' | '/' | '\\'))
+            .any(|c| is_css_whitespace(c) || matches!(c, '*' | '/' | '\\'))
 }
 
 fn is_complete_calculation(s: &str) -> bool {
-    let s = s.trim();
+    let s = s.trim_matches(is_css_whitespace);
     let Some(open) = s.find('(') else { return false };
     if !s.ends_with(')') {
         return false;
     }
-    let name = s[..open].trim().to_ascii_lowercase();
+    let name = s[..open].trim_matches(is_css_whitespace).to_ascii_lowercase();
     let is_calc_name = matches!(
         name.as_str(),
         "calc"
@@ -4869,7 +4872,7 @@ fn validate_decl_scope(stmts: &[Stmt], ctx: ScopeCtx) -> Result<(), Error> {
 /// a selector, so it must not count as a style rule inside a `@function` body.
 fn is_empty_parens_selector(selector: &[TplPiece]) -> bool {
     match selector {
-        [TplPiece::Lit(s)] => s.trim() == "()",
+        [TplPiece::Lit(s)] => s.trim_matches(is_css_whitespace) == "()",
         _ => false,
     }
 }
@@ -5618,14 +5621,18 @@ impl AtRootQuery {
                 rule: true,
             };
         };
-        let inner = text.trim().trim_start_matches('(').trim_end_matches(')');
+        let inner = text
+            .trim_matches(is_css_whitespace)
+            .trim_start_matches('(')
+            .trim_end_matches(')');
         let (include, list) = match inner.split_once(':') {
-            Some((k, v)) if k.trim().eq_ignore_ascii_case("with") => (true, v),
+            Some((k, v)) if k.trim_matches(is_css_whitespace).eq_ignore_ascii_case("with") => (true, v),
             Some((_, v)) => (false, v),
             None => (false, inner),
         };
         let names: Vec<String> = list
-            .split_whitespace()
+            .split(is_css_whitespace)
+            .filter(|s| !s.is_empty())
             .map(|s| s.trim_matches('"').trim_matches('\'').to_ascii_lowercase())
             .collect();
         let all = names.iter().any(|n| n == "all");
@@ -5657,7 +5664,7 @@ impl AtRootQuery {
 /// percentage stop's scientific-notation marker (`130E-1%` -> `130e-1%`);
 /// the digits are left verbatim.
 pub(super) fn normalize_keyframe_selector(s: &str) -> String {
-    let t = s.trim();
+    let t = s.trim_matches(is_css_whitespace);
     if t.eq_ignore_ascii_case("from") || t.eq_ignore_ascii_case("to") {
         return t.to_ascii_lowercase();
     }
@@ -5750,7 +5757,7 @@ fn at_body_to_items(nodes: Vec<OutNode>) -> Vec<OutItem> {
 }
 
 fn validate_plain_css_selector(part: &str, top_level: bool) -> Result<(), Error> {
-    let trimmed = part.trim();
+    let trimmed = part.trim_matches(is_css_whitespace);
     let chars_buf = CharBuf::of(trimmed);
     let chars: &[char] = &chars_buf;
     // A leading combinator is allowed when *nested* (it joins onto the parent),
@@ -5821,7 +5828,7 @@ fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
     // A selector list whose FIRST comma part is empty is dart-sass's
     // "expected selector." (`,b`); later empty parts (`a,,b`, trailing `a,`)
     // are tolerated and skipped.
-    if sel.trim_start().starts_with(',') {
+    if sel.trim_start_matches(is_css_whitespace).starts_with(',') {
         return Err(Error::unpositioned("expected selector."));
     }
     // Parens and brackets must nest properly: `a:b([c)]` is dart's
@@ -7231,7 +7238,7 @@ fn resolve_selectors_opt(
     // dart: a parent that ends in a combinator can't substitute into a `&`
     // that is part of a compound (`.a > { &.b {} }` errors; `& .b` is fine).
     let check_compound_parent = |part: &str, parent: &str| -> Result<(), Error> {
-        let trimmed = parent.trim_end();
+        let trimmed = parent.trim_end_matches(is_css_whitespace);
         if !matches!(trimmed.chars().last(), Some('>' | '+' | '~')) {
             return Ok(());
         }
@@ -7516,16 +7523,16 @@ fn resolve_selectors_opt(
     Ok(result)
 }
 
-/// `s.trim()` without an allocation when `s` has no surrounding whitespace —
+/// Trim CSS whitespace without an allocation when `s` has none around it —
 /// the common case for an evaluated property name, which is trimmed on every
 /// declaration and almost never has anything to lose. Hands back the same
 /// shared buffer (`trim` removed nothing → same length) instead of copying the
 /// bytes into a fresh one.
 fn trim_shared(s: Rc<str>) -> Rc<str> {
-    if s.trim().len() == s.len() {
+    if s.trim_matches(is_css_whitespace).len() == s.len() {
         s
     } else {
-        Rc::from(s.trim())
+        Rc::from(s.trim_matches(is_css_whitespace))
     }
 }
 
@@ -8668,7 +8675,7 @@ fn media_query_has_interp(q: &MediaQuery) -> bool {
 fn css_media_parse_list(text: &str) -> Result<Vec<ResolvedQuery>, Error> {
     let mut out = Vec::new();
     for part in split_top_level_media_commas(text) {
-        let part = part.trim();
+        let part = part.trim_matches(is_css_whitespace);
         if part.is_empty() {
             continue;
         }
@@ -8678,7 +8685,7 @@ fn css_media_parse_list(text: &str) -> Result<Vec<ResolvedQuery>, Error> {
         if q.mtype.is_none() && q.modifier.is_none() && q.conditions.len() == 1 {
             let c = q.conditions[0].clone();
             if let Some(inner) = c.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
-                let t = inner.trim();
+                let t = inner.trim_matches(is_css_whitespace);
                 let balanced = {
                     let mut d = 0i32;
                     let mut ok = true;
@@ -8736,7 +8743,7 @@ fn css_media_parse_one(t: &str) -> Result<ResolvedQuery, Error> {
     let chars: &[char] = &chars_buf;
     let mut i = 0usize;
     let skip_ws = |i: &mut usize| {
-        while *i < chars.len() && chars[*i].is_whitespace() {
+        while *i < chars.len() && is_css_whitespace(chars[*i]) {
             *i += 1;
         }
     };
@@ -8762,7 +8769,7 @@ fn css_media_parse_one(t: &str) -> Result<ResolvedQuery, Error> {
     };
     let take_ident = |i: &mut usize| -> String {
         let start = *i;
-        while *i < chars.len() && !chars[*i].is_whitespace() && chars[*i] != '(' {
+        while *i < chars.len() && !is_css_whitespace(chars[*i]) && chars[*i] != '(' {
             *i += 1;
         }
         chars[start..*i].iter().collect()

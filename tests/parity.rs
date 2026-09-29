@@ -4099,6 +4099,20 @@ fn an_nbsp_in_a_value_is_not_whitespace_where_dart_rejects_it() {
             "a { c: 1px\u{a0}+ 2px }\n",
             "1px\u{a0} and 2px have incompatible units.",
         ),
+        (
+            "@media screen { a { @at-root (\u{a0}without: media) { b { c: d } } } }\n",
+            "Expected \"with\" or \"without\".",
+        ),
+        ("\u{a0}() { c: d }\n", "expected selector."),
+        ("#{\"\u{a0}()\"} { c: d }\n", "expected selector."),
+        (
+            "a { @at-root (with\u{a0}: rule) { b { c: d } } }\n",
+            "Expected \"with\" or \"without\".",
+        ),
+        (
+            "a { @at-root (\u{a0}with: rule) { b { c: d } } }\n",
+            "Expected \"with\" or \"without\".",
+        ),
     ] {
         let err = compile(scss, &Options::default()).unwrap_err().to_string();
         assert!(err.contains(message), "{scss}: {err}");
@@ -4188,6 +4202,331 @@ fn a_non_ascii_character_starts_a_name() {
         let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
         assert_eq!(css, compressed, "{scss} (compressed)");
     }
+}
+
+#[test]
+fn the_evaluator_trims_css_whitespace_only() {
+    // The evaluator trimmed, split and collapsed resolved text with Rust's Unicode
+    // whitespace: an NBSP at the edge of a selector, a property name, an
+    // `@at-root` query, an `if()` condition or an interpolated media query was
+    // dropped or read as a separator. dart-sass reads it as a name character.
+    // Outputs are dart-sass 1.104.1's. Offline.
+    for (scss, expanded, compressed) in [
+        (
+            "#{\"\u{a0}\"} { c: d }\n",
+            "@charset \"UTF-8\";\n\u{a0} {\n  c: d;\n}",
+            "\u{feff}\u{a0}{c:d}",
+        ),
+        (
+            "\u{a0}1a { c: d }\n",
+            "@charset \"UTF-8\";\n\u{a0}1a {\n  c: d;\n}",
+            "\u{feff}\u{a0}1a{c:d}",
+        ),
+        (
+            "#{\"\u{a0}1a\"} { c: d }\n",
+            "@charset \"UTF-8\";\n\u{a0}1a {\n  c: d;\n}",
+            "\u{feff}\u{a0}1a{c:d}",
+        ),
+        (
+            "a { b: { \u{a0}--x: y } }\n",
+            "@charset \"UTF-8\";\na {\n  b-\u{a0}--x: y;\n}",
+            "\u{feff}a{b-\u{a0}--x:y}",
+        ),
+        (
+            "a { c: calc(1px + #{\"a\u{a0}b\"}) }\n",
+            "@charset \"UTF-8\";\na {\n  c: calc(1px + a\u{a0}b);\n}",
+            "\u{feff}a{c:calc(1px + a\u{a0}b)}",
+        ),
+        (
+            "a { c: calc(1px * #{\"a\u{a0}b\"}) }\n",
+            "@charset \"UTF-8\";\na {\n  c: calc(1px * a\u{a0}b);\n}",
+            "\u{feff}a{c:calc(1px*a\u{a0}b)}",
+        ),
+        (
+            "a { c: calc(#{\"\u{a0}calc(1px)\"}) }\n",
+            "@charset \"UTF-8\";\na {\n  c: calc(\u{a0}calc(1px));\n}",
+            "\u{feff}a{c:calc(\u{a0}calc(1px))}",
+        ),
+        (
+            "\u{a0},b { c: d }\n",
+            "@charset \"UTF-8\";\n\u{a0}, b {\n  c: d;\n}",
+            "\u{feff}\u{a0},b{c:d}",
+        ),
+        (
+            "#{\"\u{a0},b\"} { c: d }\n",
+            "@charset \"UTF-8\";\n\u{a0}, b {\n  c: d;\n}",
+            "\u{feff}\u{a0},b{c:d}",
+        ),
+        (
+            "a,\u{a0}\nb { c: d }\n",
+            "@charset \"UTF-8\";\na, \u{a0} b {\n  c: d;\n}",
+            "\u{feff}a,\u{a0} b{c:d}",
+        ),
+        (
+            "a\u{a0}\n,b { c: d }\n",
+            "@charset \"UTF-8\";\na\u{a0},\nb {\n  c: d;\n}",
+            "\u{feff}a\u{a0},b{c:d}",
+        ),
+        (
+            "a\n\u{a0},b { c: d }\n",
+            "@charset \"UTF-8\";\na \u{a0},\nb {\n  c: d;\n}",
+            "\u{feff}a \u{a0},b{c:d}",
+        ),
+        (
+            ".a >\u{a0}{ &.b { c: d } }\n",
+            "@charset \"UTF-8\";\n.a > \u{a0}.b {\n  c: d;\n}",
+            "\u{feff}.a>\u{a0}.b{c:d}",
+        ),
+        (
+            ".a > #{\"\u{a0}\"} { &.b { c: d } }\n",
+            "@charset \"UTF-8\";\n.a > \u{a0}.b {\n  c: d;\n}",
+            "\u{feff}.a>\u{a0}.b{c:d}",
+        ),
+        (
+            "a { c\u{a0}: d }\n",
+            "@charset \"UTF-8\";\na {\n  c\u{a0}: d;\n}",
+            "\u{feff}a{c\u{a0}:d}",
+        ),
+        (
+            "a {\u{a0}c: d }\n",
+            "@charset \"UTF-8\";\na {\n  \u{a0}c: d;\n}",
+            "\u{feff}a{\u{a0}c:d}",
+        ),
+        (
+            "a { #{\"\u{a0}c\"}: d }\n",
+            "@charset \"UTF-8\";\na {\n  \u{a0}c: d;\n}",
+            "\u{feff}a{\u{a0}c:d}",
+        ),
+        (
+            "a { #{\"c\u{a0}\"}: d }\n",
+            "@charset \"UTF-8\";\na {\n  c\u{a0}: d;\n}",
+            "\u{feff}a{c\u{a0}:d}",
+        ),
+        (
+            "a { @at-root (without:\u{a0}rule) { b { c: d } } }\n",
+            "a b {\n  c: d;\n}",
+            "a b{c:d}",
+        ),
+        (
+            "a { @at-root (without: x\u{a0}rule) { b { c: d } } }\n",
+            "a b {\n  c: d;\n}",
+            "a b{c:d}",
+        ),
+        (
+            "@media screen { a { @at-root (without: media\u{a0}) { b { c: d } } } }\n",
+            "@media screen {\n  a b {\n    c: d;\n  }\n}",
+            "@media screen{a b{c:d}}",
+        ),
+        (
+            "a { b: if(css(x\u{a0}y): 1; else: 2) }\n",
+            "@charset \"UTF-8\";\na {\n  b: if(css(x\u{a0}y): 1; else: 2);\n}",
+            "\u{feff}a{b:if(css(x\u{a0}y): 1; else: 2)}",
+        ),
+        (
+            "a { b: if(css(\u{a0}): 1; else: 2) }\n",
+            "@charset \"UTF-8\";\na {\n  b: if(css(\u{a0}): 1; else: 2);\n}",
+            "\u{feff}a{b:if(css(\u{a0}): 1; else: 2)}",
+        ),
+        (
+            "a { b: if(css(x \u{a0} y): 1; else: 2) }\n",
+            "@charset \"UTF-8\";\na {\n  b: if(css(x \u{a0} y): 1; else: 2);\n}",
+            "\u{feff}a{b:if(css(x \u{a0} y): 1; else: 2)}",
+        ),
+        (
+            "a { b: if(foo(\u{a0}x): 1; else: 2) }\n",
+            "@charset \"UTF-8\";\na {\n  b: if(foo(\u{a0}x): 1; else: 2);\n}",
+            "\u{feff}a{b:if(foo(\u{a0}x): 1; else: 2)}",
+        ),
+        (
+            "a\u{a0} { &-b { c: d } }\n",
+            "@charset \"UTF-8\";\na\u{a0}-b {\n  c: d;\n}",
+            "\u{feff}a\u{a0}-b{c:d}",
+        ),
+        (
+            "a\u{a0} { & b { c: d } }\n",
+            "@charset \"UTF-8\";\na\u{a0} b {\n  c: d;\n}",
+            "\u{feff}a\u{a0} b{c:d}",
+        ),
+        (
+            "a { b: calc(1px + #{\"\u{a0}var(--x)\"}) }\n",
+            "@charset \"UTF-8\";\na {\n  b: calc(1px + \u{a0}var(--x));\n}",
+            "\u{feff}a{b:calc(1px + \u{a0}var(--x))}",
+        ),
+        (
+            "a { b: calc(#{\"\u{a0}var(--x)\"} 1px) }\n",
+            "@charset \"UTF-8\";\na {\n  b: calc(\u{a0}var(--x) 1px);\n}",
+            "\u{feff}a{b:calc(\u{a0}var(--x) 1px)}",
+        ),
+        (
+            "a { b: calc(#{\"\u{a0}env(x)\"} 1px) }\n",
+            "@charset \"UTF-8\";\na {\n  b: calc(\u{a0}env(x) 1px);\n}",
+            "\u{feff}a{b:calc(\u{a0}env(x) 1px)}",
+        ),
+        (
+            "@media #{\"\u{a0}screen\"} { a { b: c } }\n",
+            "@charset \"UTF-8\";\n@media \u{a0}screen {\n  a {\n    b: c;\n  }\n}",
+            "\u{feff}@media \u{a0}screen{a{b:c}}",
+        ),
+        (
+            "@media #{\"screen\u{a0}\"} { a { b: c } }\n",
+            "@charset \"UTF-8\";\n@media screen\u{a0} {\n  a {\n    b: c;\n  }\n}",
+            "\u{feff}@media screen\u{a0}{a{b:c}}",
+        ),
+        (
+            "@media #{\"screen,\u{a0}print\"} { a { b: c } }\n",
+            "@charset \"UTF-8\";\n@media screen, \u{a0}print {\n  a {\n    b: c;\n  }\n}",
+            "\u{feff}@media screen,\u{a0}print{a{b:c}}",
+        ),
+        (
+            "@media #{\"not\u{a0}screen\"} { a { b: c } }\n",
+            "@charset \"UTF-8\";\n@media not\u{a0}screen {\n  a {\n    b: c;\n  }\n}",
+            "\u{feff}@media not\u{a0}screen{a{b:c}}",
+        ),
+        (
+            "a { @at-root (without: \"\u{a0}rule\") { b { c: d } } }\n",
+            "a b {\n  c: d;\n}",
+            "a b{c:d}",
+        ),
+        (
+            "a { b: calc(calc(#{\"a\u{a0}b\"})) }\n",
+            "@charset \"UTF-8\";\na {\n  b: calc(a\u{a0}b);\n}",
+            "\u{feff}a{b:calc(a\u{a0}b)}",
+        ),
+        (
+            "a { b: calc(1px + calc(#{\"a\u{a0}b\"})) }\n",
+            "@charset \"UTF-8\";\na {\n  b: calc(1px + a\u{a0}b);\n}",
+            "\u{feff}a{b:calc(1px + a\u{a0}b)}",
+        ),
+        (
+            "a { b: calc(calc(#{\"\u{a0}var(--x)\"})) }\n",
+            "@charset \"UTF-8\";\na {\n  b: calc(\u{a0}var(--x));\n}",
+            "\u{feff}a{b:calc(\u{a0}var(--x))}",
+        ),
+        (
+            "a { b: calc(1px + calc(#{\"\u{a0}var(--x)\"})) }\n",
+            "@charset \"UTF-8\";\na {\n  b: calc(1px + \u{a0}var(--x));\n}",
+            "\u{feff}a{b:calc(1px + \u{a0}var(--x))}",
+        ),
+        (
+            "@media #{\"(\u{a0}not (a))\"} { a { b: c } }\n",
+            "@charset \"UTF-8\";\n@media (\u{a0}not (a)) {\n  a {\n    b: c;\n  }\n}",
+            "\u{feff}@media(\u{a0}not (a)){a{b:c}}",
+        ),
+        (
+            "@media #{\"(not (a)\u{a0})\"} { a { b: c } }\n",
+            "@charset \"UTF-8\";\n@media not (a)\u{a0} {\n  a {\n    b: c;\n  }\n}",
+            "\u{feff}@media not (a)\u{a0}{a{b:c}}",
+        ),
+        (
+            "a { \u{a0}--x: 1 + 1 }\n",
+            "@charset \"UTF-8\";\na {\n  \u{a0}--x: 2;\n}",
+            "\u{feff}a{\u{a0}--x:2}",
+        ),
+        (
+            "a { b: \u{a0}var(--x) }\n",
+            "@charset \"UTF-8\";\na {\n  b: \u{a0}var(--x);\n}",
+            "\u{feff}a{b:\u{a0}var(--x)}",
+        ),
+        (
+            "a { #{\"\u{a0}b\"}: 1 + 1 }\n",
+            "@charset \"UTF-8\";\na {\n  \u{a0}b: 2;\n}",
+            "\u{feff}a{\u{a0}b:2}",
+        ),
+        (
+            "a { #{\"b\u{a0}\"}: 1 + 1 }\n",
+            "@charset \"UTF-8\";\na {\n  b\u{a0}: 2;\n}",
+            "\u{feff}a{b\u{a0}:2}",
+        ),
+        (
+            "a { b: { \u{a0}c: d } }\n",
+            "@charset \"UTF-8\";\na {\n  b-\u{a0}c: d;\n}",
+            "\u{feff}a{b-\u{a0}c:d}",
+        ),
+        (
+            "\u{a0}1a, b { c: d }\n",
+            "@charset \"UTF-8\";\n\u{a0}1a, b {\n  c: d;\n}",
+            "\u{feff}\u{a0}1a,b{c:d}",
+        ),
+        (
+            "b, \u{a0}1a { c: d }\n",
+            "@charset \"UTF-8\";\nb, \u{a0}1a {\n  c: d;\n}",
+            "\u{feff}b,\u{a0}1a{c:d}",
+        ),
+        (
+            "a { b: { \u{a0}--c: d } }\n",
+            "@charset \"UTF-8\";\na {\n  b-\u{a0}--c: d;\n}",
+            "\u{feff}a{b-\u{a0}--c:d}",
+        ),
+        (
+            "a { b: { \u{a0}--c: { d: e } } }\n",
+            "@charset \"UTF-8\";\na {\n  b-\u{a0}--c-d: e;\n}",
+            "\u{feff}a{b-\u{a0}--c-d:e}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+}
+
+#[test]
+fn the_plain_css_evaluator_trims_css_whitespace_only() {
+    // The same in a plain-CSS stylesheet: an unknown at-rule's prelude, a
+    // `@keyframes` name, a selector part and a media query keep an NBSP at
+    // either end, at every nesting depth. Outputs are dart-sass 1.104.1's.
+    let opts = Options::default().with_syntax(sasso::Syntax::Css);
+    let compressed_opts = Options::default()
+        .with_syntax(sasso::Syntax::Css)
+        .with_style(OutputStyle::Compressed);
+    for (css, expanded, compressed) in [
+        ("@foo bar\u{a0} { a { b: c } }\n", "@charset \"UTF-8\";\n@foo bar\u{a0} {\n  a {\n    b: c;\n  }\n}", "\u{feff}@foo bar\u{a0}{a{b:c}}"),
+        ("@foo \u{a0}bar { a { b: c } }\n", "@charset \"UTF-8\";\n@foo \u{a0}bar {\n  a {\n    b: c;\n  }\n}", "\u{feff}@foo \u{a0}bar{a{b:c}}"),
+        ("a { @foo bar\u{a0} { b: c } }\n", "@charset \"UTF-8\";\n@foo bar\u{a0} {\n  a {\n    b: c;\n  }\n}", "\u{feff}@foo bar\u{a0}{a{b:c}}"),
+        ("a { @foo \u{a0}bar { b: c } }\n", "@charset \"UTF-8\";\n@foo \u{a0}bar {\n  a {\n    b: c;\n  }\n}", "\u{feff}@foo \u{a0}bar{a{b:c}}"),
+        ("a { b { @foo bar\u{a0} { c: d } } }\n", "@charset \"UTF-8\";\na {\n  b {\n    @foo bar\u{a0} {\n      c: d;\n    }\n  }\n}", "\u{feff}a{b{@foo bar\u{a0}{c:d}}}"),
+        ("@keyframes k\u{a0} { from { a: b } }\n", "@charset \"UTF-8\";\n@keyframes k\u{a0} {\n  from {\n    a: b;\n  }\n}", "\u{feff}@keyframes k\u{a0}{from{a:b}}"),
+        ("@keyframes \u{a0}k { from { a: b } }\n", "@charset \"UTF-8\";\n@keyframes \u{a0}k {\n  from {\n    a: b;\n  }\n}", "\u{feff}@keyframes \u{a0}k{from{a:b}}"),
+        ("a { @keyframes k\u{a0} { from { a: b } } }\n", "@charset \"UTF-8\";\n@keyframes k\u{a0} {\n  from {\n    a: b;\n  }\n}", "\u{feff}@keyframes k\u{a0}{from{a:b}}"),
+        ("a { b { @keyframes k\u{a0} { from { a: b } } } }\n", "@charset \"UTF-8\";\na {\n  b {\n    @keyframes k\u{a0} {\n      from {\n        a: b;\n      }\n    }\n  }\n}", "\u{feff}a{b{@keyframes k\u{a0}{from{a:b}}}}"),
+        ("\u{a0}a, b { c: d }\n", "@charset \"UTF-8\";\n\u{a0}a, b {\n  c: d;\n}", "\u{feff}\u{a0}a,b{c:d}"),
+        ("a\u{a0}, b { c: d }\n", "@charset \"UTF-8\";\na\u{a0}, b {\n  c: d;\n}", "\u{feff}a\u{a0},b{c:d}"),
+        ("a, \u{a0}b { c: d }\n", "@charset \"UTF-8\";\na, \u{a0}b {\n  c: d;\n}", "\u{feff}a,\u{a0}b{c:d}"),
+        ("x { \u{a0}a, b { c: d } }\n", "@charset \"UTF-8\";\nx {\n  \u{a0}a, b {\n    c: d;\n  }\n}", "\u{feff}x{\u{a0}a,b{c:d}}"),
+        ("@media screen\u{a0} { a { b: c } }\n", "@charset \"UTF-8\";\n@media screen\u{a0} {\n  a {\n    b: c;\n  }\n}", "\u{feff}@media screen\u{a0}{a{b:c}}"),
+        ("@media \u{a0}screen { a { b: c } }\n", "@charset \"UTF-8\";\n@media \u{a0}screen {\n  a {\n    b: c;\n  }\n}", "\u{feff}@media \u{a0}screen{a{b:c}}"),
+        ("@media (a\u{a0}) { a { b: c } }\n", "@charset \"UTF-8\";\n@media (a\u{a0}) {\n  a {\n    b: c;\n  }\n}", "\u{feff}@media(a\u{a0}){a{b:c}}"),
+        ("@supports (a: b\u{a0}) { a { b: c } }\n", "@charset \"UTF-8\";\n@supports (a: b\u{a0}) {\n  a {\n    b: c;\n  }\n}", "\u{feff}@supports(a: b\u{a0}){a{b:c}}"),
+        ("\u{a0}> a { b: c }\n", "@charset \"UTF-8\";\n\u{a0} > a {\n  b: c;\n}", "\u{feff}\u{a0}>a{b:c}"),
+        ("a >\u{a0} { b: c }\n", "@charset \"UTF-8\";\na > \u{a0} {\n  b: c;\n}", "\u{feff}a>\u{a0}{b:c}"),
+        ("x { \u{a0}> a { b: c } }\n", "@charset \"UTF-8\";\nx {\n  \u{a0} > a {\n    b: c;\n  }\n}", "\u{feff}x{\u{a0}>a{b:c}}"),
+        ("x { a >\u{a0} { b: c } }\n", "@charset \"UTF-8\";\nx {\n  a > \u{a0} {\n    b: c;\n  }\n}", "\u{feff}x{a>\u{a0}{b:c}}"),
+        ("\u{a0}+ a { b: c }\n", "@charset \"UTF-8\";\n\u{a0} + a {\n  b: c;\n}", "\u{feff}\u{a0}+a{b:c}"),
+        ("a { \u{a0}b: c }\n", "@charset \"UTF-8\";\na {\n  \u{a0}b: c;\n}", "\u{feff}a{\u{a0}b:c}"),
+        ("a { b\u{a0}: c }\n", "@charset \"UTF-8\";\na {\n  b\u{a0}: c;\n}", "\u{feff}a{b\u{a0}:c}"),
+        ("a { b { \u{a0}c: d } }\n", "@charset \"UTF-8\";\na {\n  b {\n    \u{a0}c: d;\n  }\n}", "\u{feff}a{b{\u{a0}c:d}}"),
+        ("@supports \u{a0}(a: b) { x { y: z } }\n", "@charset \"UTF-8\";\n@supports \u{a0}(a: b) {\n  x {\n    y: z;\n  }\n}", "\u{feff}@supports \u{a0}(a: b){x{y:z}}"),
+        ("x { @supports \u{a0}(a: b) { y { z: w } } }\n", "@charset \"UTF-8\";\n@supports \u{a0}(a: b) {\n  x {\n    y {\n      z: w;\n    }\n  }\n}", "\u{feff}@supports \u{a0}(a: b){x{y{z:w}}}"),
+        ("@keyframes \u{a0}k { from { a: b } }\n", "@charset \"UTF-8\";\n@keyframes \u{a0}k {\n  from {\n    a: b;\n  }\n}", "\u{feff}@keyframes \u{a0}k{from{a:b}}"),
+        ("@keyframes k\u{a0} { from { a: b } }\n", "@charset \"UTF-8\";\n@keyframes k\u{a0} {\n  from {\n    a: b;\n  }\n}", "\u{feff}@keyframes k\u{a0}{from{a:b}}"),
+        ("x { @keyframes k\u{a0} { from { a: b } } }\n", "@charset \"UTF-8\";\n@keyframes k\u{a0} {\n  from {\n    a: b;\n  }\n}", "\u{feff}@keyframes k\u{a0}{from{a:b}}"),
+        ("@foo \u{a0}bar { x { y: z } }\n", "@charset \"UTF-8\";\n@foo \u{a0}bar {\n  x {\n    y: z;\n  }\n}", "\u{feff}@foo \u{a0}bar{x{y:z}}"),
+        ("@foo bar\u{a0} { x { y: z } }\n", "@charset \"UTF-8\";\n@foo bar\u{a0} {\n  x {\n    y: z;\n  }\n}", "\u{feff}@foo bar\u{a0}{x{y:z}}"),
+        ("x { @foo bar\u{a0} { y: z } }\n", "@charset \"UTF-8\";\n@foo bar\u{a0} {\n  x {\n    y: z;\n  }\n}", "\u{feff}@foo bar\u{a0}{x{y:z}}"),
+        ("@foo bar\u{a0};\n", "@charset \"UTF-8\";\n@foo bar\u{a0};", "\u{feff}@foo bar\u{a0}"),
+        ("@media x { @foo bar\u{a0} { y { z: w } } }\n", "@charset \"UTF-8\";\n@media x {\n  @foo bar\u{a0} {\n    y {\n      z: w;\n    }\n  }\n}", "\u{feff}@media x{@foo bar\u{a0}{y{z:w}}}"),
+        ("@media x { @foo \u{a0}bar { y { z: w } } }\n", "@charset \"UTF-8\";\n@media x {\n  @foo \u{a0}bar {\n    y {\n      z: w;\n    }\n  }\n}", "\u{feff}@media x{@foo \u{a0}bar{y{z:w}}}"),
+        ("@media x { @keyframes k\u{a0} { from { a: b } } }\n", "@charset \"UTF-8\";\n@media x {\n  @keyframes k\u{a0} {\n    from {\n      a: b;\n    }\n  }\n}", "\u{feff}@media x{@keyframes k\u{a0}{from{a:b}}}"),
+        ("@media x { @keyframes \u{a0}k { from { a: b } } }\n", "@charset \"UTF-8\";\n@media x {\n  @keyframes \u{a0}k {\n    from {\n      a: b;\n    }\n  }\n}", "\u{feff}@media x{@keyframes \u{a0}k{from{a:b}}}"),
+        ("@foo x { @bar y\u{a0} { z: w } }\n", "@charset \"UTF-8\";\n@foo x {\n  @bar y\u{a0} {\n    z: w;\n  }\n}", "\u{feff}@foo x{@bar y\u{a0}{z:w}}"),
+    ] {
+        assert_eq!(compile(css, &opts).unwrap(), expanded, "{css}");
+        assert_eq!(compile(css, &compressed_opts).unwrap(), compressed, "{css} (compressed)");
+    }
+    // An NBSP is not the whitespace a media query's `and` must be followed by.
+    let css = "@media screen and\u{a0}(a) { a { b: c } }\n";
+    let err = compile(css, &opts).unwrap_err().to_string();
+    assert!(err.contains("expected \"{\"."), "{err}");
 }
 
 #[test]
