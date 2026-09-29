@@ -409,12 +409,44 @@ fn member_of(module: &str, member: &str) -> Option<&'static Fun> {
 /// member NAME would give those dart's Sass-function message where dart gives
 /// the calculation one.
 fn global_member(name: &str) -> Option<&'static Fun> {
+    if CALCULATION_GLOBALS.contains(&name) {
+        return None;
+    }
     ["math", "color", "list", "map", "selector", "string", "meta"]
         .iter()
         .filter_map(|m| members_of(m))
         .flat_map(|m| m.functions.iter())
         .find(|f| f.global == Some(name))
 }
+
+/// The globals dart treats as CSS CALCULATIONS rather than as Sass functions,
+/// so a named argument there is a different sentence entirely:
+/// `Keyword arguments can't be used with calculations.` (#215).
+///
+/// They must stay out of [`global_member`], or the module member's declaration
+/// answers for the calculation and reports `No parameter named $x.` — which is
+/// what this rewrite did until a review caught it (r4128303276). The MODULE
+/// spelling is unaffected and verified as usual: `math.sin(1, $nope: 2)` is
+/// `No parameter named $nope.` in both compilers, and only the bare `sin(…)`
+/// is a calculation.
+///
+/// Measured 2026-09-28 by asking dart `<g>(…, $nope: 9)` for every global that
+/// names a math function. The split is not "is it a CSS math function" — these
+/// answer with the calculation sentence:
+///
+/// ```text
+///   acos asin atan atan2 clamp cos exp hypot log mod pow rem sign sin sqrt tan
+/// ```
+///
+/// …while `abs`, `ceil`, `floor`, `max`, `min`, `percentage`, `round`, `unit`,
+/// `unitless`, `random` and `comparable` answer as Sass functions and are
+/// verified here. `clamp`, `exp`, `mod`, `rem` and `sign` are in the list for
+/// completeness: they name no member with a global alias, so they never reach
+/// this lookup anyway.
+const CALCULATION_GLOBALS: &[&str] = &[
+    "acos", "asin", "atan", "atan2", "clamp", "cos", "exp", "hypot", "log", "mod", "pow", "rem", "sign",
+    "sin", "sqrt", "tan",
+];
 
 /// dart's arity check (`ArgumentDeclaration.verify`): only POSITIONAL
 /// arguments count against a function's parameter count, and the moment any
@@ -1612,6 +1644,40 @@ mod tests {
         super::verify_args(f, &pos_args, &named, super::Pos::NONE)
             .err()
             .map(|e| e.message)
+    }
+
+    /// A calculation global is not verified against its module member's
+    /// declaration.
+    ///
+    /// dart answers `sin(1, $nope: 2)` with
+    /// `Keyword arguments can't be used with calculations.` and
+    /// `math.sin(1, $nope: 2)` with `No parameter named $nope.`. Verifying the
+    /// bare `sin(…)` against `math.sin`'s parameters produced the second
+    /// sentence for the first call — a wrong message this rewrite introduced
+    /// where there had been none, which a review caught (r4128303276). The
+    /// right sentence is #215's; keeping these out leaves the previous
+    /// behaviour untouched rather than replacing one wrong answer with another.
+    #[test]
+    fn a_calculation_global_is_not_verified_as_a_member() {
+        // Measured: the sixteen dart answers about calculations.
+        for name in super::CALCULATION_GLOBALS {
+            assert!(
+                super::global_member(name).is_none(),
+                "the global `{name}` is a calculation, not a Sass function",
+            );
+        }
+        // …and the eleven it answers about as Sass functions still are
+        // verified, so the exclusion did not take the whole family with it.
+        for name in ["abs", "ceil", "floor", "percentage", "unit", "unitless", "random"] {
+            assert!(
+                super::global_member(name).is_some(),
+                "the global `{name}` is a Sass function and must be verified",
+            );
+        }
+        // The MODULE spelling is unaffected — that is the whole distinction.
+        for name in ["sin", "sqrt", "hypot", "log", "pow", "atan2"] {
+            assert!(super::member_of("math", name).unwrap().params.is_some());
+        }
     }
 
     /// `saturate` names two DIFFERENT declarations, and only one of them is
