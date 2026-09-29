@@ -11,6 +11,22 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Performance
+
+- **The npm CLI compiles a batch on the native addon's own threads.** A
+  parallel run used to start a pool of Node workers, and each one re-imported
+  the CLI and the engine before compiling anything: 50–65 ms per worker, paid
+  on every run. On the native engine the whole batch now goes to the addon in
+  one call; it compiles on Rust threads and hands results back as they
+  finish, so writing one file overlaps compiling the next. Warnings, errors
+  and `--update` output are still printed in command-line order, and
+  `--stop-on-error` stops claiming new files at the first failure. Source maps
+  come back pre-serialised rather than rebuilt in JavaScript. On Lichess's
+  stylesheets on Linux/x86_64, a full dev build (296 entries) drops from 265 to
+  182 ms and a production build (148) from 240 to 170 ms; output is
+  byte-identical. The wasm engine, stdin input and `-j 1` keep their old
+  paths.
+
 ## [0.19.0] - 2026-09-28
 
 _Watch mode on both front ends: the binary gains `--watch` and `--update`
