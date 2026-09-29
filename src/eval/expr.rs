@@ -158,7 +158,8 @@ impl<'a> Evaluator<'a> {
                 // Every complex selector is a SPACE LIST of compounds (dart:
                 // `meta.type-of(list.nth(&, 1))` is `list` even for `.foo`).
                 let compounds: Vec<Value> = complex
-                    .split_whitespace()
+                    .split(is_css_whitespace)
+                    .filter(|c| !c.is_empty())
                     .map(|c| {
                         Value::Str(SassStr {
                             text: c.to_string().into(),

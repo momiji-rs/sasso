@@ -3509,6 +3509,47 @@ fn an_attribute_selector_is_validated_with_css_whitespace() {
 }
 
 #[test]
+fn the_parent_selector_value_splits_compounds_at_css_whitespace() {
+    // `&` in SassScript is a comma list of space lists, one item per
+    // compound. The compounds were split with `str::split_whitespace`, which
+    // splits at an NBSP too, so `.a\u{a0}b` was two compounds and a plain
+    // `x: &` printed it `.a b`. Byte-matched to dart-sass 1.104.1, in both
+    // styles. Offline.
+    for (scss, expanded, compressed) in [
+        (
+            "@use \"sass:list\"; .a\u{a0}b .c { x: list.length(list.nth(&, 1)); }\n",
+            "@charset \"UTF-8\";\n.a\u{a0}b .c {\n  x: 2;\n}",
+            "\u{feff}.a\u{a0}b .c{x:2}",
+        ),
+        (
+            "@use \"sass:list\"; .a\u{a0}b { x: list.length(list.nth(&, 1)); }\n",
+            "@charset \"UTF-8\";\n.a\u{a0}b {\n  x: 1;\n}",
+            "\u{feff}.a\u{a0}b{x:1}",
+        ),
+        (
+            ".a\u{a0}b .c { x: &; }\n",
+            "@charset \"UTF-8\";\n.a\u{a0}b .c {\n  x: .a\u{a0}b .c;\n}",
+            "\u{feff}.a\u{a0}b .c{x:.a\u{a0}b .c}",
+        ),
+        (
+            "@use \"sass:list\"; .a \u{a0}b { x: list.nth(list.nth(&, 1), 2); }\n",
+            "@charset \"UTF-8\";\n.a \u{a0}b {\n  x: \u{a0}b;\n}",
+            "\u{feff}.a \u{a0}b{x:\u{a0}b}",
+        ),
+        (
+            "@use \"sass:list\"; .a\u{a0}b .c { x: list.nth(list.nth(&, 1), 1); }\n",
+            "@charset \"UTF-8\";\n.a\u{a0}b .c {\n  x: .a\u{a0}b;\n}",
+            "\u{feff}.a\u{a0}b .c{x:.a\u{a0}b}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+}
+
+#[test]
 fn a_missing_attribute_operator_has_darts_message() {
     // dart's attribute-operator reader has its own sentences: capitalized
     // `Expected "]".` when no operator follows the name, and `expected "=".`

@@ -43,7 +43,9 @@ Conformance is tracked separately as a ratchet against the official
   and `:nth-child(2n \u{a0}+ 1)` compiled to `2n+1` where dart rejects it.
   The attribute validator was the mirror image: it rejected the valid
   `[a=x\u{a0}yz]` (reading `yz` as a modifier) and accepted the invalid
-  `[a="x"\u{a0}]`.
+  `[a="x"\u{a0}]`. And `&` in SassScript split its compounds at an NBSP:
+  `list.length(list.nth(&, 1))` was 2 for `.a\u{a0}b`, and `x: &` printed
+  `.a b`.
 
 - **A missing attribute operator gets dart's message.** `[a b]` failed with
   `expected "]".`; dart says `Expected "]".` when no operator follows the
