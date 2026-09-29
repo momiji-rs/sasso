@@ -335,6 +335,18 @@ impl<'a> Evaluator<'a> {
             keyword.insert(norm, v);
         }
         let positional_count = positional.len();
+        // dart's first rule, ahead of the missing-argument check below and of
+        // the leftover-name one further down: a parameter given both ways. The
+        // binder used to let the positional win silently and then report the
+        // keyword as unrecognized, so `f(1, $a: 2)` blamed `$a` — a real
+        // parameter — for not being one (#147).
+        if let Some(msg) = crate::builtins::argument_passed_twice(
+            params.params.iter().map(|p| p.name.as_str()),
+            positional_count,
+            |name| keyword.contains_key(name),
+        ) {
+            return Err(self.error_at_call_with_declaration(msg, decl));
+        }
         let mut pos_iter = positional.into_iter().enumerate();
         for param in &params.params {
             let (val, span) = if let Some((i, v)) = pos_iter.next() {

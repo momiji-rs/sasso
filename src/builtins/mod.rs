@@ -243,10 +243,8 @@ pub(super) fn require<'v>(
 /// built-in that checked at all — had rule 3 first and so answered the wrong
 /// one (#62).
 ///
-/// dart has a FOURTH rule above all of these,
-/// `Argument $x was passed both by position and by name.`, which sasso
-/// implements nowhere (#147). It is deliberately absent here: adding it to the
-/// built-ins alone would leave the user-callable path disagreeing with them.
+/// Rule 0 is [`argument_passed_twice`], which outranks all three and is shared
+/// with the user-callable binder so the two paths cannot disagree (#147).
 ///
 /// A REST parameter is verified elsewhere. dart binds the rest and runs the
 /// body, and only complains about a leftover named argument afterwards —
@@ -258,6 +256,15 @@ fn verify_args(f: &Fun, pos_args: &[Value], named: &[(String, Value)], pos: Pos)
         return Ok(()); // see `no_sig`
     };
     let declared = f.named_params();
+
+    // 0. A parameter given both ways outranks everything below — measured, and
+    //    `list.nth(1, 2, 3, $list: 4)` is the duplicate rather than the
+    //    overflow (#147).
+    if let Some(msg) = argument_passed_twice(declared.iter().copied(), pos_args.len(), |name| {
+        named.iter().any(|(n, _)| canonical_name(n).as_ref() == name)
+    }) {
+        return Err(Error::at(msg, pos));
+    }
 
     // 1. A required parameter with no value, positional or named. dart names
     //    the FIRST one.
@@ -293,6 +300,57 @@ fn verify_args(f: &Fun, pos_args: &[Value], named: &[(String, Value)], pos: Pos)
         return Err(err);
     }
     Ok(())
+}
+
+/// dart's FIRST argument rule: a parameter given both positionally and by name.
+/// The message, or `None` when no parameter was.
+///
+/// ```text
+///   Argument $x was passed both by position and by name.
+/// ```
+///
+/// Shared by the built-in verifier and the user-callable binder, because it
+/// outranks every other argument error in both — measured 2026-09-29 against
+/// dart-sass 1.104.1:
+///
+/// ```text
+///   list.nth(1 2 3, $list: 4)               the duplicate, though $n is missing too
+///   list.nth(1, 2, 3, $list: 4)             the duplicate, not the overflow
+///   list.nth(1 2 3, 1, $list: 4, $nope: 5)  the duplicate, not the unknown name
+/// ```
+///
+/// Three details that a plausible implementation gets wrong:
+///
+/// - **No plural.** `f(1, 2, 3, $a: 9, $b: 9, $c: 9)` names `$a` alone, where
+///   the unrecognized-name rule would have said `$a, $b or $c`.
+/// - **DECLARATION order, not written order.** `f(1, 2, $b: 9, $a: 9)` also
+///   names `$a`.
+/// - **The call's spelling does not matter.** `string.slice("abc", 1, 2,
+///   $start_at: 9)` is reported against the declaration's `$start-at`, so the
+///   comparison canonicalizes the ARGUMENT and the message quotes the
+///   PARAMETER.
+///
+/// The declared name is NOT canonicalized here, and that is deliberate rather
+/// than an omission: both callers already hand over canonical names — the
+/// member table declares every parameter with dashes
+/// (`every_declared_parameter_is_already_canonical`), and a user `@function`'s
+/// parameters are normalized by the parser. Canonicalizing again could not
+/// change an answer, and two mutation cases proved it by surviving.
+///
+/// It leaves one divergence, pre-existing and wider than this rule: dart quotes
+/// a declaration written `$a_b` as `$a_b` and sasso as `$a-b`, because sasso has
+/// already lost the original spelling — `Missing argument $a-b.` differs the
+/// same way. Recorded separately; nothing here can fix it.
+pub(crate) fn argument_passed_twice<'a>(
+    declared: impl IntoIterator<Item = &'a str>,
+    positional: usize,
+    was_named: impl Fn(&str) -> bool,
+) -> Option<String> {
+    declared
+        .into_iter()
+        .take(positional)
+        .find(|name| was_named(name))
+        .map(|name| format!("Argument ${name} was passed both by position and by name."))
 }
 
 /// dart's message for names that match no parameter, or `None` when there are
@@ -1502,6 +1560,73 @@ mod tests {
     /// the verifier moving together. Every line was read from dart-sass 1.104.1
     /// on 2026-09-28 (#62).
     const ARGUMENT_ERRORS: &[(&str, &str, &[&str], &str)] = &[
+        // rule 0 (passed twice) outranks every one of them, including a
+        // missing argument, an overflow and an unrecognized name in the same
+        // call.
+        (
+            "list",
+            "nth",
+            &["1 2 3", "1", "$list: 4"],
+            "Argument $list was passed both by position and by name.",
+        ),
+        (
+            "list",
+            "nth",
+            &["1 2 3", "$list: 4"],
+            "Argument $list was passed both by position and by name.",
+        ),
+        (
+            "list",
+            "nth",
+            &["1", "2", "3", "$list: 4"],
+            "Argument $list was passed both by position and by name.",
+        ),
+        (
+            "list",
+            "nth",
+            &["1 2 3", "1", "$list: 4", "$nope: 5"],
+            "Argument $list was passed both by position and by name.",
+        ),
+        // …in DECLARATION order, not the order the names were written, and
+        // never in the plural — the unrecognized-name rule would have said
+        // `$string, $start-at or $end-at`.
+        (
+            "string",
+            "slice",
+            &["\"abc\"", "1", "2", "$end-at: 9", "$string: \"z\""],
+            "Argument $string was passed both by position and by name.",
+        ),
+        (
+            "string",
+            "slice",
+            &[
+                "\"abc\"",
+                "1",
+                "2",
+                "$string: \"z\"",
+                "$start-at: 9",
+                "$end-at: 9",
+            ],
+            "Argument $string was passed both by position and by name.",
+        ),
+        // The comparison canonicalizes and the message does NOT: a `$start_at`
+        // argument is reported against the declaration's `$start-at`.
+        (
+            "string",
+            "slice",
+            &["\"abc\"", "1", "2", "$start_at: 9"],
+            "Argument $start-at was passed both by position and by name.",
+        ),
+        // A name matching a parameter BEFORE a rest parameter is a duplicate.
+        // (The rest's own name being no parameter at all is a case for
+        // `tests/parity.rs` instead: for a rest signature the leftover check is
+        // a POST-check, so `verify_args` alone answers `None` for it by design.)
+        (
+            "map",
+            "get",
+            &["(a: 1)", "a", "$map: (b: 2)"],
+            "Argument $map was passed both by position and by name.",
+        ),
         // rule 1 (missing) outranks rule 3 (unrecognized), which is the
         // ordering `list.rs`'s old copy got backwards.
         ("list", "nth", &["$nope: 1"], "Missing argument $list."),
@@ -1596,6 +1721,13 @@ mod tests {
             "join",
             &["(1)", "(2)", "$separator: comma", "$bracketed: true"],
         ),
+        // NOT a duplicate: the positional arguments stopped before this
+        // parameter, so naming it is the only way it was passed. `take(n)` in
+        // `argument_passed_twice` is what makes this pass, and dropping it
+        // rejects every optional argument given by name.
+        ("string", "slice", &["\"abcd\"", "$start-at: 2"]),
+        ("list", "nth", &["$list: 1 2 3", "$n: 1"]),
+        ("color", "mix", &["red", "blue", "$weight: 10%"]),
         // A REST parameter takes any number of positional arguments, so rule 2
         // must not fire for one.
         ("map", "get", &["(a: 1)", "a"]),
@@ -1644,6 +1776,24 @@ mod tests {
         super::verify_args(f, &pos_args, &named, super::Pos::NONE)
             .err()
             .map(|e| e.message)
+    }
+
+    /// Every parameter in the table is spelled canonically, which is what lets
+    /// [`argument_passed_twice`] compare a declared name without canonicalizing
+    /// it. A row written `$start_at` would make that comparison miss.
+    #[test]
+    fn every_declared_parameter_is_already_canonical() {
+        for (module, _) in DART_FUNCTIONS {
+            for name in module_function_names(module) {
+                let f = super::member_of(module, name).unwrap();
+                for param in f.params.unwrap_or(&[]) {
+                    assert!(
+                        !param.contains('_'),
+                        "sass:{module}.{name}'s ${param} is not canonical",
+                    );
+                }
+            }
+        }
     }
 
     /// A calculation global is not verified against its module member's
