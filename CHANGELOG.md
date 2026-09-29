@@ -138,6 +138,13 @@ Conformance is tracked separately as a ratchet against the official
   same messages, and `:x(a@b)`, an unknown pseudo whose argument dart does
   not parse as a selector, compiles.
 
+- **A form feed separates compound selectors.** Like a space, it starts a
+  new compound, so `a { b` + form feed + `& { … } }` compiles to `b a` and
+  `selector.nest("a", "b\c &")` returns `b a`, where both said `"&" may only
+  used at the beginning of a compound selector.`. In plain CSS, a
+  placeholder after a form feed is now dart's `Placeholder selectors aren't
+  allowed in plain CSS.`
+
 - **An interpolated media condition may not mix `and` and `or`.**
   `@media #{"(a) and (b) or (c)"}` compiled to `(a) or (b) or (c)`; it is an
   error, as it is when written out. A word other than the first operator now

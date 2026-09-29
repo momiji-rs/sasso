@@ -5891,7 +5891,8 @@ fn validate_plain_css_selector(part: &str, top_level: bool) -> Result<(), Error>
             '[' | '(' => depth += 1,
             ']' | ')' => depth -= 1,
             _ if depth > 0 => {}
-            ' ' | '\t' | '\n' | '\r' | '>' | '+' | '~' => at_compound_start = true,
+            '>' | '+' | '~' => at_compound_start = true,
+            c if is_css_whitespace(c) => at_compound_start = true,
             '%' if at_compound_start => {
                 return Err(Error::unpositioned(
                     "Placeholder selectors aren't allowed in plain CSS.",
@@ -6141,7 +6142,7 @@ fn validate_selector_tail(sel: &str, has_parent: bool) -> Result<(), Error> {
                     at_compound_start = false;
                 }
                 _ if depth > 0 => {}
-                ' ' | '\t' | '\n' | '\r' => at_compound_start = true,
+                c if is_css_whitespace(c) => at_compound_start = true,
                 '>' | '+' | '~' => at_compound_start = true,
                 '&' => {
                     if !at_compound_start {

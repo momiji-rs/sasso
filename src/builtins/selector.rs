@@ -391,7 +391,8 @@ fn validate_parent_placement(s: &str) -> Result<(), Error> {
                 at_compound_start = false;
             }
             _ if depth > 0 => {}
-            ' ' | '\t' | '\n' | '\r' | '>' | '+' | '~' => at_compound_start = true,
+            '>' | '+' | '~' => at_compound_start = true,
+            c if is_css_whitespace(c) => at_compound_start = true,
             '&' => {
                 if !at_compound_start {
                     return Err(Error::unpositioned(

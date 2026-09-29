@@ -14473,3 +14473,79 @@ fn a_character_that_starts_no_selector_is_an_error() {
     assert!(msg.starts_with("Error: expected \")\".\n"), "{msg}");
     assert!(msg.contains("error in interpolated output"), "{msg}");
 }
+
+#[test]
+fn a_form_feed_separates_compound_selectors() {
+    // A form feed is CSS whitespace, so it starts a new compound: a `&` after
+    // it is at the start of one, and so is a plain CSS placeholder. The
+    // compound-start checks listed space, tab, LF and CR only. Outputs and
+    // messages are dart-sass 1.104.1's. Offline.
+    for (scss, expanded, compressed) in [
+        ("a { b\u{c}& { c: d } }\n", "b a {\n  c: d;\n}", "b a{c:d}"),
+        ("a { b\u{c}&-x { c: d } }\n", "b a-x {\n  c: d;\n}", "b a-x{c:d}"),
+        (
+            "a { :is(b)\u{c}& { c: d } }\n",
+            ":is(b) a {\n  c: d;\n}",
+            ":is(b) a{c:d}",
+        ),
+        ("a { [b]\u{c}& { c: d } }\n", "[b] a {\n  c: d;\n}", "[b] a{c:d}"),
+        ("a { b\u{c}\u{c}& { c: d } }\n", "b a {\n  c: d;\n}", "b a{c:d}"),
+        (
+            "@use \"sass:selector\"; a { b: selector.nest(\"a\", \"b\\c &\") }\n",
+            "a {\n  b: b a;\n}",
+            "a{b:b a}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.nest(\"a\", \"b\\c&\") }\n",
+            "a {\n  b: b a;\n}",
+            "a{b:b a}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.nest(\"a\", \"b\\c &-x\") }\n",
+            "a {\n  b: b a-x;\n}",
+            "a{b:b a-x}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+    for (scss, message) in [
+        (
+            "a\u{c}&-x { c: d }\n",
+            "A top-level selector may not contain a parent selector with a suffix.",
+        ),
+        (
+            "a { b& { c: d } }\n",
+            "\"&\" may only used at the beginning of a compound selector.",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.nest(\"a\", \"b&\") }\n",
+            "\"&\" may only used at the beginning of a compound selector.",
+        ),
+    ] {
+        let err = compile(scss, &Options::default()).unwrap_err();
+        assert_eq!(err.message, message, "{scss}");
+    }
+    let css_opts = Options::default().with_syntax(sasso::Syntax::Css);
+    let css = compile("a { b\u{c}& { c: d } }\n", &css_opts).unwrap();
+    assert_eq!(css, "a {\n  b & {\n    c: d;\n  }\n}");
+    for (css, message) in [
+        (
+            "a\u{c}%b { c: d }\n",
+            "Placeholder selectors aren't allowed in plain CSS.",
+        ),
+        (
+            "a\u{c}\u{c}%b { c: d }\n",
+            "Placeholder selectors aren't allowed in plain CSS.",
+        ),
+        (
+            "a\u{c}&x { c: d }\n",
+            "Parent selectors can't have suffixes in plain CSS.",
+        ),
+    ] {
+        let err = compile(css, &css_opts).unwrap_err();
+        assert_eq!(err.message, message, "{css} (plain CSS)");
+    }
+}
