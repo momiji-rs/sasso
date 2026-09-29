@@ -8284,7 +8284,7 @@ fn copy_name(chars: &[char], i: &mut usize, out: &mut String) {
                         *i += 1;
                         digits += 1;
                     }
-                    if *i < chars.len() && chars[*i].is_whitespace() {
+                    if *i < chars.len() && is_css_whitespace(chars[*i]) {
                         *i += 1;
                     }
                 }

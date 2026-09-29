@@ -3150,6 +3150,65 @@ fn non_ascii_whitespace_in_a_selector_is_not_a_separator() {
 }
 
 #[test]
+fn a_hex_escape_is_not_closed_by_a_non_ascii_space() {
+    // A hex escape swallows ONE trailing CSS whitespace as its delimiter. An
+    // NBSP is not one, so it is the next character of the name — sasso ate it
+    // as the delimiter and deleted it (`\61\u{a0}b` came out `ab`). Every
+    // selector path decides this separately (the normalizer, the parser, the
+    // compressor), so each shape here goes through a different one.
+    // Byte-matched to dart-sass 1.104.1, in both styles. Offline.
+    for (scss, expanded, compressed) in [
+        (
+            "\\61\u{a0}b { c: d }\n",
+            "a\u{a0}b {\n  c: d;\n}\n",
+            "a\u{a0}b{c:d}",
+        ),
+        (
+            ".a\\9\u{a0}b { c: d }\n",
+            ".a\\9 \u{a0}b {\n  c: d;\n}\n",
+            ".a\\9 \u{a0}b{c:d}",
+        ),
+        (
+            "#\\31\u{a0}x { c: d }\n",
+            "#\\31 \u{a0}x {\n  c: d;\n}\n",
+            "#\\31 \u{a0}x{c:d}",
+        ),
+        (
+            ".a\\39\u{2003}x { c: d }\n",
+            ".a9\u{2003}x {\n  c: d;\n}\n",
+            ".a9\u{2003}x{c:d}",
+        ),
+        (
+            ".a\\9\u{a0}b > c { c: d }\n",
+            ".a\\9 \u{a0}b > c {\n  c: d;\n}\n",
+            ".a\\9 \u{a0}b>c{c:d}",
+        ),
+        (
+            ":not(.a\\9\u{a0}b) { c: d }\n",
+            ":not(.a\\9 \u{a0}b) {\n  c: d;\n}\n",
+            ":not(.a\\9 \u{a0}b){c:d}",
+        ),
+        (
+            ".a\\9\u{a0}b { &:hover { c: d } }\n",
+            ".a\\9 \u{a0}b:hover {\n  c: d;\n}\n",
+            ".a\\9 \u{a0}b:hover{c:d}",
+        ),
+        (
+            ".a\\9\u{a0}b { @extend .q; }\n.q { e: f }\n",
+            ".q, .a\\9 \u{a0}b {\n  e: f;\n}\n",
+            ".q,.a\\9 \u{a0}b{e:f}",
+        ),
+    ] {
+        assert_eq!(ours(scss), format!("@charset \"UTF-8\";\n{expanded}"), "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, format!("\u{feff}{compressed}"), "{scss} (compressed)");
+    }
+    // A CSS-whitespace delimiter is still consumed, and a tab still counts.
+    assert_eq!(ours(".a\\9 b { c: d }\n"), ".a\\9 b {\n  c: d;\n}\n");
+    assert_eq!(ours(".a\\9\tb { c: d }\n"), ".a\\9 b {\n  c: d;\n}\n");
+}
+
+#[test]
 fn a_non_finite_hue_never_reaches_the_hsl_conversion() {
     // The hsl -> rgb arithmetic has no answer for a non-finite hue: it picks
     // the fallback sector and hands back a NaN component. dart-sass 1.104.0

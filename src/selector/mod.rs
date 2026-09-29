@@ -262,7 +262,7 @@ fn escape_end(chars: &[char], start: usize) -> usize {
     // One whitespace character closes the run (and CRLF counts as one).
     match chars.get(i) {
         Some('\r') if chars.get(i + 1) == Some(&'\n') => i + 2,
-        Some(c) if c.is_whitespace() => i + 1,
+        Some(&c) if is_css_whitespace(c) => i + 1,
         _ => i,
     }
 }

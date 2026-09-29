@@ -206,7 +206,7 @@ pub(crate) fn canonicalize_ident(raw: &str) -> String {
                     digits += 1;
                 }
                 // One optional trailing whitespace terminates the escape.
-                if i < chars.len() && chars[i].is_whitespace() {
+                if i < chars.len() && is_css_whitespace(chars[i]) {
                     i += 1;
                 }
                 let cp = u32::from_str_radix(&hex, 16).unwrap_or(0);
@@ -271,7 +271,7 @@ fn read_ident(chars: &[char], i: &mut usize) -> Option<String> {
                     *i += 1;
                     digits += 1;
                 }
-                if *i < chars.len() && chars[*i].is_whitespace() {
+                if *i < chars.len() && is_css_whitespace(chars[*i]) {
                     s.push(chars[*i]);
                     *i += 1;
                 }

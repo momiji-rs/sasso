@@ -31,6 +31,10 @@ Conformance is tracked separately as a ratchet against the official
   — which is also what a quoted value turned into once it had lost its quotes
   and was re-parsed, as a parent selector or by `@extend`.
 
+  A hex escape made it worse: its one delimiter must be CSS whitespace, but an
+  NBSP was accepted as the delimiter and so deleted — `\61\u{a0}b` came out
+  `ab`, and `.a\9\u{a0}b` lost its NBSP.
+
 ## [0.19.2] - 2026-09-29
 
 _Faster again through the npm package, on the paths 0.19.1 missed. The wasm
