@@ -51,7 +51,8 @@ Conformance is tracked separately as a ratchet against the official
   rest of the selector list.** The top-level comma splitter did not skip
   strings, so after `[a="("]` every following comma looked nested: `[a="("],
   b { &.c {} }` produced `[a="("], b.c`, and `@extend` from that rule failed
-  with "The target selector was not found".
+  with "The target selector was not found". A pseudo argument's list had the
+  same flaw: `selector.is-superselector(':is([a="("], b)', "b")` was false.
 
 - **Whitespace inside a quoted string in a selector is kept.** The
   normalizer collapsed it like the whitespace between compounds, so

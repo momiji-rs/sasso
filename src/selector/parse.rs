@@ -587,6 +587,8 @@ fn is_ident_char(c: char) -> bool {
 }
 
 /// Split `s` on the top-level (paren/bracket depth 0) occurrences of `sep`.
+/// A quoted string is one token: a paren, bracket or `sep` inside it is
+/// content.
 pub(super) fn split_top(s: &str, sep: char) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -599,6 +601,19 @@ pub(super) fn split_top(s: &str, sep: char) -> Vec<String> {
                 cur.push(c);
                 if let Some(n) = chars.next() {
                     cur.push(n);
+                }
+            }
+            '"' | '\'' => {
+                cur.push(c);
+                while let Some(d) = chars.next() {
+                    cur.push(d);
+                    if d == '\\' {
+                        if let Some(n) = chars.next() {
+                            cur.push(n);
+                        }
+                    } else if d == c {
+                        break;
+                    }
                 }
             }
             '(' => {

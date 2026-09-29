@@ -3749,6 +3749,68 @@ fn the_parent_selector_value_splits_only_at_top_level_whitespace() {
 }
 
 #[test]
+fn a_pseudo_selector_list_is_not_split_inside_a_quoted_string() {
+    // The selector module's list splitter counted parens and brackets but not
+    // quotes, so a paren inside a string inside a pseudo argument changed the
+    // depth and the argument's commas stopped being list separators: compressed
+    // output kept `:is([a=")"], b)`'s space, and `is-superselector` could not
+    // see `b` in the list. Byte-matched to dart-sass 1.104.1, in both styles.
+    // Offline.
+    for (scss, expanded, compressed) in [
+        (
+            ":is([a=\")\"], b) { c: d }\n",
+            ":is([a=\")\"], b) {\n  c: d;\n}",
+            ":is([a=\")\"],b){c:d}",
+        ),
+        (
+            ":is([a=\")\"],\n  b) { c: d }\n",
+            ":is([a=\")\"],\nb) {\n  c: d;\n}",
+            ":is([a=\")\"],b){c:d}",
+        ),
+        (
+            ":not([a=\")\"], b) { c: d }\n",
+            ":not([a=\")\"], b) {\n  c: d;\n}",
+            ":not([a=\")\"],b){c:d}",
+        ),
+        (
+            ":is([a=\"(\"], b) { c: d }\n",
+            ":is([a=\"(\"], b) {\n  c: d;\n}",
+            ":is([a=\"(\"],b){c:d}",
+        ),
+        (
+            ":is([a=\"(\"], b) { @extend .q; } .q { e: f }\n",
+            ".q, :is([a=\"(\"], b) {\n  e: f;\n}",
+            ".q,:is([a=\"(\"],b){e:f}",
+        ),
+        (
+            ".q { e: f } :is([a=\"(\"], b) { @extend .q; }\n",
+            ".q, :is([a=\"(\"], b) {\n  e: f;\n}",
+            ".q,:is([a=\"(\"],b){e:f}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.is-superselector(':is([a=\"(\"], b)', \"b\"); }\n",
+            "a {\n  b: true;\n}",
+            "a{b:true}",
+        ),
+        (
+            ":nth-child(2n of [a=\"(\"], b) { c: d }\n",
+            ":nth-child(2n of [a=\"(\"], b) {\n  c: d;\n}",
+            ":nth-child(2n of [a=\"(\"],b){c:d}",
+        ),
+        (
+            ".a { &:is([a=\"(\"], b) { c: d } }\n",
+            ".a:is([a=\"(\"], b) {\n  c: d;\n}",
+            ".a:is([a=\"(\"],b){c:d}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+}
+
+#[test]
 fn a_missing_attribute_operator_has_darts_message() {
     // dart's attribute-operator reader has its own sentences: capitalized
     // `Expected "]".` when no operator follows the name, and `expected "=".`
