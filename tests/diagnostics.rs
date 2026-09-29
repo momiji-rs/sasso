@@ -304,6 +304,24 @@ fn a_host_function_verifies_its_arguments_before_running() {
             "bar(1, 2, $x: 9)",
             "Argument $x was passed both by position and by name.",
         ),
+        // The signature keeps its own spelling, so the lookup has to
+        // canonicalize the DECLARED name and the message must not — the two
+        // halves dart agrees on, and the only caller that exercises either.
+        (
+            "foo($a_b, $c)",
+            "foo(1, 2, $a-b: 9)",
+            "Argument $a_b was passed both by position and by name.",
+        ),
+        (
+            "foo($a_b, $c)",
+            "foo(1, 2, $a_b: 9)",
+            "Argument $a_b was passed both by position and by name.",
+        ),
+        (
+            "foo($a-b, $c)",
+            "foo(1, 2, $a_b: 9)",
+            "Argument $a-b was passed both by position and by name.",
+        ),
     ] {
         let (ran, out) = run(sig, call);
         assert!(

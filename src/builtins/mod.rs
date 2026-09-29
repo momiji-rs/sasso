@@ -330,17 +330,27 @@ fn verify_args(f: &Fun, pos_args: &[Value], named: &[(String, Value)], pos: Pos)
 ///   comparison canonicalizes the ARGUMENT and the message quotes the
 ///   PARAMETER.
 ///
-/// The declared name is NOT canonicalized here, and that is deliberate rather
-/// than an omission: both callers already hand over canonical names — the
-/// member table declares every parameter with dashes
-/// (`every_declared_parameter_is_already_canonical`), and a user `@function`'s
-/// parameters are normalized by the parser. Canonicalizing again could not
-/// change an answer, and two mutation cases proved it by surviving.
+/// The comparison canonicalizes the declared name and the message quotes it as
+/// WRITTEN. Two of the three callers cannot tell the difference — the member
+/// table declares every parameter with dashes
+/// (`every_declared_parameter_is_already_canonical`) and a user `@function`'s
+/// parameters are normalized by the parser — which is why an earlier draft left
+/// the canonicalization out and two mutation cases survived.
 ///
-/// It leaves one divergence, pre-existing and wider than this rule: dart quotes
-/// a declaration written `$a_b` as `$a_b` and sasso as `$a-b`, because sasso has
-/// already lost the original spelling — `Missing argument $a-b.` differs the
-/// same way. Recorded separately; nothing here can fix it.
+/// `host_fn` is the caller that needs it: `Options::with_function("foo($a_b)")`
+/// keeps the signature's own spelling, so without canonicalizing
+/// `foo(1, $a-b: 2)` reads as no duplicate at all. dart agrees on both halves,
+/// measured 2026-09-29 through its JS API:
+///
+/// ```text
+///   foo($a_b)  foo(1, $a-b: 2)   Argument $a_b was passed both by position and by name.
+///   foo($a-b)  foo(1, $a_b: 2)   Argument $a-b was passed both by position and by name.
+/// ```
+///
+/// A user `@function` cannot reach that: its declaration's original spelling is
+/// gone by the time any message exists, so `@function f($a_b)` is quoted `$a-b`
+/// where dart quotes `$a_b` — wider than this rule (`Missing argument` differs
+/// the same way) and recorded separately.
 pub(crate) fn argument_passed_twice<'a>(
     declared: impl IntoIterator<Item = &'a str>,
     positional: usize,
@@ -349,7 +359,7 @@ pub(crate) fn argument_passed_twice<'a>(
     declared
         .into_iter()
         .take(positional)
-        .find(|name| was_named(name))
+        .find(|name| was_named(canonical_name(name).as_ref()))
         .map(|name| format!("Argument ${name} was passed both by position and by name."))
 }
 
@@ -1778,9 +1788,10 @@ mod tests {
             .map(|e| e.message)
     }
 
-    /// Every parameter in the table is spelled canonically, which is what lets
-    /// [`argument_passed_twice`] compare a declared name without canonicalizing
-    /// it. A row written `$start_at` would make that comparison miss.
+    /// Every parameter in the table is spelled canonically, so the built-in path
+    /// never exercises [`argument_passed_twice`]'s canonicalization of the
+    /// DECLARED name — only `host_fn`'s signatures do, and this is what says so.
+    /// A row written `$start_at` would make the table depend on it silently.
     #[test]
     fn every_declared_parameter_is_already_canonical() {
         for (module, _) in DART_FUNCTIONS {
