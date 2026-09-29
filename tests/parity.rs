@@ -14814,3 +14814,102 @@ fn a_type_error_names_its_parameter_and_spells_its_value_dart_s_way() {
         }
     }
 }
+
+#[test]
+fn a_pseudo_name_is_read_with_its_escapes() {
+    // dart reads a pseudo's name as an identifier, decoding its escapes,
+    // before it decides whether the argument is a selector list:
+    // `:\69s(a$b)` is `:is(a$b)`, and `:\78(a$b)` is the unknown `:x(a$b)`,
+    // whose argument is a declaration value. sasso scanned the raw name, so
+    // it reported every `$` in these as "expected selector.", and a `(` after
+    // an escaped name was not an argument list at all. Outputs and messages
+    // are dart-sass 1.104.1's. Offline.
+    for (scss, expanded, compressed) in [
+        (":\\78(a$b) { c: d }\n", ":x(a$b) {\n  c: d;\n}", ":x(a$b){c:d}"),
+        (":\\78(a@b) { c: d }\n", ":x(a@b) {\n  c: d;\n}", ":x(a@b){c:d}"),
+        (":\\x(a$b) { c: d }\n", ":x(a$b) {\n  c: d;\n}", ":x(a$b){c:d}"),
+        (":\\78 (a$b) { c: d }\n", ":x(a$b) {\n  c: d;\n}", ":x(a$b){c:d}"),
+        (
+            ":\\49S(a$b) { c: d }\n",
+            ":IS(a$b) {\n  c: d;\n}",
+            ":IS(a$b){c:d}",
+        ),
+        (":\\69s(a) { c: d }\n", ":is(a) {\n  c: d;\n}", ":is(a){c:d}"),
+        (":\\78(a) { c: d }\n", ":x(a) {\n  c: d;\n}", ":x(a){c:d}"),
+        (
+            ":a\\(b(c) { d: e }\n",
+            ":a\\(b(c) {\n  d: e;\n}",
+            ":a\\(b(c){d:e}",
+        ),
+        (
+            ":\\31 a(b) { c: d }\n",
+            ":\\31 a(b) {\n  c: d;\n}",
+            ":\\31 a(b){c:d}",
+        ),
+        (
+            ":-webkit-any(a) { b: c }\n",
+            ":-webkit-any(a) {\n  b: c;\n}",
+            ":-webkit-any(a){b:c}",
+        ),
+        (
+            "::part(a) { b: c }\n",
+            "::part(a) {\n  b: c;\n}",
+            "::part(a){b:c}",
+        ),
+        (
+            ":not(a):is(b) { c: d }\n",
+            ":not(a):is(b) {\n  c: d;\n}",
+            ":not(a):is(b){c:d}",
+        ),
+        (
+            ":\u{e9}(b) { c: d }\n",
+            "@charset \"UTF-8\";\n:\u{e9}(b) {\n  c: d;\n}",
+            "\u{feff}:\u{e9}(b){c:d}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+    for (scss, message) in [
+        (":\\69s(a$b) { c: d }\n", "expected \")\"."),
+        (":i\\73(a$b) { c: d }\n", "expected \")\"."),
+        (":\\6e ot(a$b) { c: d }\n", "expected \")\"."),
+        (":\\69 s(a$b) { c: d }\n", "expected \")\"."),
+        (":-webkit-\\69s(a$b) { c: d }\n", "expected \")\"."),
+        ("::\\73lotted(a$b) { c: d }\n", "expected \")\"."),
+        (":n\\th-child(2n of a$b) { c: d }\n", "expected \")\"."),
+        (":\\78(a$b):is(c$d) { c: d }\n", "expected \")\"."),
+        ("\\:\\78(a$b) { c: d }\n", "expected selector."),
+        ("\\:b(c) { d: e }\n", "expected selector."),
+        ("a\\:b(c) { d: e }\n", "expected selector."),
+        (":\\78  (a) { c: d }\n", "expected selector."),
+        ("a(b) { c: d }\n", "expected selector."),
+        ("a (b) { c: d }\n", "expected selector."),
+        ("[a](b) { c: d }\n", "expected selector."),
+        (":not(a)(b) { c: d }\n", "expected selector."),
+        (":a:b(c)(d) { e: f }\n", "expected selector."),
+        (":a b(c) { d: e }\n", "expected selector."),
+        (":a.b(c) { d: e }\n", "expected selector."),
+        (":a[b](c) { d: e }\n", "expected selector."),
+        (":a, b(c) { d: e }\n", "expected selector."),
+        ("a:(b) { c: d }\n", "Expected identifier."),
+        ("a::(b) { c: d }\n", "Expected identifier."),
+        (":1a(b) { c: d }\n", "Expected identifier."),
+        (":\\\n(a$b) { c: d }\n", "Expected escape sequence."),
+        (":a\\\n(b) { c: d }\n", "Expected escape sequence."),
+    ] {
+        let err = compile(scss, &Options::default()).unwrap_err();
+        assert_eq!(err.message, message, "{scss}");
+    }
+    let err = compile(
+        "@use \"sass:selector\"; a { b: selector.parse(\":\\\\69s(a$b)\") }\n",
+        &Options::default(),
+    )
+    .unwrap_err();
+    assert_eq!(err.message, "$selector: expected \")\".");
+    let css_opts = Options::default().with_syntax(sasso::Syntax::Css);
+    let css = compile(":\\78(a$b) { c: d }\n", &css_opts).unwrap();
+    assert_eq!(css, ":x(a$b) {\n  c: d;\n}");
+}

@@ -5923,22 +5923,6 @@ fn validate_plain_css_selector(part: &str, top_level: bool) -> Result<(), Error>
     Ok(())
 }
 
-/// Whether the `(` at `chars[open]` directly follows a pseudo-class/element
-/// name: a non-empty run of identifier characters whose preceding character is
-/// a `:` (`:not(`, `::-webkit-any(`).
-fn paren_follows_pseudo(chars: &[char], open: usize) -> bool {
-    let mut j = open;
-    while j > 0 {
-        let p = chars[j - 1];
-        if p.is_ascii_alphanumeric() || p == '-' || p == '_' || (p as u32) >= 0x80 {
-            j -= 1;
-        } else {
-            break;
-        }
-    }
-    j < open && j > 0 && chars[j - 1] == ':'
-}
-
 fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
     // A selector list whose FIRST comma part is empty is dart-sass's
     // "expected selector." (`,b`); later empty parts (`a,,b`, trailing `a,`)
@@ -6105,6 +6089,8 @@ fn validate_selector_tail(sel: &str, has_parent: bool) -> Result<(), Error> {
         // immediately after any combinator or whitespace).
         let mut at_compound_start = true;
         let mut depth = 0i32; // inside `[...]` or `(...)`
+                              // Where the last pseudo name's argument list opens.
+        let mut pseudo_paren = None;
         while i < chars.len() {
             let c = chars[i];
             match c {
@@ -6126,13 +6112,30 @@ fn validate_selector_tail(sel: &str, has_parent: bool) -> Result<(), Error> {
                     at_compound_start = false;
                     continue;
                 }
+                // A pseudo's name is an identifier, escapes included
+                // (`:\69s(…)`); a `(` right after it opens its argument.
+                ':' if depth == 0 => {
+                    let name_start = i + 1 + usize::from(chars.get(i + 1) == Some(&':'));
+                    let mut j = name_start;
+                    while ident_body_at(chars, j) {
+                        let Some((_, next)) = ident_char_at(chars, j) else {
+                            break;
+                        };
+                        j = next;
+                    }
+                    if j > name_start && chars.get(j) == Some(&'(') {
+                        pseudo_paren = Some(j);
+                    }
+                    i = j;
+                    at_compound_start = false;
+                    continue;
+                }
                 // A top-level `(` is only valid as a pseudo-class/element
-                // argument list (`:not(…)`, `::part(…)`): the run of identifier
-                // characters directly before it must follow a `:`. Anywhere
-                // else — compound start, after a plain identifier, after `]` —
+                // argument list (`:not(…)`, `::part(…)`). Anywhere else —
+                // compound start, after a plain identifier, after `]` —
                 // dart-sass reports "expected selector." (`a(b)`, `a (b)`).
                 '(' if depth == 0 => {
-                    if !paren_follows_pseudo(chars, i) {
+                    if pseudo_paren != Some(i) {
                         return Err(Error::unpositioned("expected selector."));
                     }
                     depth += 1;
@@ -7176,10 +7179,15 @@ fn stray_in_selector(cs: &[char], base: usize, in_arg: bool) -> Option<(usize, S
             ':' => {
                 empty = false;
                 let element = cs.get(i + 1) == Some(&':');
-                let name_start = i + 1 + usize::from(element);
-                let mut j = name_start;
-                while cs.get(j).is_some_and(|&c| is_name_char(c)) {
-                    j += 1;
+                // The name is matched decoded: `:\69s()` is `:is()`.
+                let mut name = String::new();
+                let mut j = i + 1 + usize::from(element);
+                while ident_body_at(cs, j) {
+                    let Some((c, next)) = ident_char_at(cs, j) else {
+                        break;
+                    };
+                    name.push(c);
+                    j = next;
                 }
                 i = j;
                 if cs.get(j) != Some(&'(') {
@@ -7189,7 +7197,6 @@ fn stray_in_selector(cs: &[char], base: usize, in_arg: bool) -> Option<(usize, S
                 // selector list, `nth-child` after its `of`.
                 let close = crate::selector::matching_paren(cs, j);
                 let inner = &cs[j + 1..close.min(cs.len())];
-                let name: String = cs[name_start..j].iter().collect();
                 let unvendored = crate::selector::unvendor(&name);
                 let found = if element {
                     (unvendored == "slotted").then(|| stray_in_selector(inner, base + j + 1, true))

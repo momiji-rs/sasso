@@ -145,6 +145,13 @@ Conformance is tracked separately as a ratchet against the official
   placeholder after a form feed is now dart's `Placeholder selectors aren't
   allowed in plain CSS.`
 
+- **A pseudo's name is read with its escapes.** dart decodes the name before
+  it picks the argument's grammar, so `:\78(a$b)` is the unknown `:x(a$b)`,
+  whose argument is a declaration value, and `:\69s(a$b)` is `:is(a$b)`,
+  whose argument must be a selector. sasso scanned the raw name: the first
+  was "expected selector." and the second got the wrong message. `:\78 (a)`
+  now opens an argument list too, as the escape's delimiter is not a space.
+
 - **An interpolated media condition may not mix `and` and `or`.**
   `@media #{"(a) and (b) or (c)"}` compiled to `(a) or (b) or (c)`; it is an
   error, as it is when written out. A word other than the first operator now
