@@ -85,7 +85,7 @@ fn as_map(v: &Value, fname: &str, pos: Pos) -> Result<Vec<(Value, Value)>, Error
         // The empty list doubles as the empty map.
         Value::List(l) if l.items.is_empty() => Ok(Vec::new()),
         other => Err(Error::at(
-            format!("$map: {} is not a map for `{fname}`.", other.to_css(false)),
+            format!("$map: {} is not a map for `{fname}`.", other.to_inspect_message()),
             pos,
         )),
     }

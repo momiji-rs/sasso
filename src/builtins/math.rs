@@ -1204,16 +1204,12 @@ fn as_num(v: &Value, pname: Option<&str>, pos: Pos) -> Result<Number, Error> {
         Value::Number(n) => Ok(n.clone()),
         Value::Str(s) if !s.quoted => match const_number(&s.text) {
             Some(n) => Ok(n),
-            // An unquoted string prints as itself here, not through
-            // `to_inspect_message`, because it IS its own spelling — dart's
-            // `infinity`-or-else path reports the text it read.
-            None => Err(Error::at(
-                match pname {
-                    Some(p) => format!("${p}: {} is not a number.", s.text),
-                    None => format!("{} is not a number.", s.text),
-                },
-                pos,
-            )),
+            // Through the shared formatter like every other branch: an unquoted
+            // string is not its own spelling. dart escapes and normalizes it —
+            // `math.abs(unquote("\e000"))` is `$number: \e000 is not a
+            // number.`, and a decoded newline prints as a space rather than
+            // breaking the sentence across two lines.
+            None => Err(super::type_error(v, pname, "number", pos)),
         },
         other => Err(super::type_error(other, pname, "number", pos)),
     }

@@ -12844,6 +12844,15 @@ fn a_type_error_names_its_parameter_and_spells_its_value_dart_s_way() {
         "map.merge((1 2), (a: b))",
         "meta.calc-name((1 2))",
         "meta.feature-exists((1 2))",
+        // An unquoted string is NOT its own spelling: dart escapes a private-use
+        // character and prints a decoded newline as a space, where the raw text
+        // emitted the character and broke the sentence across two lines. These
+        // reach the calc-constant fallback (`infinity`/`pi`/… or else an error),
+        // which was the one branch not going through the shared formatter.
+        "math.abs(unquote(\"\\e000\"))",
+        "math.abs(unquote(\"a\\a b\"))",
+        "math.abs(foo)",
+        "math.ceil(unquote(\"\\e000\"))",
         "rgb(list.append((), \"x\"), 2, 3)",
         "rgb((\"x\",), 2, 3)",
         "rgb((), 2, 3)",
@@ -12942,6 +12951,29 @@ fn a_type_error_names_its_parameter_and_spells_its_value_dart_s_way() {
             }
             None => panic!("expected dart-sass to reject:\n{scss}"),
         }
+    }
+
+    // `sass:map`'s shared coercion cannot be byte-compared yet: it appends a
+    // `` for `<function>` `` suffix dart never writes (#230). The VALUE in front
+    // of that suffix is this rule, so assert that half alone — it erased `null`
+    // and dropped a list's parentheses until the review caught that only the
+    // SIBLING helper had been routed through the shared spelling.
+    for (expr, want) in [
+        ("map.get(null, a)", "$map: null is not a map"),
+        ("map.keys(null)", "$map: null is not a map"),
+        ("map.has-key(null, a)", "$map: null is not a map"),
+        ("map.values((1 2))", "$map: (1 2) is not a map"),
+        ("map.get(list.append((), \"x\"), a)", "$map: (\"x\") is not a map"),
+    ] {
+        let scss = format!("{USES}a {{b: {expr}}}\n");
+        let ours = compile(&scss, &Options::default())
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
+        assert!(
+            ours.trim_start_matches("Error: ").starts_with(want),
+            "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- wanted prefix ---\n{want}\n"
+        );
     }
 
     // `@for`'s bounds are the same rule outside the built-ins: they printed the

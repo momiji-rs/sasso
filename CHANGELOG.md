@@ -134,10 +134,10 @@ Conformance is tracked separately as a ratchet against the official
   a keyword splat with a non-string key writes the wrong sentence, from two more
   copies of one rule (#233); and two calculation diagnostics carry an older dart
   wording, again from two copies each (#234). The value inside #233 is right now
-  — it is the sentence around it that is not. One of the five is not a message
-  at all: `string.split` rejects a unit on `$limit` that dart ignores outright
-  (#235), so a stylesheet dart compiles fails, and the unit check hides the two
-  errors that should have fired in its place.
+  — it is the sentence around it that is not. A sixth is not a message at all:
+  `string.split` rejects a unit on `$limit` that dart ignores outright (#235), so
+  a stylesheet dart compiles fails, and the unit check hides the two errors that
+  should have fired in its place.
 
   Measured against dart-sass 1.104.1 over 336 comparisons, and on sass-spec with
   `--check-stderr --stderr-arg=--no-unicode`: **67 more cases** print dart's
