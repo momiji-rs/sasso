@@ -3509,6 +3509,27 @@ fn an_attribute_selector_is_validated_with_css_whitespace() {
 }
 
 #[test]
+fn a_missing_attribute_operator_has_darts_message() {
+    // dart's attribute-operator reader has its own sentences: capitalized
+    // `Expected "]".` when no operator follows the name, and `expected "=".`
+    // when only an operator's first character does. sasso gave the value
+    // check's lowercase `expected "]".` for both. dart-sass 1.104.1; the
+    // first two are spec cases (css/selector/attribute, issue_2509). Offline.
+    for (scss, message) in [
+        ("[a b] { c: d }\n", "Error: Expected \"]\"."),
+        ("[charset i] { c: d }\n", "Error: Expected \"]\"."),
+        ("[a %= x] { c: d }\n", "Error: Expected \"]\"."),
+        ("[a \u{a0}= x] { c: d }\n", "Error: Expected \"]\"."),
+        ("$x: b; [a #{$x}] { c: d }\n", "Error: Expected \"]\"."),
+        ("[a~b] { c: d }\n", "Error: expected \"=\"."),
+        ("[a^b] { c: d }\n", "Error: expected \"=\"."),
+    ] {
+        let err = compile(scss, &Options::default()).unwrap_err().to_string();
+        assert!(err.contains(message), "{scss}: {err}");
+    }
+}
+
+#[test]
 fn a_non_finite_hue_never_reaches_the_hsl_conversion() {
     // The hsl -> rgb arithmetic has no answer for a non-finite hue: it picks
     // the fallback sector and hands back a NaN component. dart-sass 1.104.0

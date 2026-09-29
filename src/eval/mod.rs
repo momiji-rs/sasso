@@ -6221,14 +6221,15 @@ fn validate_attribute(inner: &[char]) -> Result<(), Error> {
         return Ok(()); // bare `[name]`
     }
     // An operator must follow the name; anything else (e.g. a second
-    // identifier in `[a b]`) is invalid.
-    let op_ok = match inner[i] {
-        '=' => true,
-        '~' | '|' | '^' | '$' | '*' => inner.get(i + 1) == Some(&'='),
-        _ => false,
-    };
-    if !op_ok {
-        return Err(err());
+    // identifier in `[a b]`) is invalid. These are dart's operator reader's
+    // sentences: capitalized `Expected "]".` for no operator at all, not the
+    // lowercase one the value and modifier checks give, and `expected "=".`
+    // for an operator's first character alone (`[a~b]`).
+    match inner[i] {
+        '=' => {}
+        '~' | '|' | '^' | '$' | '*' if inner.get(i + 1) == Some(&'=') => {}
+        '~' | '|' | '^' | '$' | '*' => return Err(Error::unpositioned("expected \"=\".")),
+        _ => return Err(Error::unpositioned("Expected \"]\".")),
     }
     i += if inner[i] == '=' { 1 } else { 2 };
     skip_ws(&mut i);

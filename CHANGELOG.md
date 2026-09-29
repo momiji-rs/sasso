@@ -45,6 +45,11 @@ Conformance is tracked separately as a ratchet against the official
   `[a=x\u{a0}yz]` (reading `yz` as a modifier) and accepted the invalid
   `[a="x"\u{a0}]`.
 
+- **A missing attribute operator gets dart's message.** `[a b]` failed with
+  `expected "]".`; dart says `Expected "]".` when no operator follows the
+  name, and `expected "=".` for `[a~b]`, where only an operator's first
+  character does.
+
 ## [0.19.2] - 2026-09-29
 
 _Faster again through the npm package, on the paths 0.19.1 missed. The wasm
