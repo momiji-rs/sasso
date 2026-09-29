@@ -8004,6 +8004,59 @@ fn tokenize_complex(s: &str) -> Vec<SelToken<'_>> {
     tokens
 }
 
+/// Split a normalized complex selector into the items of its SassScript value
+/// (`&`): its compounds and combinators, cut at top-level CSS whitespace.
+/// Whitespace inside a string, an attribute or a pseudo argument is content,
+/// and so is an escaped character and a hex escape's one delimiter (`.a\9 .b`
+/// is a single compound).
+pub(crate) fn split_compounds(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32; // parens and brackets together
+    let mut start: Option<usize> = None;
+    let mut it = s.char_indices().peekable();
+    while let Some((idx, c)) = it.next() {
+        if is_css_whitespace(c) && depth == 0 {
+            if let Some(st) = start.take() {
+                out.push(&s[st..idx]);
+            }
+            continue;
+        }
+        start.get_or_insert(idx);
+        match c {
+            '\\' => {
+                if it.peek().is_some_and(|&(_, d)| d.is_ascii_hexdigit()) {
+                    for _ in 0..6 {
+                        if it.next_if(|&(_, d)| d.is_ascii_hexdigit()).is_none() {
+                            break;
+                        }
+                    }
+                    it.next_if(|&(_, d)| is_css_whitespace(d));
+                } else {
+                    it.next();
+                }
+            }
+            '"' | '\'' => {
+                while let Some((_, d)) = it.next() {
+                    match d {
+                        '\\' => {
+                            it.next();
+                        }
+                        q if q == c => break,
+                        _ => {}
+                    }
+                }
+            }
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            _ => {}
+        }
+    }
+    if let Some(st) = start {
+        out.push(&s[st..]);
+    }
+    out
+}
+
 /// Whether a resolved complex selector is a "bogus combinator" that dart-sass
 /// omits from the generated CSS: two combinators in a row anywhere, or — inside
 /// a pseudo argument (`in_pseudo`) — a trailing combinator, or a leading

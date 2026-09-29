@@ -3687,6 +3687,68 @@ fn a_selector_list_is_not_split_inside_a_quoted_string() {
 }
 
 #[test]
+fn the_parent_selector_value_splits_only_at_top_level_whitespace() {
+    // `&`'s compounds were cut at every whitespace character, so a space
+    // inside a string, an attribute or a pseudo argument split a compound in
+    // two: `list.nth(list.nth(&, 1), 1)` of `:not(.a .b) .c` was `:not(.a`,
+    // and `x: &` re-joined `[a="x   y"]` with one space. An escaped space
+    // and a hex escape's delimiter belong to their compound too. Byte-matched
+    // to dart-sass 1.104.1, in both styles. Offline.
+    for (scss, expanded, compressed) in [
+        (
+            "@use \"sass:list\"; :is(a b) .c { x: list.length(list.nth(&, 1)); }\n",
+            ":is(a b) .c {\n  x: 2;\n}",
+            ":is(a b) .c{x:2}",
+        ),
+        (
+            "@use \"sass:list\"; [a=\"x y\"] .c { x: list.length(list.nth(&, 1)); }\n",
+            "[a=\"x y\"] .c {\n  x: 2;\n}",
+            "[a=\"x y\"] .c{x:2}",
+        ),
+        (
+            "[a=\"x   y\"] .c { x: &; }\n",
+            "[a=\"x   y\"] .c {\n  x: [a=\"x   y\"] .c;\n}",
+            "[a=\"x   y\"] .c{x:[a=\"x   y\"] .c}",
+        ),
+        (
+            "@use \"sass:list\"; [a=\"x y\"] .c { x: list.nth(list.nth(&, 1), 1); }\n",
+            "[a=\"x y\"] .c {\n  x: [a=\"x y\"];\n}",
+            "[a=\"x y\"] .c{x:[a=\"x y\"]}",
+        ),
+        (
+            "@use \"sass:list\"; :not(.a  .b) .c { x: list.nth(list.nth(&, 1), 1); }\n",
+            ":not(.a .b) .c {\n  x: :not(.a .b);\n}",
+            ":not(.a .b) .c{x::not(.a .b)}",
+        ),
+        (
+            "@use \"sass:list\"; .a\\ b .c { x: list.length(list.nth(&, 1)); }\n",
+            ".a\\ b .c {\n  x: 2;\n}",
+            ".a\\ b .c{x:2}",
+        ),
+        (
+            "@use \"sass:list\"; .a\\9 .b { x: list.length(list.nth(&, 1)); }\n",
+            ".a\\9 .b {\n  x: 1;\n}",
+            ".a\\9 .b{x:1}",
+        ),
+        (
+            "@use \"sass:list\"; .a\\9  .b { x: list.nth(list.nth(&, 1), 1); }\n",
+            ".a\\9  .b {\n  x: .a\\9 ;\n}",
+            ".a\\9  .b{x:.a\\9 }",
+        ),
+        (
+            "@use \"sass:list\"; .a ~ .b + .c { x: list.length(list.nth(&, 1)); }\n",
+            ".a ~ .b + .c {\n  x: 5;\n}",
+            ".a~.b+.c{x:5}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+}
+
+#[test]
 fn a_missing_attribute_operator_has_darts_message() {
     // dart's attribute-operator reader has its own sentences: capitalized
     // `Expected "]".` when no operator follows the name, and `expected "=".`
