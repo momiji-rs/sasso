@@ -327,7 +327,7 @@ impl<'a> Evaluator<'a> {
             Some(Value::Str(s)) => s.text,
             Some(other) => {
                 return Err(Error::at(
-                    format!("$url: {} is not a string.", other.to_css(false)),
+                    format!("$url: {} is not a string.", other.to_inspect_message()),
                     pos,
                 ))
             }
@@ -345,7 +345,7 @@ impl<'a> Evaluator<'a> {
                         Value::Str(s) => normalize_var_name(&s.text).into_owned(),
                         other => {
                             return Err(Error::at(
-                                format!("$with key: {} is not a string.", other.to_css(false)),
+                                format!("$with key: {} is not a string.", other.to_inspect_message()),
                                 pos,
                             ))
                         }
@@ -362,7 +362,7 @@ impl<'a> Evaluator<'a> {
             }
             Some(other) => {
                 return Err(Error::at(
-                    format!("$with: {} is not a map.", other.to_css(false)),
+                    format!("$with: {} is not a map.", other.to_inspect_message()),
                     pos,
                 ))
             }
