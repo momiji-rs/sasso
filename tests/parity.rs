@@ -12796,6 +12796,31 @@ fn parity_unquoted_private_use_character() {
     }
 }
 
+/// `compile()`'s error text reduced to dart's own sentence: the `Error: ` prefix
+/// and the ` (line:col)` suffix that `Display for Error` appends both removed, so
+/// an expectation can be compared WHOLE rather than as a prefix. The suffix is
+/// recognised as digits-colon-digits in a trailing parenthesis, which no message
+/// text ends in.
+fn our_error_sentence(rendered: &str) -> &str {
+    let msg = rendered.trim_start_matches("Error: ");
+    let Some(open) = msg.rfind(" (") else { return msg };
+    let inner = &msg[open + 2..];
+    let is_line_col = inner.ends_with(')')
+        && inner[..inner.len() - 1]
+            .split_once(':')
+            .is_some_and(|(line, col)| {
+                !line.is_empty()
+                    && !col.is_empty()
+                    && line.bytes().all(|b| b.is_ascii_digit())
+                    && col.bytes().all(|b| b.is_ascii_digit())
+            });
+    if is_line_col {
+        &msg[..open]
+    } else {
+        msg
+    }
+}
+
 /// A type error names the parameter the value was BOUND to, and spells the value
 /// dart's own `Value.toString()` way (#139).
 ///
@@ -12922,10 +12947,10 @@ fn a_type_error_names_its_parameter_and_spells_its_value_dart_s_way() {
         match dart_sass_error(&scss) {
             Some(theirs) => {
                 let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
-                let msg = ours.trim_start_matches("Error: ");
-                assert!(
-                    msg.starts_with(&theirs),
-                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+                assert_eq!(
+                    our_error_sentence(&ours),
+                    theirs,
+                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n"
                 );
             }
             None => panic!("expected dart-sass to reject:\n{scss}"),
@@ -12944,35 +12969,45 @@ fn a_type_error_names_its_parameter_and_spells_its_value_dart_s_way() {
         match dart_sass_error(scss) {
             Some(theirs) => {
                 let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
-                assert!(
-                    ours.trim_start_matches("Error: ").starts_with(&theirs),
-                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+                assert_eq!(
+                    our_error_sentence(&ours),
+                    theirs,
+                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n"
                 );
             }
             None => panic!("expected dart-sass to reject:\n{scss}"),
         }
     }
 
-    // `sass:map`'s shared coercion cannot be byte-compared yet: it appends a
-    // `` for `<function>` `` suffix dart never writes (#230). The VALUE in front
-    // of that suffix is this rule, so assert that half alone — it erased `null`
-    // and dropped a list's parentheses until the review caught that only the
-    // SIBLING helper had been routed through the shared spelling.
+    // `sass:map`'s shared coercion cannot be compared against dart yet: it
+    // appends a `` for `<function>` `` suffix dart never writes (#230). The VALUE
+    // in front of that suffix is this rule — it erased `null` and dropped a
+    // list's parentheses until the review caught that only the SIBLING helper had
+    // been routed through the shared spelling — so these assert sasso's whole
+    // sentence, suffix included. #230 cannot land without editing this list,
+    // which is the point of spelling it out rather than matching a prefix.
     for (expr, want) in [
-        ("map.get(null, a)", "$map: null is not a map"),
-        ("map.keys(null)", "$map: null is not a map"),
-        ("map.has-key(null, a)", "$map: null is not a map"),
-        ("map.values((1 2))", "$map: (1 2) is not a map"),
-        ("map.get(list.append((), \"x\"), a)", "$map: (\"x\") is not a map"),
+        ("map.get(null, a)", "$map: null is not a map for `map-get`."),
+        ("map.keys(null)", "$map: null is not a map for `map-keys`."),
+        (
+            "map.has-key(null, a)",
+            "$map: null is not a map for `map-has-key`.",
+        ),
+        ("map.values((1 2))", "$map: (1 2) is not a map for `map-values`."),
+        (
+            "map.get(list.append((), \"x\"), a)",
+            "$map: (\"x\") is not a map for `map-get`.",
+        ),
     ] {
         let scss = format!("{USES}a {{b: {expr}}}\n");
         let ours = compile(&scss, &Options::default())
             .err()
             .map(|e| e.to_string())
             .unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
-        assert!(
-            ours.trim_start_matches("Error: ").starts_with(want),
-            "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- wanted prefix ---\n{want}\n"
+        assert_eq!(
+            our_error_sentence(&ours),
+            want,
+            "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n"
         );
     }
 
@@ -12984,9 +13019,10 @@ fn a_type_error_names_its_parameter_and_spells_its_value_dart_s_way() {
         match dart_sass_error(&scss) {
             Some(theirs) => {
                 let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
-                assert!(
-                    ours.trim_start_matches("Error: ").starts_with(&theirs),
-                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+                assert_eq!(
+                    our_error_sentence(&ours),
+                    theirs,
+                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n"
                 );
             }
             None => panic!("expected dart-sass to reject:\n{scss}"),

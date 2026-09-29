@@ -1159,14 +1159,21 @@ impl Value {
     /// single-element comma and slash forms (`(1,)`, `(1/)`), which must not be
     /// wrapped a second time.
     ///
-    /// Every message that embeds a whole value reads it from here, so the
-    /// spellings cannot drift apart — `@error`, every `<value> is not a
-    /// <type>.` across the built-ins and the evaluator, `@for`'s bounds, the
-    /// colour channel diagnostics, `isn't a valid CSS value.`, and the
-    /// `Recommendation:` line of the removed `sass:color` members. Four
-    /// separate copies of this rule existed until #139, each wrong in a shape
-    /// it had never been measured in: they printed `null` and `()` as nothing
-    /// at all, and dropped a one-element list's parentheses.
+    /// Every message that embeds a whole value reads it from here, with one
+    /// exception named below, so the spellings cannot drift apart — `@error`,
+    /// every `<value> is not a <type>.` across the built-ins and the evaluator,
+    /// `@for`'s bounds, the colour channel diagnostics, `isn't a valid CSS
+    /// value.`, and the `Recommendation:` line of the removed `sass:color`
+    /// members. Four separate copies of this rule existed until #139, each
+    /// wrong in a shape it had never been measured in: they printed `null` and
+    /// `()` as nothing at all, and dropped a one-element list's parentheses.
+    ///
+    /// The exception is `Value <v> can't be used in a calculation.`, spelled by
+    /// `eval::calc_value_repr` and by a second copy in `builtins::math`.
+    /// dart-sass 1.104.1 writes no value in that sentence at all (`This
+    /// expression can't be used in a calculation.`), so #234 deletes both rather
+    /// than routing them here — folding it in would mean shipping a spelling
+    /// dart does not use.
     ///
     /// Verified against dart-sass 1.104.1 (2026-09-19, re-measured across the
     /// whole diagnostic surface 2026-09-29) including every list shape: a

@@ -188,15 +188,21 @@ pub(super) struct Channels {
 
 impl Channels {
     /// The parameter an alpha taken out of these channels was bound to, for a
-    /// diagnostic's `$<param>:` prefix. The one-argument form binds the whole
-    /// list to `$channels`, so a value inside it is reported under that name;
-    /// the positional form binds the alpha to `$alpha`.
+    /// diagnostic's `$<param>:` prefix. An alpha peeled out of the channels list
+    /// was bound to `$channels` and is reported under that name; one written as
+    /// its own argument was bound to `$alpha`.
+    ///
+    /// The question is `alpha_split`, not `single`: the one-argument form also
+    /// accepts a separate alpha beside the list (`rgb(var(--c), 0.5)`), and that
+    /// alpha belongs to `$alpha` even though `single` is set. No input is known
+    /// to reach a type error down that path — a special-value channels list is a
+    /// verbatim passthrough before any alpha is read, and a plain list with a
+    /// second argument binds dart's `rgb($color, $alpha)` overload instead
+    /// (`rgb(1 2 3, "x")` is `$color: (1 2 3) is not a color.` on both
+    /// compilers, measured 2026-09-29) — but the method should answer truthfully
+    /// rather than lean on that.
     fn alpha_param(&self) -> Option<&'static str> {
-        Some(if self.single.is_some() {
-            "channels"
-        } else {
-            "alpha"
-        })
+        Some(if self.alpha_split { "channels" } else { "alpha" })
     }
 
     /// Gather the channel components and optional alpha. The three- and
