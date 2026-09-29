@@ -122,8 +122,9 @@ Conformance is tracked separately as a ratchet against the official
   it had never been measured in — `null` and `()` printed as nothing at all, and
   a one-element list lost its parentheses. `@for`'s bounds were the rule's
   absence rather than a copy — they printed the value's TYPE NAME. All the copies
-  are gone and the helper has 69 call sites where it had 4, so the claim in the
-  doc is now true;
+  are gone and the helper has 73 call sites where it had 4 (`grep -o` over `src/`,
+  against `7045759`; `to_css(false)` falls 298 -> 232 the same way), so the claim
+  in the doc is now true;
   the one that survives is filed (#234), because dart writes no value in that
   sentence at all and the fix deletes the helper rather than correcting it.
 
