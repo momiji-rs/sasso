@@ -3209,6 +3209,21 @@ fn a_hex_escape_is_not_closed_by_a_non_ascii_space() {
 }
 
 #[test]
+fn the_compressor_keeps_a_non_ascii_space_beside_a_combinator() {
+    // Compressed output drops the whitespace around a combinator, and an NBSP
+    // beside one is not that whitespace: it starts the next compound's name.
+    // Byte-matched to dart-sass 1.104.1. Offline.
+    for (scss, compressed) in [
+        (".a \u{a0}b > c { c: d }\n", ".a \u{a0}b>c{c:d}"),
+        (".a > \u{a0}b { c: d }\n", ".a>\u{a0}b{c:d}"),
+        (".a \u{a0}~ b { c: d }\n", ".a \u{a0}~b{c:d}"),
+    ] {
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, format!("\u{feff}{compressed}"), "{scss}");
+    }
+}
+
+#[test]
 fn a_non_finite_hue_never_reaches_the_hsl_conversion() {
     // The hsl -> rgb arithmetic has no answer for a non-finite hue: it picks
     // the fallback sector and hands back a NaN component. dart-sass 1.104.0

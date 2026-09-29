@@ -33,7 +33,8 @@ Conformance is tracked separately as a ratchet against the official
 
   A hex escape made it worse: its one delimiter must be CSS whitespace, but an
   NBSP was accepted as the delimiter and so deleted — `\61\u{a0}b` came out
-  `ab`, and `.a\9\u{a0}b` lost its NBSP.
+  `ab`, and `.a\9\u{a0}b` lost its NBSP. Compressed output dropped one beside
+  a combinator as if it were the space around it (`.a > \u{a0}b` → `.a>b`).
 
 ## [0.19.2] - 2026-09-29
 

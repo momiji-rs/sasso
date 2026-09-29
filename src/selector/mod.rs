@@ -160,9 +160,9 @@ fn compress_into(out: &mut String, chars: &[char]) {
                 out.extend(&chars[i..end.min(chars.len())]);
                 i = end;
             }
-            ' ' | '\t' | '\n' | '\r' => {
+            c if is_css_whitespace(c) => {
                 let mut j = i;
-                while j < chars.len() && chars[j].is_whitespace() {
+                while j < chars.len() && is_css_whitespace(chars[j]) {
                     j += 1;
                 }
                 // A run of whitespace IS the descendant combinator — unless
@@ -175,7 +175,7 @@ fn compress_into(out: &mut String, chars: &[char]) {
             '>' | '+' | '~' => {
                 out.push(chars[i]);
                 i += 1;
-                while i < chars.len() && chars[i].is_whitespace() {
+                while i < chars.len() && is_css_whitespace(chars[i]) {
                     i += 1;
                 }
             }
