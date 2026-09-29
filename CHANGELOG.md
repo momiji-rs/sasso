@@ -11,6 +11,14 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Performance
+
+- **npm CLI:** starting up is back to 0.18.0's cost. 0.19.x loaded the six
+  `--watch` modules and the whole importer on every run, including one that
+  only hands its command line to a `sasso` binary on PATH. They now load only
+  where they are used. Handing one small entry point to the binary takes
+  33.6 ms instead of 38.5 ms on Linux/x86_64 (0.18.0: 33.0 ms).
+
 ## [0.19.1] - 2026-09-28
 
 _Faster builds through the npm package: on Lichess's 148 entry points on
