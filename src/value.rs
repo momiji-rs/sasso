@@ -1160,11 +1160,18 @@ impl Value {
     /// wrapped a second time.
     ///
     /// Every message that embeds a whole value reads it from here, so the
-    /// spellings cannot drift apart: `@error`, the legacy colour overloads'
-    /// `$color: … is not a color.`, and the `Recommendation:` line of the
-    /// removed `sass:color` members. Verified against dart-sass 1.104.1
-    /// (2026-09-19), including the shapes where the three used to disagree: a
-    /// one-element space list is `(1)`, not `1`.
+    /// spellings cannot drift apart — `@error`, every `<value> is not a
+    /// <type>.` across the built-ins and the evaluator, `@for`'s bounds, the
+    /// colour channel diagnostics, `isn't a valid CSS value.`, and the
+    /// `Recommendation:` line of the removed `sass:color` members. Four
+    /// separate copies of this rule existed until #139, each wrong in a shape
+    /// it had never been measured in: they printed `null` and `()` as nothing
+    /// at all, and dropped a one-element list's parentheses.
+    ///
+    /// Verified against dart-sass 1.104.1 (2026-09-19, re-measured across the
+    /// whole diagnostic surface 2026-09-29) including every list shape: a
+    /// one-element space list is `(1)`, not `1`, and the one-element comma and
+    /// slash forms `inspect` already parenthesizes must not be wrapped twice.
     pub(crate) fn to_inspect_message(&self) -> String {
         match self {
             Value::List(l) if !l.bracketed && !l.items.is_empty() => {
