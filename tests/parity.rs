@@ -14913,3 +14913,71 @@ fn a_pseudo_name_is_read_with_its_escapes() {
     let css = compile(":\\78(a$b) { c: d }\n", &css_opts).unwrap();
     assert_eq!(css, ":x(a$b) {\n  c: d;\n}");
 }
+
+#[test]
+fn a_minus_before_any_name_start_after_a_quoted_string_starts_a_term() {
+    // After a quoted string, dart reads `-` followed by a name start as the
+    // start of a new term, and a name start is any code point from U+0080 up,
+    // the NBSP included; so does an escape (`"q"-\78`). sasso checked
+    // `is_alphabetic() || '_'`, so `"q"-\u{a0}x` became a subtraction. Outputs are dart-sass 1.104.1's. Offline.
+    for (scss, expanded, compressed) in [
+        (
+            "a { b: \"q\"-\u{a0}x; }\n",
+            "@charset \"UTF-8\";\na {\n  b: \"q\" -\u{a0}x;\n}",
+            "\u{feff}a{b:\"q\" -\u{a0}x}",
+        ),
+        (
+            "a { b: 'q'-\u{a0}x; }\n",
+            "@charset \"UTF-8\";\na {\n  b: \"q\" -\u{a0}x;\n}",
+            "\u{feff}a{b:\"q\" -\u{a0}x}",
+        ),
+        (
+            "a { b: \"q\" -\u{a0}x; }\n",
+            "@charset \"UTF-8\";\na {\n  b: \"q\" -\u{a0}x;\n}",
+            "\u{feff}a{b:\"q\" -\u{a0}x}",
+        ),
+        (
+            "a { b: \"q\"-\u{a0}; }\n",
+            "@charset \"UTF-8\";\na {\n  b: \"q\" -\u{a0};\n}",
+            "\u{feff}a{b:\"q\" -\u{a0}}",
+        ),
+        ("a { b: \"q\"-l; }\n", "a {\n  b: \"q\" -l;\n}", "a{b:\"q\" -l}"),
+        (
+            "a { b: \"q\"-\u{e9}x; }\n",
+            "@charset \"UTF-8\";\na {\n  b: \"q\" -\u{e9}x;\n}",
+            "\u{feff}a{b:\"q\" -\u{e9}x}",
+        ),
+        (
+            "a { b: \"q\"-\u{4e2d}; }\n",
+            "@charset \"UTF-8\";\na {\n  b: \"q\" -\u{4e2d};\n}",
+            "\u{feff}a{b:\"q\" -\u{4e2d}}",
+        ),
+        (
+            "a { b: \"q\"-_x; }\n",
+            "a {\n  b: \"q\" -_x;\n}",
+            "a{b:\"q\" -_x}",
+        ),
+        (
+            "a { b: \"q\"-\\78; }\n",
+            "a {\n  b: \"q\" -x;\n}",
+            "a{b:\"q\" -x}",
+        ),
+        (
+            "a { b: \"q\"--x; }\n",
+            "a {\n  b: \"q\" --x;\n}",
+            "a{b:\"q\" --x}",
+        ),
+        (
+            "a { b: \"q\"-\u{a0}x \"r\"; }\n",
+            "@charset \"UTF-8\";\na {\n  b: \"q\" -\u{a0}x \"r\";\n}",
+            "\u{feff}a{b:\"q\" -\u{a0}x \"r\"}",
+        ),
+        ("a { b: \"q\"-1; }\n", "a {\n  b: \"q\"-1;\n}", "a{b:\"q\"-1}"),
+        ("a { b: \"q\"-(1); }\n", "a {\n  b: \"q\"-1;\n}", "a{b:\"q\"-1}"),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+}

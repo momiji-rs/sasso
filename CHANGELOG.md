@@ -152,6 +152,11 @@ Conformance is tracked separately as a ratchet against the official
   was "expected selector." and the second got the wrong message. `:\78 (a)`
   now opens an argument list too, as the escape's delimiter is not a space.
 
+- **After a quoted string, a `-` before any name start begins a new term.**
+  A name start is any code point from U+0080 up, or an escape, so
+  `"q"-\u{a0}x` is the list `"q" -\u{a0}x` and `"q"-\78` is `"q" -x`,
+  where both were read as a subtraction.
+
 - **An interpolated media condition may not mix `and` and `or`.**
   `@media #{"(a) and (b) or (c)"}` compiled to `(a) or (b) or (c)`; it is an
   error, as it is when written out. A word other than the first operator now
