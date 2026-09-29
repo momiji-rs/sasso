@@ -88,6 +88,25 @@ Conformance is tracked separately as a ratchet against the official
   `math.sin(…)` is verified here; and the deprecated global spellings, where
   `lighten` shares a name with a module-only member.
 
+### Performance
+
+- **`@extend` no longer compares module paths per rule.** On a codebase that
+  spreads its `@extend`s over many modules, most of a compile went to comparing
+  strings: every style rule checked each `@extend` batch's origin module against
+  its own scope, and every `@extend` checked the origin of every extension
+  registered before it — both on full module paths, which share long prefixes,
+  so each comparison ran most of the way down the string. The first is now a
+  flag resolved once per scope; the second asks about the handful of distinct
+  origins in the store instead of every entry in it. Output is byte-identical.
+
+  Measured on Lichess's `ui/` tree (148 entry points, about 1,500 `@extend`s in
+  380 files) through the npm package's native engine on Linux/x86_64, the way
+  its build script calls sasso: a full build is 27.5% faster in dev mode
+  (source maps with embedded sources) and 31.6% faster in production mode
+  (compressed), and recompiling its heaviest entry point alone, which bounds how
+  soon a save in that area shows up, takes half the time. The binary compiles
+  that entry point 2.7× faster.
+
 ## [0.19.0] - 2026-09-28
 
 _Watch mode on both front ends: the binary gains `--watch` and `--update`
