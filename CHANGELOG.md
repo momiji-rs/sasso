@@ -36,6 +36,12 @@ Conformance is tracked separately as a ratchet against the official
   `ab`, and `.a\9\u{a0}b` lost its NBSP. Compressed output dropped one beside
   a combinator as if it were the space around it (`.a > \u{a0}b` → `.a>b`).
 
+  The selector parser that nesting, `@extend` and the `selector` functions
+  share trimmed and split with `str::trim`, so an NBSP at the edge of a
+  compound was deleted there too: `:is(\u{a0}b)` came out `:is(b)`,
+  `selector.append(".a", "\u{a0}.c")` gave `.a.c` for dart's `.a\u{a0}.c`,
+  and `:nth-child(2n \u{a0}+ 1)` compiled to `2n+1` where dart rejects it.
+
 ## [0.19.2] - 2026-09-29
 
 _Faster again through the npm package, on the paths 0.19.1 missed. The wasm

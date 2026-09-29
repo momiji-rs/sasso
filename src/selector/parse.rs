@@ -13,7 +13,7 @@ use super::*;
 pub(crate) fn parse_list(sel: &str) -> Option<Vec<Complex>> {
     let mut out = Vec::new();
     for part in split_top(sel, ',') {
-        let part = part.trim();
+        let part = part.trim_matches(is_css_whitespace);
         if part.is_empty() {
             continue;
         }
@@ -573,7 +573,7 @@ fn read_pseudo(chars: &[char], i: &mut usize) -> Option<String> {
 }
 
 pub(super) fn skip_ws(chars: &[char], i: &mut usize) {
-    while *i < chars.len() && chars[*i].is_whitespace() {
+    while *i < chars.len() && is_css_whitespace(chars[*i]) {
         *i += 1;
     }
 }
@@ -630,5 +630,5 @@ pub(super) fn split_top(s: &str, sep: char) -> Vec<String> {
 /// Parse a single complex selector (one comma-free selector). Returns `None`
 /// on any parse failure.
 pub(crate) fn parse_complex_one(s: &str) -> Option<Complex> {
-    parse_complex(s.trim())
+    parse_complex(s.trim_matches(is_css_whitespace))
 }

@@ -3224,6 +3224,234 @@ fn the_compressor_keeps_a_non_ascii_space_beside_a_combinator() {
 }
 
 #[test]
+fn the_selector_parser_trims_and_skips_css_whitespace_only() {
+    // A selector is trimmed at its edges and around each comma, and parsed
+    // with whitespace skipped between compounds — by the normalizer, by the
+    // parser that nesting, `@extend` and the selector functions share, and by
+    // the pseudo-argument validator. Each did it with `str::trim` or
+    // `char::is_whitespace`, both of which take NBSP, so an NBSP at the edge
+    // of a compound was deleted: `:is(\u{a0}b)` came out `:is(b)`, and
+    // `.a \u{a0}b` came out `.a b`. Byte-matched to dart-sass 1.104.1, in
+    // both styles. Offline.
+    for (scss, expanded, compressed) in [
+        (
+            ":is(.a \u{a0}b, c) { c: d }\n",
+            "@charset \"UTF-8\";\n:is(.a \u{a0}b, c) {\n  c: d;\n}",
+            "\u{feff}:is(.a \u{a0}b,c){c:d}",
+        ),
+        (
+            ":is(.a, \u{a0}b) { c: d }\n",
+            "@charset \"UTF-8\";\n:is(.a, \u{a0}b) {\n  c: d;\n}",
+            "\u{feff}:is(.a,\u{a0}b){c:d}",
+        ),
+        (
+            ":is(\u{a0}b) { c: d }\n",
+            "@charset \"UTF-8\";\n:is(\u{a0}b) {\n  c: d;\n}",
+            "\u{feff}:is(\u{a0}b){c:d}",
+        ),
+        (
+            ":where(.a > \u{a0}b) { c: d }\n",
+            "@charset \"UTF-8\";\n:where(.a > \u{a0}b) {\n  c: d;\n}",
+            "\u{feff}:where(.a>\u{a0}b){c:d}",
+        ),
+        (
+            "::slotted(\u{a0}b) { c: d }\n",
+            "@charset \"UTF-8\";\n::slotted(\u{a0}b) {\n  c: d;\n}",
+            "\u{feff}::slotted(\u{a0}b){c:d}",
+        ),
+        (
+            ".a \u{a0}b { &:hover { c: d } }\n",
+            "@charset \"UTF-8\";\n.a \u{a0}b:hover {\n  c: d;\n}",
+            "\u{feff}.a \u{a0}b:hover{c:d}",
+        ),
+        (
+            ".a, \u{a0}b { .c { d: e } }\n",
+            "@charset \"UTF-8\";\n.a .c, \u{a0}b .c {\n  d: e;\n}",
+            "\u{feff}.a .c,\u{a0}b .c{d:e}",
+        ),
+        (
+            ".a \u{a0}b { @extend .q; } .q { e: f }\n",
+            "@charset \"UTF-8\";\n.q, .a \u{a0}b {\n  e: f;\n}",
+            "\u{feff}.q,.a \u{a0}b{e:f}",
+        ),
+        (
+            ".q .r { e: f } .a \u{a0}b { @extend .r; }\n",
+            "@charset \"UTF-8\";\n.q .r, .q .a \u{a0}b, .a .q \u{a0}b {\n  e: f;\n}",
+            "\u{feff}.q .r,.q .a \u{a0}b,.a .q \u{a0}b{e:f}",
+        ),
+        (
+            "a\u{a0} { c: d }\n",
+            "@charset \"UTF-8\";\na\u{a0} {\n  c: d;\n}",
+            "\u{feff}a\u{a0}{c:d}",
+        ),
+        (
+            "a \u{a0} { c: d }\n",
+            "@charset \"UTF-8\";\na \u{a0} {\n  c: d;\n}",
+            "\u{feff}a \u{a0}{c:d}",
+        ),
+        (
+            "a,\u{a0}b { c: d }\n",
+            "@charset \"UTF-8\";\na, \u{a0}b {\n  c: d;\n}",
+            "\u{feff}a,\u{a0}b{c:d}",
+        ),
+        (
+            "a\u{a0},b { c: d }\n",
+            "@charset \"UTF-8\";\na\u{a0}, b {\n  c: d;\n}",
+            "\u{feff}a\u{a0},b{c:d}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.nest(\".a \u{a0}b\", \"&:hover\"); }\n",
+            "@charset \"UTF-8\";\na {\n  b: .a \u{a0}b:hover;\n}",
+            "\u{feff}a{b:.a \u{a0}b:hover}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.extend(\".a \u{a0}b\", \".a\", \".c\"); }\n",
+            "@charset \"UTF-8\";\na {\n  b: .a \u{a0}b, .c \u{a0}b;\n}",
+            "\u{feff}a{b:.a \u{a0}b,.c \u{a0}b}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.parse(\".a \u{a0}b\"); }\n",
+            "@charset \"UTF-8\";\na {\n  b: .a \u{a0}b;\n}",
+            "\u{feff}a{b:.a \u{a0}b}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.parse(\"\u{a0}.a\"); }\n",
+            "@charset \"UTF-8\";\na {\n  b: \u{a0}.a;\n}",
+            "\u{feff}a{b:\u{a0}.a}",
+        ),
+        (
+            ":not(\u{a0}) { c: d }\n",
+            "@charset \"UTF-8\";\n:not(\u{a0}) {\n  c: d;\n}",
+            "\u{feff}:not(\u{a0}){c:d}",
+        ),
+        (
+            ":is(\u{a0}) { c: d }\n",
+            "@charset \"UTF-8\";\n:is(\u{a0}) {\n  c: d;\n}",
+            "\u{feff}:is(\u{a0}){c:d}",
+        ),
+        (
+            ":is(a,\u{a0}) { c: d }\n",
+            "@charset \"UTF-8\";\n:is(a, \u{a0}) {\n  c: d;\n}",
+            "\u{feff}:is(a,\u{a0}){c:d}",
+        ),
+        (
+            ":nth-child(2n of .a \u{a0}) { c: d }\n",
+            "@charset \"UTF-8\";\n:nth-child(2n of .a \u{a0}) {\n  c: d;\n}",
+            "\u{feff}:nth-child(2n of .a \u{a0}){c:d}",
+        ),
+        (
+            ":nth-child(2n of \u{a0}.a) { c: d }\n",
+            "@charset \"UTF-8\";\n:nth-child(2n of \u{a0}.a) {\n  c: d;\n}",
+            "\u{feff}:nth-child(2n of \u{a0}.a){c:d}",
+        ),
+        (
+            ":is(a, \u{a0}, b) { c: d }\n",
+            "@charset \"UTF-8\";\n:is(a, \u{a0}, b) {\n  c: d;\n}",
+            "\u{feff}:is(a,\u{a0},b){c:d}",
+        ),
+        (
+            ":not(\u{a0}.a) { c: d }\n",
+            "@charset \"UTF-8\";\n:not(\u{a0}.a) {\n  c: d;\n}",
+            "\u{feff}:not(\u{a0}.a){c:d}",
+        ),
+        (
+            ":not(.a\u{a0}) { c: d }\n",
+            "@charset \"UTF-8\";\n:not(.a\u{a0}) {\n  c: d;\n}",
+            "\u{feff}:not(.a\u{a0}){c:d}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.simple-selectors(\"\u{a0}.a\"); }\n",
+            "@charset \"UTF-8\";\na {\n  b: \u{a0}, .a;\n}",
+            "\u{feff}a{b:\u{a0},.a}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.simple-selectors(\".a\u{a0}\"); }\n",
+            "@charset \"UTF-8\";\na {\n  b: .a\u{a0};\n}",
+            "\u{feff}a{b:.a\u{a0}}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.is-superselector(\"\u{a0}.a\", \".a\"); }\n",
+            "a {\n  b: false;\n}",
+            "a{b:false}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.is-superselector(\".a \u{a0}b\", \".a b\"); }\n",
+            "a {\n  b: false;\n}",
+            "a{b:false}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.replace(\".a b\", \"b\", \"\u{a0}.c\"); }\n",
+            "@charset \"UTF-8\";\na {\n  b: .a \u{a0}.c;\n}",
+            "\u{feff}a{b:.a \u{a0}.c}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.unify(\"\u{a0}.a\", \".c\"); }\n",
+            "@charset \"UTF-8\";\na {\n  b: \u{a0}.a.c;\n}",
+            "\u{feff}a{b:\u{a0}.a.c}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.append(\".a\", \"\u{a0}.c\"); }\n",
+            "@charset \"UTF-8\";\na {\n  b: .a\u{a0}.c;\n}",
+            "\u{feff}a{b:.a\u{a0}.c}",
+        ),
+        (
+            "@use \"sass:selector\"; a { b: selector.extend(\".a \u{a0}b\", \"\u{a0}b\", \".c\"); }\n",
+            "@charset \"UTF-8\";\na {\n  b: .a \u{a0}b, .a .c;\n}",
+            "\u{feff}a{b:.a \u{a0}b,.a .c}",
+        ),
+        (
+            ".a { &:not(\u{a0}b) { c: d } }\n",
+            "@charset \"UTF-8\";\n.a:not(\u{a0}b) {\n  c: d;\n}",
+            "\u{feff}.a:not(\u{a0}b){c:d}",
+        ),
+        (
+            ".a:not(.b \u{a0}.c) { @extend .q; } .q { e: f }\n",
+            "@charset \"UTF-8\";\n.q, .a:not(.b \u{a0}.c) {\n  e: f;\n}",
+            "\u{feff}.q,.a:not(.b \u{a0}.c){e:f}",
+        ),
+        (
+            ".q:is(.b, \u{a0}.c) { e: f } .x { @extend .q; }\n",
+            "@charset \"UTF-8\";\n.q:is(.b, \u{a0}.c), .x:is(.b, \u{a0}.c) {\n  e: f;\n}",
+            "\u{feff}.q:is(.b,\u{a0}.c),.x:is(.b,\u{a0}.c){e:f}",
+        ),
+        (
+            ".a,\n\u{a0}b { c: d }\n",
+            "@charset \"UTF-8\";\n.a,\n\u{a0}b {\n  c: d;\n}",
+            "\u{feff}.a,\u{a0}b{c:d}",
+        ),
+        (
+            ".a { .b,\n\u{a0}.c { d: e } }\n",
+            "@charset \"UTF-8\";\n.a .b,\n.a \u{a0}.c {\n  d: e;\n}",
+            "\u{feff}.a .b,.a \u{a0}.c{d:e}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+}
+
+#[test]
+fn an_nbsp_inside_an_nth_argument_is_not_whitespace() {
+    // `:nth-child`'s An+B and `of` scanners skipped whitespace with
+    // `char::is_whitespace`, so an NBSP was read as a separator and the
+    // argument was accepted (`2n \u{a0}+ 1` came out `2n+1`). dart-sass reads
+    // it as a character and rejects the argument; these are its messages
+    // (1.104.1). Offline.
+    for (scss, message) in [
+        (":nth-child(2n \u{a0}of .a) { c: d }\n", "Expected \"of\"."),
+        (":nth-child(\u{a0}2n) { c: d }\n", "Expected \"n\"."),
+        (":nth-child(2n\u{a0}) { c: d }\n", "expected \")\"."),
+        (":nth-child(2n \u{a0}+ 1) { c: d }\n", "Expected \"of\"."),
+        (":nth-child(2n + \u{a0}1) { c: d }\n", "Expected a number."),
+    ] {
+        let err = compile(scss, &Options::default()).unwrap_err().to_string();
+        assert!(err.contains(message), "{scss}: {err}");
+    }
+}
+
+#[test]
 fn a_non_finite_hue_never_reaches_the_hsl_conversion() {
     // The hsl -> rgb arithmetic has no answer for a non-finite hue: it picks
     // the fallback sector and hands back a NaN component. dart-sass 1.104.0

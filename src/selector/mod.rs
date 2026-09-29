@@ -274,7 +274,7 @@ fn compress_selector_list(out: &mut String, arg: &str) {
         if i > 0 {
             out.push(',');
         }
-        let cs: Vec<char> = part.trim_start().chars().collect();
+        let cs: Vec<char> = part.trim_start_matches(is_css_whitespace).chars().collect();
         compress_into(out, &cs);
     }
 }
@@ -385,15 +385,20 @@ fn validate_one_pseudo_arg(name: &str, inner: &[char]) -> Result<(), &'static st
 fn validate_selector_list_arg(arg: &str) -> Result<(), &'static str> {
     let parts = split_top(arg, ',');
     // An all-empty argument (`()`, `( )`) has no first complex.
-    if parts.iter().all(|p| p.trim().is_empty()) {
+    if parts.iter().all(|p| p.trim_matches(is_css_whitespace).is_empty()) {
         return Err("expected selector.");
     }
-    if parts.first().is_some_and(|p| p.trim().is_empty()) || parts.last().is_some_and(|p| p.trim().is_empty())
+    if parts
+        .first()
+        .is_some_and(|p| p.trim_matches(is_css_whitespace).is_empty())
+        || parts
+            .last()
+            .is_some_and(|p| p.trim_matches(is_css_whitespace).is_empty())
     {
         return Err("expected selector.");
     }
     for part in &parts {
-        if part.trim().is_empty() {
+        if part.trim_matches(is_css_whitespace).is_empty() {
             continue;
         }
         let cs: Vec<char> = part.chars().collect();
@@ -477,11 +482,11 @@ pub(crate) fn normalize_nth(text: &str) -> Option<String> {
     // Split off an `of <selector>` tail at a whitespace-bounded `of` keyword.
     let lower = arg.to_ascii_lowercase();
     let (anb, of_sel) = match find_of_keyword(&lower) {
-        Some(pos) => (&arg[..pos], Some(arg[pos + 2..].trim())),
+        Some(pos) => (&arg[..pos], Some(arg[pos + 2..].trim_matches(is_css_whitespace))),
         None => (arg, None),
     };
     // The An+B canonical form has no internal whitespace and a lowercase `n`.
-    let anb_norm: String = anb.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let anb_norm: String = anb.chars().filter(|&c| !is_css_whitespace(c)).collect::<String>();
     if anb_norm.is_empty() {
         return None;
     }
@@ -513,7 +518,7 @@ pub(crate) fn validate_nth(arg: &str) -> Result<(), &'static str> {
     let chars: Vec<char> = arg.chars().collect();
     let mut i = 0usize;
     let skip_ws = |i: &mut usize| {
-        while *i < chars.len() && chars[*i].is_whitespace() {
+        while *i < chars.len() && is_css_whitespace(chars[*i]) {
             *i += 1;
         }
     };
@@ -576,8 +581,8 @@ fn finish_nth(chars: &[char], mut i: usize) -> Result<(), &'static str> {
     // dart only treats trailing content as an `of` clause when whitespace
     // separates it from the An+B; glued junk (`n1`, `2n+1of`) is left for the
     // caller, which then reports `expected ")".`.
-    let had_ws = i < chars.len() && chars[i].is_whitespace();
-    while i < chars.len() && chars[i].is_whitespace() {
+    let had_ws = i < chars.len() && is_css_whitespace(chars[i]);
+    while i < chars.len() && is_css_whitespace(chars[i]) {
         i += 1;
     }
     if i >= chars.len() {
@@ -604,11 +609,11 @@ fn finish_nth(chars: &[char], mut i: usize) -> Result<(), &'static str> {
         return Err("Expected \"of\"");
     }
     i += 2;
-    while i < chars.len() && chars[i].is_whitespace() {
+    while i < chars.len() && is_css_whitespace(chars[i]) {
         i += 1;
     }
     let rest: String = chars[i..].iter().collect();
-    if rest.trim().is_empty() {
+    if rest.trim_matches(is_css_whitespace).is_empty() {
         return Err("expected selector.");
     }
     // The `of` selector list is validated by the caller's recursive selector
@@ -623,14 +628,14 @@ fn nth_of_selector(inner: &[char]) -> Option<String> {
     let mut i = 0usize;
     // Find a whitespace-bounded `of` that is a complete identifier.
     while i + 1 < inner.len() {
-        let before_ws = i > 0 && inner[i - 1].is_whitespace();
+        let before_ws = i > 0 && is_css_whitespace(inner[i - 1]);
         let of_complete = match inner.get(i + 2) {
             None => true,
             Some(c) => !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || (*c as u32) >= 0x80),
         };
         if before_ws && matches!(inner[i], 'o' | 'O') && matches!(inner[i + 1], 'f' | 'F') && of_complete {
             let mut j = i + 2;
-            while j < inner.len() && inner[j].is_whitespace() {
+            while j < inner.len() && is_css_whitespace(inner[j]) {
                 j += 1;
             }
             return Some(inner[j..].iter().collect());
@@ -680,7 +685,11 @@ fn nth_of_parts(text: &str) -> Option<(&str, &str, &str)> {
     }
     let arg = &text[open + 1..text.len() - 1];
     let pos = find_of_keyword(&arg.to_ascii_lowercase())?;
-    Some((name, arg[..pos].trim(), arg[pos + 2..].trim()))
+    Some((
+        name,
+        arg[..pos].trim_matches(is_css_whitespace),
+        arg[pos + 2..].trim_matches(is_css_whitespace),
+    ))
 }
 
 /// The byte index of a whitespace-bounded `of` keyword in an already-lowercased
@@ -924,7 +933,7 @@ pub(crate) enum TargetClass {
 
 /// Classify an `@extend` target string (already interpolation-resolved).
 pub(crate) fn classify_target(s: &str) -> TargetClass {
-    let s = s.trim();
+    let s = s.trim_matches(is_css_whitespace);
     if s.is_empty() {
         return TargetClass::Invalid;
     }
@@ -1827,7 +1836,7 @@ pub(crate) fn normalize_pseudo_arg(text: &str) -> Option<String> {
             if leading {
                 if ch == '\n' {
                     brk = true;
-                } else if !ch.is_whitespace() {
+                } else if !is_css_whitespace(ch) {
                     leading = false;
                 }
             }
@@ -2041,7 +2050,11 @@ fn nth_selector_parts(text: &str) -> Option<(&str, &str, &str)> {
     }
     let arg = &text[open + 1..text.len() - 1];
     let pos = find_of_keyword(&arg.to_ascii_lowercase())?;
-    Some((head, arg[..pos].trim(), arg[pos + 2..].trim()))
+    Some((
+        head,
+        arg[..pos].trim_matches(is_css_whitespace),
+        arg[pos + 2..].trim_matches(is_css_whitespace),
+    ))
 }
 
 /// The selector branches of a subselector-pseudo *class* (dart-sass
@@ -4798,7 +4811,7 @@ pub(crate) fn complex_to_list_parts(c: &Complex) -> Vec<String> {
 /// list of simple-selector strings, or `None` if the text isn't a single valid
 /// compound (dart-sass `simple-selectors` parses a `CompoundSelector`).
 pub(crate) fn parse_compound_simples(s: &str) -> Option<Vec<String>> {
-    let chars: Vec<char> = s.trim().chars().collect();
+    let chars: Vec<char> = s.trim_matches(is_css_whitespace).chars().collect();
     let mut i = 0;
     let compound = parse_compound(&chars, &mut i)?;
     skip_ws(&chars, &mut i);
@@ -5122,7 +5135,7 @@ fn extend_component_compound(
 /// bogus combinators omitted them from the CSS).
 pub(crate) fn selector_contains_simple(s: &str, target: &Simple) -> bool {
     for part in split_top(s, ',') {
-        if let Some(complex) = parse_complex(part.trim()) {
+        if let Some(complex) = parse_complex(part.trim_matches(is_css_whitespace)) {
             for comp in &complex.components {
                 if comp.compound.simples.iter().any(|x| x == target) {
                     return true;

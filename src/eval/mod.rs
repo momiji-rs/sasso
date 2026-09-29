@@ -7862,11 +7862,11 @@ fn normalize_selector_slow(s: &str) -> String {
             }
         }
     }
-    let t = out.trim();
+    let t = out.trim_matches(is_css_whitespace);
     // dart keeps an escape's trailing space: a hex escape's terminator
     // (`selector\9 `) and an escaped literal space (`sp\ `) both survive;
     // only plain trailing whitespace trims.
-    let start = out.len() - out.trim_start().len();
+    let start = out.len() - out.trim_start_matches(is_css_whitespace).len();
     let end = start + t.len();
     if out[end..].starts_with(' ') && (ends_with_hex_escape(t) || ends_with_escaping_backslash(t)) {
         out[start..=end].to_string()
@@ -7903,8 +7903,8 @@ fn ends_with_escaping_backslash(t: &str) -> bool {
 /// that belongs to a trailing escape — a hex escape's terminator (`\9 `) or
 /// an escaped literal space (`sp\ `).
 fn trim_selector_part(p: &str) -> &str {
-    let t0 = p.trim_start();
-    let t = t0.trim_end();
+    let t0 = p.trim_start_matches(is_css_whitespace);
+    let t = t0.trim_end_matches(is_css_whitespace);
     if t.len() < t0.len() && (ends_with_hex_escape(t) || ends_with_escaping_backslash(t)) {
         &t0[..t.len() + 1]
     } else {
@@ -8242,7 +8242,7 @@ fn compound_has_bogus_pseudo(compound: &str) -> bool {
                     let allow_leading = name.eq_ignore_ascii_case("has");
                     let arg: String = chars[open + 1..k.min(chars.len())].iter().collect();
                     for part in split_commas(&arg).iter() {
-                        let part = part.trim();
+                        let part = part.trim_matches(is_css_whitespace);
                         if !part.is_empty() && complex_selector_is_bogus(part, true, allow_leading) {
                             return true;
                         }
