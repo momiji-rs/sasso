@@ -13,6 +13,12 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Performance
 
+- **npm, wasm engine:** resolving an `@use`/`@import` no longer throws an
+  error for every candidate file that is not there. Most probes miss (about 850
+  of the 980 made by Lichess's heaviest entry point), and building an ENOENT
+  error for each was a quarter of the compile. That entry point compiles in
+  about 100 ms instead of 134 ms on Linux/x86_64. The native engine and the
+  binary resolve in Rust and are unaffected.
 - **npm CLI:** starting up is back to 0.18.0's cost. 0.19.x loaded the six
   `--watch` modules and the whole importer on every run, including one that
   only hands its command line to a `sasso` binary on PATH. They now load only
