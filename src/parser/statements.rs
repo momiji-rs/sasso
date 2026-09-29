@@ -280,8 +280,11 @@ impl Parser {
         if !self.sc.eat('{') {
             return Err(Error::at("expected \"{\".", self.sc.position()));
         }
+        let in_decl_context = self.decl_context;
         self.block_depth += 1;
+        let saved_decl_context = std::mem::replace(&mut self.decl_context, true);
         let body = self.parse_statements(false);
+        self.decl_context = saved_decl_context;
         self.block_depth -= 1;
         let body = body?;
         if !self.sc.eat('}') {
@@ -290,6 +293,7 @@ impl Parser {
         let end_line = self.sc.position().line as u32;
         Ok(Stmt::Rule(Rule {
             selector,
+            in_decl_context,
             body,
             selector_pos,
             selector_interp_spans,

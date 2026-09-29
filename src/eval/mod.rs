@@ -3326,7 +3326,7 @@ impl<'a> Evaluator<'a> {
         let part_lbs: Vec<bool> = if lbs_fast {
             Vec::new()
         } else {
-            comma_linebreaks(&sel_str, false)
+            comma_linebreaks(&sel_str, rule.in_decl_context)
         };
         let parent_lbs: &[bool] = if self.current_linebreaks.len() == parents.len() {
             &self.current_linebreaks
@@ -6822,39 +6822,99 @@ fn extend_selector_list(
 /// emitted complex selector should begin on its own line — parallel to the
 /// parts `resolve_selectors` keeps.
 ///
-/// dart-sass carries a per-complex `lineBreak` flag set when a newline precedes
-/// the part in source (`a,\nb`). During parent resolution that flag survives for
-/// an *implicit*-parent part (`parent.lineBreak || child.lineBreak`), but a part
-/// that *references* the parent with `&` takes the parent complex's flag instead
-/// and drops its own. We don't track parent line-breaks, so for a `&`-part in a
-/// nested rule we conservatively report `false` (correct whenever the governing
-/// parent is the first/unbroken one, and never emits a break dart-sass wouldn't).
-fn comma_linebreaks(sel: &str, nested: bool) -> Vec<bool> {
-    // An EMPTY comma part (a stray trailing/doubled comma) is dropped, but a
-    // newline inside it still belongs to the next real part:
-    // `#foo #bar,,\n,#baz #boom,` keeps `#baz #boom` on its own line.
+/// dart-sass carries a per-complex `lineBreak` flag, set by comparing line
+/// numbers: a part is line-broken when a newline sits anywhere since the start
+/// of the last line-broken part — inside the previous complex (`a\nb, c`),
+/// before or after its comma (`a\n, b`), or in an EMPTY part between, which is
+/// itself dropped (`a,,\n,b`). Parent resolution then combines the flags (see
+/// `resolve_selectors_opt`).
+///
+/// `in_decl_context` is `Rule::in_decl_context`: dart's declaration-or-rule
+/// lookahead has already replaced the whitespace after a leading identifier
+/// with one space, so a newline there counts for nothing (`.p { a\nb, c {…} }`
+/// keeps `.p a b, .p c` on one line).
+fn comma_linebreaks(sel: &str, in_decl_context: bool) -> Vec<bool> {
+    let runs = if in_decl_context {
+        lead_ident_ws(sel)
+    } else {
+        Vec::new()
+    };
+    let squashed;
+    let sel = if runs.iter().any(|r| sel[r.clone()].contains('\n')) {
+        // Only the flags are wanted, so the runs can go entirely.
+        let mut out = String::with_capacity(sel.len());
+        let mut at = 0;
+        for r in runs {
+            out.push_str(&sel[at..r.start]);
+            at = r.end;
+        }
+        out.push_str(&sel[at..]);
+        squashed = out;
+        squashed.as_str()
+    } else {
+        sel
+    };
     let mut out = Vec::new();
-    let mut pending_nl = false;
-    let segs = split_commas(sel);
-    for (i, seg) in segs.iter().enumerate() {
-        if seg.trim().is_empty() {
-            pending_nl = pending_nl || (i > 0 && seg.contains('\n'));
+    let mut nl_since_break = false;
+    for (i, seg) in split_commas(sel).iter().enumerate() {
+        let body = seg.trim_start_matches(is_css_whitespace);
+        let leading_nl = seg[..seg.len() - body.len()].contains('\n');
+        if body.trim_end_matches(is_css_whitespace).is_empty() {
+            nl_since_break = nl_since_break || (i > 0 && leading_nl);
             continue;
         }
-        // dart marks a complex as line-broken when ANY newline sits between
-        // it and the previous one — including BEFORE the comma (`a\n, b`).
-        let leading_nl = seg.chars().take_while(|c| c.is_whitespace()).any(|c| c == '\n');
-        let prev_trailing_nl = i > 0
-            && segs[i - 1]
-                .chars()
-                .rev()
-                .take_while(|c| c.is_whitespace())
-                .any(|c| c == '\n');
-        let newline_before = i > 0 && (leading_nl || prev_trailing_nl);
-        out.push((newline_before || pending_nl) && !(nested && part_has_parent_ref(seg)));
-        pending_nl = false;
+        let line_break = i > 0 && (nl_since_break || leading_nl);
+        out.push(line_break);
+        nl_since_break = body.contains('\n');
     }
     out
+}
+
+/// The whitespace runs dart's `_declarationOrBuffer` drops from a selector's
+/// leading identifier (optionally behind a `*prop`/`:prop`/`.prop`/`#prop`
+/// hack character): each hex escape's terminating whitespace (`\\61\nb`),
+/// since dart keeps the identifier's value rather than its source, and the
+/// run after it, written back as one space — unless a `:` follows, which
+/// keeps that run as written.
+fn lead_ident_ws(sel: &str) -> Vec<std::ops::Range<usize>> {
+    let mut runs = Vec::new();
+    let mut it = sel.char_indices().peekable();
+    if matches!(it.peek(), Some((_, ':' | '*' | '.' | '#'))) {
+        it.next();
+        while it.next_if(|&(_, c)| is_css_whitespace(c)).is_some() {}
+    }
+    let mut cs = it.peek().map_or("", |&(i, _)| &sel[i..]).chars();
+    let starts_ident = match cs.next() {
+        Some('\\') => true,
+        Some('-') => matches!(cs.next(), Some(c) if c == '-' || c == '\\' || is_name_start(c)),
+        Some(c) => is_name_start(c),
+        None => false,
+    };
+    if !starts_ident {
+        return runs;
+    }
+    while let Some((_, c)) = it.next_if(|&(_, c)| is_name_char(c) || c == '\\') {
+        if c == '\\' {
+            // An escape: up to six hex digits and one whitespace, or one character.
+            if it.next_if(|&(_, c)| c.is_ascii_hexdigit()).is_some() {
+                for _ in 0..5 {
+                    it.next_if(|&(_, c)| c.is_ascii_hexdigit());
+                }
+                if let Some((i, c)) = it.next_if(|&(_, c)| is_css_whitespace(c)) {
+                    runs.push(i..i + c.len_utf8());
+                }
+            } else {
+                it.next();
+            }
+        }
+    }
+    let start = it.peek().map_or(sel.len(), |&(i, _)| i);
+    while it.next_if(|&(_, c)| is_css_whitespace(c)).is_some() {}
+    let end = it.peek().map_or(sel.len(), |&(i, _)| i);
+    if end > start && !sel[end..].starts_with(':') {
+        runs.push(start..end);
+    }
+    runs
 }
 
 /// Whether a selector comma-part contains a top-level parent reference `&`

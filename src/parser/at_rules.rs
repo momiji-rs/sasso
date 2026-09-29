@@ -1522,6 +1522,7 @@ impl Parser {
                 query: None,
                 body: vec![Stmt::Rule(Rule {
                     selector,
+                    in_decl_context: false,
                     body,
                     selector_pos,
                     selector_interp_spans: Vec::new(),
@@ -1626,7 +1627,7 @@ impl Parser {
         let prelude = trim_prelude(self.parse_template_mode(&['{', ';', '}'], CommentMode::UnknownPrelude)?);
         self.skip_ws_inline();
         let (body, lines) = if self.sc.peek() == Some('{') {
-            let (body, lines) = self.parse_braced_body_lines()?;
+            let (body, lines) = self.parse_decl_body_lines()?;
             (Some(body), lines)
         } else {
             self.sc.eat(';');
@@ -1668,7 +1669,11 @@ impl Parser {
         let prelude = trim_prelude(prelude);
         self.skip_ws_inline();
         let (body, lines) = if self.sc.peek() == Some('{') {
-            let (body, lines) = self.parse_braced_body_lines()?;
+            let (body, lines) = if name == "-moz-document" {
+                self.parse_braced_body_lines()?
+            } else {
+                self.parse_decl_body_lines()?
+            };
             (Some(body), lines)
         } else {
             self.sc.eat(';');
@@ -2234,7 +2239,11 @@ impl Parser {
         } else {
             name_length
         };
-        let body = self.parse_braced_body()?;
+        let body = if is_function {
+            self.parse_braced_body()?
+        } else {
+            self.parse_decl_body_lines()?.0
+        };
         // Unknown at-rules aren't allowed in a function body (parse-time in
         // dart-sass: "This at-rule is not allowed here.").
         if is_function {
@@ -2835,7 +2844,7 @@ impl Parser {
         // `@include name(args)` only. Neither covers the terminating `;`.
         let full_length;
         let content = if self.sc.peek() == Some('{') {
-            let body = self.parse_braced_body()?;
+            let body = self.parse_decl_body_lines()?.0;
             // In the indented syntax the braces around a child block are
             // SYNTHETIC — the front end wrote them into the reconstruction —
             // so the text they enclose is not a source span to point at, and

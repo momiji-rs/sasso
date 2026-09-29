@@ -34,7 +34,7 @@ impl<'a> Evaluator<'a> {
             let mut preserved: Vec<OutItem> = Vec::new();
             for stmt in stmts {
                 if let Stmt::Rule(r) = stmt {
-                    let (own, own_lbs) = self.css_selectors(&r.selector, true)?;
+                    let (own, own_lbs) = self.css_selectors(r, true)?;
                     if own.iter().any(|s| part_has_parent_ref(s)) {
                         let inner = self.css_body(&r.body)?;
                         if !inner.is_empty() {
@@ -66,7 +66,7 @@ impl<'a> Evaluator<'a> {
                     // with `preserveParentSelectors`). The sheet's own top level
                     // always rejects leading combinators — also when merged
                     // under a Sass parent (dart checks in the merge branch).
-                    let (own, own_lbs) = self.css_selectors(&r.selector, true)?;
+                    let (own, own_lbs) = self.css_selectors(r, true)?;
                     // A `&`-bearing rule was already emitted in the leading
                     // parent shell above.
                     if !parents.is_empty() && own.iter().any(|s| part_has_parent_ref(s)) {
@@ -247,7 +247,7 @@ impl<'a> Evaluator<'a> {
                     let (selectors, linebreaks) = if frames {
                         (self.css_frame_selectors(&r.selector)?, Vec::new())
                     } else {
-                        self.css_selectors(&r.selector, false)?
+                        self.css_selectors(r, false)?
                     };
                     // Inside `@keyframes` this rule is a FRAME, and nothing in
                     // it bubbles: dart keeps a nested at-rule where it is
@@ -578,10 +578,10 @@ impl<'a> Evaluator<'a> {
     /// source's per-complex line-break flags (`a,\nb` keeps its lines).
     fn css_selectors(
         &mut self,
-        sel: &[crate::ast::TplPiece],
+        rule: &crate::ast::Rule,
         top_level: bool,
     ) -> Result<(Vec<String>, Vec<bool>), Error> {
-        let s = self.eval_template(sel)?;
+        let s = self.eval_template(&rule.selector)?;
         let parts: Vec<String> = split_commas(&s)
             .iter()
             .map(|p| p.trim().to_string())
@@ -592,7 +592,7 @@ impl<'a> Evaluator<'a> {
         }
         let normalized: Vec<String> = parts.iter().map(|p| normalize_selector(p)).collect();
         let linebreaks = if s.contains('\n') {
-            comma_linebreaks(&s, false)
+            comma_linebreaks(&s, rule.in_decl_context)
         } else {
             Vec::new()
         };
@@ -713,7 +713,7 @@ impl<'a> Evaluator<'a> {
                 });
             }
             Stmt::Rule(r) => {
-                let (selectors, linebreaks) = self.css_selectors(&r.selector, false)?;
+                let (selectors, linebreaks) = self.css_selectors(r, false)?;
                 let inner = self.css_body(&r.body)?;
                 // An (recursively) empty nested rule is invisible (dart-sass
                 // skips childless rules when serializing).

@@ -221,6 +221,13 @@ struct Parser {
     /// grammar liberties dart's `SassParser` takes over `ScssParser` apply —
     /// an `@import` URL may be an unquoted token.
     indented: bool,
+    /// Inside a block where a declaration may stand — a style rule, `@mixin`,
+    /// an `@include` content block, or an unknown at-rule (dart's
+    /// `_inStyleRule || _inUnknownAtRule || _inMixin || _inContentBlock`).
+    /// A style rule there is parsed by dart's declaration-or-rule lookahead,
+    /// which rewrites the whitespace after a leading identifier (see
+    /// `Rule::squashed_lead_ws`).
+    decl_context: bool,
 }
 
 /// Parse a complete stylesheet (SCSS).
@@ -252,6 +259,7 @@ fn parse_inner(src: &str, plain_css: bool, indented: bool) -> Result<Stylesheet,
         plain_css,
         plain_css_interp: false,
         indented,
+        decl_context: false,
     };
     let stmts = p.parse_statements(true)?;
     Ok(Stylesheet { stmts })
@@ -706,6 +714,14 @@ impl Parser {
     /// Parse a `{ … }` statement block.
     fn parse_braced_body(&mut self) -> Result<Vec<Stmt>, Error> {
         Ok(self.parse_braced_body_lines()?.0)
+    }
+
+    /// `parse_braced_body_lines` for a block where a declaration may stand.
+    fn parse_decl_body_lines(&mut self) -> Result<(Vec<Stmt>, SrcLines), Error> {
+        let saved = std::mem::replace(&mut self.decl_context, true);
+        let body = self.parse_braced_body_lines();
+        self.decl_context = saved;
+        body
     }
 
     /// Parse a `{ … }` statement block, also reporting the `{`/`}` source

@@ -4191,6 +4191,338 @@ fn a_non_ascii_character_starts_a_name() {
 }
 
 #[test]
+fn a_newline_anywhere_since_the_last_break_breaks_the_line() {
+    // dart sets a complex selector's `lineBreak` by comparing line numbers: any
+    // newline since the last line-broken part breaks the next one, including one
+    // inside the previous complex (`a\nb, c`). Where a declaration may stand (a
+    // style rule, `@mixin`, a content block, an unknown at-rule), dart's
+    // declaration-or-rule lookahead first rewrites the whitespace after a leading
+    // identifier, and a hex escape's own whitespace, as one space, so a newline
+    // there does not count (`.p { a\nb, c {…} }` stays on one line).
+    for (scss, expanded, compressed) in [
+        ("a\nb, c { c: d }\n", "a b,\nc {\n  c: d;\n}", "a b,c{c:d}"),
+        ("a\n.x, c { c: d }\n", "a .x,\nc {\n  c: d;\n}", "a .x,c{c:d}"),
+        (
+            "a,\nb\nc, d { c: d }\n",
+            "a,\nb c,\nd {\n  c: d;\n}",
+            "a,b c,d{c:d}",
+        ),
+        ("a\nb,, c { c: d }\n", "a b,\nc {\n  c: d;\n}", "a b,c{c:d}"),
+        (
+            ".p\n.r, .q { a, c { x: y } }\n",
+            ".p .r a, .p .r c,\n.q a,\n.q c {\n  x: y;\n}",
+            ".p .r a,.p .r c,.q a,.q c{x:y}",
+        ),
+        (
+            "@media s { a\nb, c { c: d } }\n",
+            "@media s {\n  a b,\n  c {\n    c: d;\n  }\n}",
+            "@media s{a b,c{c:d}}",
+        ),
+        (
+            "a\nb, c { d\ne, f { x: y } }\n",
+            "a b d e, a b f,\nc d e,\nc f {\n  x: y;\n}",
+            "a b d e,a b f,c d e,c f{x:y}",
+        ),
+        (
+            ".p { a\nb, c { x: y } }\n",
+            ".p a b, .p c {\n  x: y;\n}",
+            ".p a b,.p c{x:y}",
+        ),
+        (
+            ".p { a\n,b { x: y } }\n",
+            ".p a, .p b {\n  x: y;\n}",
+            ".p a,.p b{x:y}",
+        ),
+        (
+            ".p { #{a}\nb, c { x: y } }\n",
+            ".p a b, .p c {\n  x: y;\n}",
+            ".p a b,.p c{x:y}",
+        ),
+        (
+            ".p { a.b\nc, d { x: y } }\n",
+            ".p a.b c,\n.p d {\n  x: y;\n}",
+            ".p a.b c,.p d{x:y}",
+        ),
+        (
+            ".p { .a\nb, c { x: y } }\n",
+            ".p .a b, .p c {\n  x: y;\n}",
+            ".p .a b,.p c{x:y}",
+        ),
+        (
+            ".p { #a\nb, c { x: y } }\n",
+            ".p #a b, .p c {\n  x: y;\n}",
+            ".p #a b,.p c{x:y}",
+        ),
+        (
+            ".p { *a\nb, c { x: y } }\n",
+            ".p * a b, .p c {\n  x: y;\n}",
+            ".p * a b,.p c{x:y}",
+        ),
+        (
+            ".p { :hover\nb, c { x: y } }\n",
+            ".p :hover b, .p c {\n  x: y;\n}",
+            ".p :hover b,.p c{x:y}",
+        ),
+        (
+            ".p { a\n:hover, c { x: y } }\n",
+            ".p a :hover,\n.p c {\n  x: y;\n}",
+            ".p a :hover,.p c{x:y}",
+        ),
+        (
+            ".p { -a\nb, c { x: y } }\n",
+            ".p -a b, .p c {\n  x: y;\n}",
+            ".p -a b,.p c{x:y}",
+        ),
+        (
+            ".p { --a\nb, c { x: y } }\n",
+            ".p --a b, .p c {\n  x: y;\n}",
+            ".p --a b,.p c{x:y}",
+        ),
+        (
+            ".p { \\61\nb, c { x: y } }\n",
+            ".p ab, .p c {\n  x: y;\n}",
+            ".p ab,.p c{x:y}",
+        ),
+        (
+            ".p { a\\:b\nc, d { x: y } }\n",
+            ".p a\\:b c, .p d {\n  x: y;\n}",
+            ".p a\\:b c,.p d{x:y}",
+        ),
+        (
+            ".p { a\n\nb\nc, d { x: y } }\n",
+            ".p a b c,\n.p d {\n  x: y;\n}",
+            ".p a b c,.p d{x:y}",
+        ),
+        (
+            ".p { a,\nb\nc, d { x: y } }\n",
+            ".p a,\n.p b c,\n.p d {\n  x: y;\n}",
+            ".p a,.p b c,.p d{x:y}",
+        ),
+        (
+            ".p { @media s { a\nb, c { x: y } } }\n",
+            "@media s {\n  .p a b, .p c {\n    x: y;\n  }\n}",
+            "@media s{.p a b,.p c{x:y}}",
+        ),
+        (
+            "@media s { a\nb, c { x: y } }\n",
+            "@media s {\n  a b,\n  c {\n    x: y;\n  }\n}",
+            "@media s{a b,c{x:y}}",
+        ),
+        (
+            "@mixin m { a\nb, c { x: y } } @include m;\n",
+            "a b, c {\n  x: y;\n}",
+            "a b,c{x:y}",
+        ),
+        (
+            "@mixin m { @content; } @include m { a\nb, c { x: y } }\n",
+            "a b, c {\n  x: y;\n}",
+            "a b,c{x:y}",
+        ),
+        (
+            "@foo { a\nb, c { x: y } }\n",
+            "@foo {\n  a b, c {\n    x: y;\n  }\n}",
+            "@foo{a b,c{x:y}}",
+        ),
+        (
+            "@-moz-document url(x) { a\nb, c { x: y } }\n",
+            "@-moz-document url(x) {\n  a b,\n  c {\n    x: y;\n  }\n}",
+            "@-moz-document url(x){a b,c{x:y}}",
+        ),
+        (
+            ".p { @at-root a\nb, c { x: y } }\n",
+            "a b,\nc {\n  x: y;\n}",
+            "a b,c{x:y}",
+        ),
+        (
+            ".p { @at-root { a\nb, c { x: y } } }\n",
+            "a b, c {\n  x: y;\n}",
+            "a b,c{x:y}",
+        ),
+        (
+            "@at-root a\nb, c { x: y }\n",
+            "a b,\nc {\n  x: y;\n}",
+            "a b,c{x:y}",
+        ),
+        (
+            ".p { @if true { a\nb, c { x: y } } }\n",
+            ".p a b, .p c {\n  x: y;\n}",
+            ".p a b,.p c{x:y}",
+        ),
+        (
+            "a\nb, c { d\ne, f { x: y } }\n",
+            "a b d e, a b f,\nc d e,\nc f {\n  x: y;\n}",
+            "a b d e,a b f,c d e,c f{x:y}",
+        ),
+        (
+            ".p { a\n\u{a0}, c { x: y } }\n",
+            "@charset \"UTF-8\";\n.p a \u{a0}, .p c {\n  x: y;\n}",
+            "\u{feff}.p a \u{a0},.p c{x:y}",
+        ),
+        (
+            "a\n\u{a0},b { c: d }\n",
+            "@charset \"UTF-8\";\na \u{a0},\nb {\n  c: d;\n}",
+            "\u{feff}a \u{a0},b{c:d}",
+        ),
+        (
+            ".p { a /* c */\nb, c { x: y } }\n",
+            ".p a b, .p c {\n  x: y;\n}",
+            ".p a b,.p c{x:y}",
+        ),
+        (
+            ".p { a\n/* c */ b, c { x: y } }\n",
+            ".p a b, .p c {\n  x: y;\n}",
+            ".p a b,.p c{x:y}",
+        ),
+        (
+            ".p { > a\nb, c { x: y } }\n",
+            ".p > a b,\n.p c {\n  x: y;\n}",
+            ".p>a b,.p c{x:y}",
+        ),
+        (
+            ".p { & a\nb, c { x: y } }\n",
+            ".p a b,\n.p c {\n  x: y;\n}",
+            ".p a b,.p c{x:y}",
+        ),
+        (
+            ".p { a\nb, &c { x: y } }\n",
+            ".p a b, .pc {\n  x: y;\n}",
+            ".p a b,.pc{x:y}",
+        ),
+        (
+            ".p { \\61\nb, c { x: y } }\n",
+            ".p ab, .p c {\n  x: y;\n}",
+            ".p ab,.p c{x:y}",
+        ),
+        (
+            ".p { \\61 \nb, c { x: y } }\n",
+            ".p a b, .p c {\n  x: y;\n}",
+            ".p a b,.p c{x:y}",
+        ),
+        (
+            ".p { \\61\n:hover, c { x: y } }\n",
+            ".p a:hover, .p c {\n  x: y;\n}",
+            ".p a:hover,.p c{x:y}",
+        ),
+        (
+            ".p { \\x\nb, c { x: y } }\n",
+            ".p x b, .p c {\n  x: y;\n}",
+            ".p x b,.p c{x:y}",
+        ),
+        (
+            ".p { a\\61\nb, c { x: y } }\n",
+            ".p aab, .p c {\n  x: y;\n}",
+            ".p aab,.p c{x:y}",
+        ),
+        (
+            ".p { * a\nb, c { x: y } }\n",
+            ".p * a b, .p c {\n  x: y;\n}",
+            ".p * a b,.p c{x:y}",
+        ),
+        (
+            ".p { \\000061\nb, c { x: y } }\n",
+            ".p ab, .p c {\n  x: y;\n}",
+            ".p ab,.p c{x:y}",
+        ),
+        (
+            ".p { -\\61\nb, c { x: y } }\n",
+            ".p -ab, .p c {\n  x: y;\n}",
+            ".p -ab,.p c{x:y}",
+        ),
+        (
+            "@#{\"foo\"} { a\nb, c { x: y } }\n",
+            "@foo {\n  a b, c {\n    x: y;\n  }\n}",
+            "@foo{a b,c{x:y}}",
+        ),
+        ("a,,\n,b { c: d }\n", "a,\nb {\n  c: d;\n}", "a,b{c:d}"),
+        (
+            ".p { a,,\n,b { c: d } }\n",
+            ".p a,\n.p b {\n  c: d;\n}",
+            ".p a,.p b{c:d}",
+        ),
+        (
+            ".p { a\n,,b { c: d } }\n",
+            ".p a, .p b {\n  c: d;\n}",
+            ".p a,.p b{c:d}",
+        ),
+        (
+            ".p { \\61\t\nb, c { x: y } }\n",
+            ".p a b, .p c {\n  x: y;\n}",
+            ".p a b,.p c{x:y}",
+        ),
+        (
+            "a { x: y } b\nc, d { x: y }\n",
+            "a {\n  x: y;\n}\n\nb c,\nd {\n  x: y;\n}",
+            "a{x:y}b c,d{x:y}",
+        ),
+        (
+            "@mixin m { x: y } b\nc, d { x: y }\n",
+            "b c,\nd {\n  x: y;\n}",
+            "b c,d{x:y}",
+        ),
+        (
+            "@foo { x: y } b\nc, d { x: y }\n",
+            "@foo {\n  x: y;\n}\nb c,\nd {\n  x: y;\n}",
+            "@foo{x:y}b c,d{x:y}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+}
+
+#[test]
+fn a_newline_anywhere_since_the_last_break_breaks_the_line_in_plain_css() {
+    // The same rule in a plain-CSS stylesheet: dart's `CssParser` takes the
+    // declaration-or-rule lookahead inside a style rule or an unknown at-rule
+    // too.
+    let opts = Options::default().with_syntax(sasso::Syntax::Css);
+    for (css, expanded, compressed) in [
+        ("a\nb, c { x: y }\n", "a b,\nc {\n  x: y;\n}", "a b,c{x:y}"),
+        (
+            ".p { a\nb, c { x: y } }\n",
+            ".p {\n  a b, c {\n    x: y;\n  }\n}",
+            ".p{a b,c{x:y}}",
+        ),
+        ("a,\nb, c { x: y }\n", "a,\nb, c {\n  x: y;\n}", "a,b,c{x:y}"),
+        ("a\n, b { x: y }\n", "a,\nb {\n  x: y;\n}", "a,b{x:y}"),
+        (
+            ".p { a\n, b { x: y } }\n",
+            ".p {\n  a, b {\n    x: y;\n  }\n}",
+            ".p{a,b{x:y}}",
+        ),
+        (
+            ".p { .a\nb, c { x: y } }\n",
+            ".p {\n  .a b, c {\n    x: y;\n  }\n}",
+            ".p{.a b,c{x:y}}",
+        ),
+        (
+            "@media s { a\nb, c { x: y } }\n",
+            "@media s {\n  a b,\n  c {\n    x: y;\n  }\n}",
+            "@media s{a b,c{x:y}}",
+        ),
+        (
+            ".p { @media s { a\nb, c { x: y } } }\n",
+            "@media s {\n  .p {\n    a b, c {\n      x: y;\n    }\n  }\n}",
+            "@media s{.p{a b,c{x:y}}}",
+        ),
+        (
+            "@foo { a\nb, c { x: y } }\n",
+            "@foo {\n  a b, c {\n    x: y;\n  }\n}",
+            "@foo{a b,c{x:y}}",
+        ),
+    ] {
+        assert_eq!(compile(css, &opts).unwrap(), expanded, "{css}");
+        let compressed_opts = Options::default()
+            .with_syntax(sasso::Syntax::Css)
+            .with_style(OutputStyle::Compressed);
+        let out = compile(css, &compressed_opts).unwrap();
+        assert_eq!(out, compressed, "{css} (compressed)");
+    }
+}
+
+#[test]
 fn a_missing_attribute_operator_has_darts_message() {
     // dart's attribute-operator reader has its own sentences: capitalized
     // `Expected "]".` when no operator follows the name, and `expected "=".`

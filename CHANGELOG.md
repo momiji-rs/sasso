@@ -86,6 +86,13 @@ Conformance is tracked separately as a ratchet against the official
   so both are one number, as in dart. The same rule makes `1 -\u{a0}2` the
   list `1 -\u{a0}2` rather than a subtraction.
 
+- **A newline anywhere in a complex selector breaks the next one's line.**
+  dart compares line numbers, so `a\nb, c` puts `c` on its own line, as
+  `a,\nc` does; sasso only looked at the whitespace beside the comma. Inside
+  a style rule, `@mixin`, a content block or an unknown at-rule, dart first
+  rewrites the whitespace after a leading identifier as one space, so there
+  `.p { a\nb, c {…} }` stays `.p a b, .p c`, and sasso now does the same.
+
 ## [0.19.2] - 2026-09-29
 
 _Faster again through the npm package, on the paths 0.19.1 missed. The wasm
