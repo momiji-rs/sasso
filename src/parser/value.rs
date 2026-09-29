@@ -383,7 +383,7 @@ impl Parser {
                             BinOp::Add => true,
                             _ => {
                                 let n1 = self.sc.peek_at(1);
-                                let starts_term = matches!(n1, Some(c) if c.is_ascii_digit() || c == '.' || c == '-' || c == '_' || c.is_alphabetic())
+                                let starts_term = matches!(n1, Some(c) if c.is_ascii_digit() || c == '.' || c == '-' || is_name_start_codepoint(c))
                                     || (n1 == Some('#') && self.sc.peek_at(2) == Some('{'))
                                     || n1 == Some('\\');
                                 !starts_term
@@ -1098,7 +1098,7 @@ impl Parser {
         } else {
             loop {
                 match self.sc.peek() {
-                    Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+                    Some(c) if is_name_start_codepoint(c) => {
                         self.sc.bump();
                         unit.push(c);
                     }
@@ -1122,7 +1122,7 @@ impl Parser {
                     // follows (`1-em` is 1 with unit `-em`; `1--em` is the
                     // list `1 --em`, `1- 2` subtracts).
                     Some('-') if unit.is_empty() => match self.sc.peek_at(1) {
-                        Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+                        Some(c) if is_name_start_codepoint(c) => {
                             self.sc.bump();
                             unit.push('-');
                         }

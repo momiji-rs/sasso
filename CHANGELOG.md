@@ -80,6 +80,11 @@ Conformance is tracked separately as a ratchet against the official
   name character: `c:\u{a0}d` is the value `\u{a0}d`, `1 ==\u{a0}1` is
   false, and `rgba(0,\u{a0}0, 0, 0.5)` is an error.
 
+- **A unit may be non-ASCII.** `1µs` was the list `1 µs`, and `math.unit(1é)`
+  an error; a unit, like any name, may begin with any non-ASCII character,
+  so both are one number, as in dart. The same rule makes `1 -\u{a0}2` the
+  list `1 -\u{a0}2` rather than a subtraction.
+
 ## [0.19.2] - 2026-09-29
 
 _Faster again through the npm package, on the paths 0.19.1 missed. The wasm

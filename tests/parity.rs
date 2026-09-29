@@ -4080,9 +4080,98 @@ fn an_nbsp_in_a_value_is_not_whitespace_where_dart_rejects_it() {
         ("a { c: 1 %\u{a0}2 }\n", "Undefined operation \"1 % \u{a0}2\"."),
         ("a { c: 1 % \u{a0}2 }\n", "Undefined operation \"1 % \u{a0}2\"."),
         ("@media (min-width: 1px)\u{a0}{ a { c: d } }\n", "expected \"{\"."),
+        (
+            "a { c: 1px\u{a0}+ 2px }\n",
+            "1px\u{a0} and 2px have incompatible units.",
+        ),
     ] {
         let err = compile(scss, &Options::default()).unwrap_err().to_string();
         assert!(err.contains(message), "{scss}: {err}");
+    }
+}
+
+#[test]
+fn a_non_ascii_character_starts_a_name() {
+    // dart-sass's `isNameStart` is an ASCII letter, `_`, or any non-ASCII code
+    // point. A number's unit and a `-` that starts a new list term only took an
+    // ASCII letter or `_`, so `1µs` was the list `1 µs` and `1 -\u{a0}2` was a
+    // subtraction. Offline; outputs are dart-sass 1.104.1's.
+    for (scss, expanded, compressed) in [
+        (
+            "a { c: 1\u{e9} }\n",
+            "@charset \"UTF-8\";\na {\n  c: 1\u{e9};\n}",
+            "\u{feff}a{c:1\u{e9}}",
+        ),
+        (
+            "a { c: 1\u{b5}s }\n",
+            "@charset \"UTF-8\";\na {\n  c: 1\u{b5}s;\n}",
+            "\u{feff}a{c:1\u{b5}s}",
+        ),
+        (
+            "a { c: 1px\u{e9} }\n",
+            "@charset \"UTF-8\";\na {\n  c: 1px\u{e9};\n}",
+            "\u{feff}a{c:1px\u{e9}}",
+        ),
+        (
+            "a { c: 1\u{e9} + 1\u{e9} }\n",
+            "@charset \"UTF-8\";\na {\n  c: 2\u{e9};\n}",
+            "\u{feff}a{c:2\u{e9}}",
+        ),
+        (
+            "a { c: 1px\u{a0}2px }\n",
+            "@charset \"UTF-8\";\na {\n  c: 1px\u{a0}2px;\n}",
+            "\u{feff}a{c:1px\u{a0}2px}",
+        ),
+        (
+            "a { c: 1\u{a0}and 2 }\n",
+            "@charset \"UTF-8\";\na {\n  c: 1\u{a0}and 2;\n}",
+            "\u{feff}a{c:1\u{a0}and 2}",
+        ),
+        (
+            "a { c: 1\u{a0} }\n",
+            "@charset \"UTF-8\";\na {\n  c: 1\u{a0};\n}",
+            "\u{feff}a{c:1\u{a0}}",
+        ),
+        (
+            "@use \"sass:math\"; a { c: math.unit(1\u{e9}) }\n",
+            "@charset \"UTF-8\";\na {\n  c: \"\u{e9}\";\n}",
+            "\u{feff}a{c:\"\u{e9}\"}",
+        ),
+        (
+            "a { c: 1 -\u{a0}2 }\n",
+            "@charset \"UTF-8\";\na {\n  c: 1 -\u{a0}2;\n}",
+            "\u{feff}a{c:1 -\u{a0}2}",
+        ),
+        (
+            "a { c: a -\u{a0}b }\n",
+            "@charset \"UTF-8\";\na {\n  c: a -\u{a0}b;\n}",
+            "\u{feff}a{c:a -\u{a0}b}",
+        ),
+        (
+            "a { c: 1 -\u{a0}\u{e9} }\n",
+            "@charset \"UTF-8\";\na {\n  c: 1 -\u{a0}\u{e9};\n}",
+            "\u{feff}a{c:1 -\u{a0}\u{e9}}",
+        ),
+        (
+            "a { c: 1\u{2003} }\n",
+            "@charset \"UTF-8\";\na {\n  c: 1\u{2003};\n}",
+            "\u{feff}a{c:1\u{2003}}",
+        ),
+        (
+            "@use \"sass:math\"; a { c: math.unit(1-\u{e9}) }\n",
+            "@charset \"UTF-8\";\na {\n  c: \"-\u{e9}\";\n}",
+            "\u{feff}a{c:\"-\u{e9}\"}",
+        ),
+        (
+            "@use \"sass:math\"; a { c: math.unit(1-\u{a0}) }\n",
+            "@charset \"UTF-8\";\na {\n  c: \"-\u{a0}\";\n}",
+            "\u{feff}a{c:\"-\u{a0}\"}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
     }
 }
 
