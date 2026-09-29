@@ -238,6 +238,42 @@ fn the_duplicate_argument_diagnostic_has_a_single_span() {
     assert!(missing.contains("invocation"), "{missing}");
 }
 
+/// A rejected `meta.call` does not run the function it was given.
+///
+/// dart verifies the arguments before the body, so the target never runs. The
+/// check started out AFTER the dispatch, on the reasoning that `meta.call`'s
+/// rest parameter left only a missing `$function` to report — which the
+/// duplicate rule made stale: the target ran and its `@warn` reached stderr
+/// before the error (r4130125500).
+///
+/// Measured against dart-sass 1.104.1 on 2026-09-29: dart prints the error
+/// alone, with no WARNING line.
+#[test]
+fn a_rejected_meta_call_does_not_run_its_target() {
+    let src = "@use \"sass:meta\";\n\
+               @function noisy($x: 1) {@warn \"noisy ran\"; @return $x}\n\
+               a {b: meta.call(meta.get-function(\"noisy\"), \
+               $function: meta.get-function(\"noisy\"))}\n";
+    let seen: std::rc::Rc<std::cell::RefCell<Vec<String>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = std::rc::Rc::clone(&seen);
+    let opts = Options::default().with_warn_handler(std::rc::Rc::new(move |ev: &sasso::WarnEvent<'_>| {
+        sink.borrow_mut().push(ev.message.to_string());
+    }));
+    let err = compile(src, &opts)
+        .expect_err("expected a compile error")
+        .to_string();
+    assert!(
+        err.starts_with("Error: Argument $function was passed both by position and by name."),
+        "{err}"
+    );
+    assert!(
+        seen.borrow().is_empty(),
+        "the target ran before the call was rejected: {:?}",
+        seen.borrow(),
+    );
+}
+
 #[test]
 fn a_module_diagnostic_carets_the_construct_it_is_about() {
     // dart spans the whole rule, call or reference a diagnostic is about;
