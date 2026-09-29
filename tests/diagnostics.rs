@@ -338,6 +338,31 @@ fn a_host_function_verifies_its_arguments_before_running() {
     let (ran, out) = run("foo($a, $b)", "foo(1, $b: 5)");
     assert_eq!(out, "(compiles)", "foo(1, $b: 5) should bind");
     assert!(ran, "the callback should have run");
+
+    // The rendered span, not just the message. `bind_host_args` returns a
+    // String and its caller wrapped it with `Error::at`, which leaves
+    // `length == 0` — so every host binding error drew a ONE-COLUMN caret where
+    // dart underlines the whole call (r4130575553). dart renders
+    // `foo(1, $a: 2)` with thirteen carets, measured through its JS API.
+    let cb: sasso::HostFunction = Rc::new(|_a: &[u8]| Ok(vec![3u8, 0u8, 2, 0, 0, 0, b'o', b'k']));
+    let opts = Options::default()
+        .with_url("in.scss")
+        .with_function("foo($a, $b)", Rc::clone(&cb));
+    let block = compile("a {b: foo(1, $a: 2)}\n", &opts)
+        .expect_err("expected a compile error")
+        .to_string();
+    assert_eq!(caret_line(&block), "^".repeat("foo(1, $a: 2)".len()), "{block}");
+    // The neighbour it shares the bug with, so the fix is the call site's and
+    // not this rule's.
+    let missing = compile("a {b: foo(1, $nope: 2)}\n", &opts)
+        .expect_err("expected a compile error")
+        .to_string();
+    assert!(missing.starts_with("Error: Missing argument $b."), "{missing}");
+    assert_eq!(
+        caret_line(&missing),
+        "^".repeat("foo(1, $nope: 2)".len()),
+        "{missing}"
+    );
 }
 
 /// A rejected `meta.call` does not run the function it was given.
