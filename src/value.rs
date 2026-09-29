@@ -833,12 +833,6 @@ impl Map {
         }
     }
 
-    /// Serialize the map for CSS / error messages: `(k1: v1, k2: v2)`, with
-    /// the empty map rendered as `()`.
-    pub(crate) fn to_css(&self, compressed: bool) -> String {
-        self.to_map_css(compressed)
-    }
-
     /// Serialize the map as dart-sass does: `(k1: v1, k2: v2)`, with the empty
     /// map rendered as `()`. Keys and values use their inspect form so nested
     /// quoted strings keep their quotes.
@@ -1174,6 +1168,13 @@ impl Value {
     /// expression can't be used in a calculation.`), so #234 deletes both rather
     /// than routing them here — folding it in would mean shipping a spelling
     /// dart does not use.
+    ///
+    /// A `Number` receiver may still use `to_css`: its two spellings are the
+    /// same string. A `Map` may NOT, which is the trap — `(a: b)` spells
+    /// identically either way, so a probe built from maps like that one
+    /// "proves" a coincidence that does not hold. A `null` or `()` entry is
+    /// erased by the CSS spelling (`(a: )`), and a one-element comma list
+    /// inside a map loses a level of parentheses.
     ///
     /// Verified against dart-sass 1.104.1 (2026-09-19, re-measured across the
     /// whole diagnostic surface 2026-09-29) including every list shape: a

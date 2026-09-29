@@ -13011,6 +13011,37 @@ fn a_type_error_names_its_parameter_and_spells_its_value_dart_s_way() {
         );
     }
 
+    // `isn't a valid CSS value.` embeds a whole MAP, and the four sites that
+    // raise it were passed over on a probe built from `(a: b)` — whose two
+    // spellings coincide. They do not coincide for an entry the CSS spelling
+    // erases, which is most of the interesting ones.
+    for scss in [
+        "a {b: (a: null)}\n",
+        "a {b: (a: ())}\n",
+        "a {b: (null: b)}\n",
+        "a {b: ((): b)}\n",
+        "a {b: (a: b, c: null)}\n",
+        "a {b: (a: list.append((), \"x\"))}\n",
+        "a {b: 1 + (a: null)}\n",
+        "a {b: #{(a: null)}}\n",
+        "a {b: [(a: null)]}\n",
+        "a {b: (a: (b: null))}\n",
+    ] {
+        let scss = format!("@use \"sass:list\";\n{scss}");
+        let ours = compile(&scss, &Options::default()).err().map(|e| e.to_string());
+        match dart_sass_error(&scss) {
+            Some(theirs) => {
+                let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
+                assert_eq!(
+                    our_error_sentence(&ours),
+                    theirs,
+                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n"
+                );
+            }
+            None => panic!("expected dart-sass to reject:\n{scss}"),
+        }
+    }
+
     // `@for`'s bounds are the same rule outside the built-ins: they printed the
     // value's TYPE NAME (`string is not a number.`) rather than the value.
     for bound in ["\"x\"", "red", "(a: b)", "(1 2)", "null"] {
