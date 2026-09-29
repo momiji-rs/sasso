@@ -3076,6 +3076,80 @@ fn an_attribute_value_is_decoded_and_requoted() {
 }
 
 #[test]
+fn non_ascii_whitespace_in_a_selector_is_not_a_separator() {
+    // CSS whitespace is space, tab, LF, CR and form feed — nothing else. NBSP
+    // and the other Unicode spaces are ordinary characters: part of a name
+    // (`a\u{a0}b` is ONE type selector) or of an attribute value. Treating them
+    // as whitespace rewrote them to U+0020, so `[a="x\u{a0}y"]` matched
+    // `x y` instead of `x&nbsp;y` (#71). Byte-matched to dart-sass 1.104.1,
+    // which keeps the character and so opens with `@charset`. Offline.
+    for (sel, want) in [
+        // A quoted attribute value keeps it (and, being an identifier, loses
+        // its quotes).
+        ("[a=\"x\u{a0}y\"]", "[a=x\u{a0}y]"),
+        ("[a=\"x\u{2003}y\"]", "[a=x\u{2003}y]"),
+        ("[a=\"x\u{a0}\u{a0}y\"]", "[a=x\u{a0}\u{a0}y]"),
+        ("[a=\"x \u{a0} y\"]", "[a=\"x \u{a0} y\"]"),
+        ("[a=\"x\u{a0}\"]", "[a=x\u{a0}]"),
+        // A hex escape's delimiter is the ASCII space; the NBSP after it stays.
+        ("[a=\"\\61 \u{a0}b\"]", "[a=a\u{a0}b]"),
+        // An unquoted value runs through it rather than stopping and reading
+        // the rest as a modifier (`[a=x y]`, with a plain space).
+        ("[a=x\u{a0}y]", "[a=x\u{a0}y]"),
+        ("[a=x\u{a0}]", "[a=x\u{a0}]"),
+        // Outside an attribute it is a name character, not a combinator.
+        ("a\u{a0}b", "a\u{a0}b"),
+        (".a\u{a0}.b", ".a\u{a0}.b"),
+        (":not(.a\u{a0}b)", ":not(.a\u{a0}b)"),
+        (":is([a=\"x\u{a0}y\"])", ":is([a=x\u{a0}y])"),
+        ("[a=\"x\u{a0}y\"] > b", "[a=x\u{a0}y] > b"),
+    ] {
+        assert_eq!(
+            ours(&format!("{sel} {{ c: d }}\n")),
+            format!("@charset \"UTF-8\";\n{want} {{\n  c: d;\n}}\n"),
+            "{sel}"
+        );
+    }
+    // The selector survives being re-parsed: as a parent, by `@extend`, and by
+    // the selector functions.
+    for (scss, want) in [
+        (
+            "[a=\"x\u{a0}y\"] { &.b { c: d } }\n",
+            "[a=x\u{a0}y].b {\n  c: d;\n}\n",
+        ),
+        (
+            ".a\u{a0}b { &:hover { c: d } }\n",
+            ".a\u{a0}b:hover {\n  c: d;\n}\n",
+        ),
+        (
+            "[a=\"x\u{a0}y\"] { @extend .q; }\n.q { e: f }\n",
+            ".q, [a=x\u{a0}y] {\n  e: f;\n}\n",
+        ),
+        (
+            ".a\u{a0}b { @extend .q; }\n.q { e: f }\n",
+            ".q, .a\u{a0}b {\n  e: f;\n}\n",
+        ),
+        (
+            "@use \"sass:selector\";\na { b: selector.parse(\"[a=\\\"x\u{a0}y\\\"]\"); }\n",
+            "a {\n  b: [a=x\u{a0}y];\n}\n",
+        ),
+        (
+            "@use \"sass:selector\";\na { b: selector.append(\"[a=x\u{a0}y]\", \".c\"); }\n",
+            "a {\n  b: [a=x\u{a0}y].c;\n}\n",
+        ),
+    ] {
+        assert_eq!(ours(scss), format!("@charset \"UTF-8\";\n{want}"), "{scss}");
+    }
+    // Compressed output takes the same path to the same answer.
+    let css = compile(
+        "[a=\"x\u{a0}y\"] > b { c: d }\n",
+        &Options::default().with_style(OutputStyle::Compressed),
+    )
+    .unwrap();
+    assert_eq!(css, "\u{feff}[a=x\u{a0}y]>b{c:d}");
+}
+
+#[test]
 fn a_non_finite_hue_never_reaches_the_hsl_conversion() {
     // The hsl -> rgb arithmetic has no answer for a non-finite hue: it picks
     // the fallback sector and hands back a NaN component. dart-sass 1.104.0

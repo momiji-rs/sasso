@@ -25,6 +25,7 @@ use crate::ast::{
 };
 use crate::error::Error;
 use crate::scanner::Pos;
+use crate::selector::is_css_whitespace;
 use crate::value::{CalcNode, CalcOp, List, ListSep, Map, Number, SassFunction, SassMixin, SassStr, Value};
 use crate::{CanonicalUrl, CanonicalizeContext, Importer, OutputStyle, Syntax};
 
@@ -7692,8 +7693,10 @@ fn normalize_selector_owned_facts(s: String) -> Normalized {
 }
 
 fn normalize_selector_slow(s: &str) -> String {
-    // Collapse runs of whitespace to single spaces (and trim) — but a hex
-    // escape's single terminating whitespace is PART of the token
+    // Collapse runs of whitespace to single spaces (and trim) — CSS
+    // whitespace only: NBSP and the other Unicode spaces are ordinary
+    // characters in a selector (a name character, or part of a value), not
+    // separators. A hex escape's single terminating whitespace is PART of the token
     // (`selector\9 ` keeps its trailing space; dart emits `selector\9  {`).
     // Inside pseudo parens, a run that follows a comma and contains a
     // newline collapses to '\n' instead: dart's arg complexes carry their
@@ -7716,7 +7719,7 @@ fn normalize_selector_slow(s: &str) -> String {
                 ci += 1;
                 digits += 1;
             }
-            if ci < cs.len() && cs[ci].is_whitespace() {
+            if ci < cs.len() && is_css_whitespace(cs[ci]) {
                 collapsed.push(' ');
                 ci += 1;
             }
@@ -7732,10 +7735,10 @@ fn normalize_selector_slow(s: &str) -> String {
             prev_space = false;
             continue;
         }
-        if c.is_whitespace() {
+        if is_css_whitespace(c) {
             let mut has_nl = c == '\n';
             ci += 1;
-            while ci < cs.len() && cs[ci].is_whitespace() {
+            while ci < cs.len() && is_css_whitespace(cs[ci]) {
                 has_nl |= cs[ci] == '\n';
                 ci += 1;
             }

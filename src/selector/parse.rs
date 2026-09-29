@@ -303,7 +303,7 @@ fn read_ident(chars: &[char], i: &mut usize) -> Option<String> {
 /// NOT `char::is_whitespace()`: that also matches NBSP and the other Unicode
 /// spaces, and eating one of those as an escape's delimiter would delete a
 /// character the value is supposed to keep.
-fn is_css_whitespace(c: char) -> bool {
+pub(crate) fn is_css_whitespace(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
 }
 
@@ -387,7 +387,7 @@ fn is_attr_identifier(v: &str) -> bool {
 /// grammar is returned verbatim.
 pub(crate) fn normalize_attribute(text: &str) -> String {
     let inner = match text.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
-        Some(i) => i.trim(),
+        Some(i) => i.trim_matches(is_css_whitespace),
         None => return text.to_string(),
     };
     let cs: Vec<char> = inner.chars().collect();
@@ -410,7 +410,7 @@ pub(crate) fn normalize_attribute(text: &str) -> String {
     }
     let name: String = cs[name_start..i].iter().collect();
     let mut j = i;
-    while j < cs.len() && cs[j].is_whitespace() {
+    while j < cs.len() && is_css_whitespace(cs[j]) {
         j += 1;
     }
     if j >= cs.len() {
@@ -427,7 +427,7 @@ pub(crate) fn normalize_attribute(text: &str) -> String {
     } else {
         return text.to_string();
     };
-    while j < cs.len() && cs[j].is_whitespace() {
+    while j < cs.len() && is_css_whitespace(cs[j]) {
         j += 1;
     }
     // Value: quoted or an identifier run.
@@ -462,7 +462,7 @@ pub(crate) fn normalize_attribute(text: &str) -> String {
         };
     } else {
         let vstart = j;
-        while j < cs.len() && !cs[j].is_whitespace() && cs[j] != ']' {
+        while j < cs.len() && !is_css_whitespace(cs[j]) && cs[j] != ']' {
             if cs[j] == '\\' {
                 j += 1;
             }
@@ -473,13 +473,13 @@ pub(crate) fn normalize_attribute(text: &str) -> String {
         }
         value = cs[vstart..j].iter().collect();
     }
-    while j < cs.len() && cs[j].is_whitespace() {
+    while j < cs.len() && is_css_whitespace(cs[j]) {
         j += 1;
     }
     // Optional single-letter modifier (`i`/`s`).
     if j < cs.len() {
         let m: String = cs[j..].iter().collect();
-        let m = m.trim();
+        let m = m.trim_matches(is_css_whitespace);
         if m.len() == 1 && m.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
             return format!("[{name}{op}{value} {m}]");
         }

@@ -853,7 +853,9 @@ pub(crate) fn assert_render_injective(_c: &Complex) {}
 pub(crate) fn assert_simple_render_injective(_s: &Simple) {}
 
 mod parse;
-pub(crate) use parse::{canonicalize_ident, normalize_attribute, parse_complex_one, parse_list};
+pub(crate) use parse::{
+    canonicalize_ident, is_css_whitespace, normalize_attribute, parse_complex_one, parse_list,
+};
 use parse::{parse_complex, parse_compound, skip_ws, split_top};
 
 // ---- the extend engine -------------------------------------------------

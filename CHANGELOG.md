@@ -11,6 +11,26 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Fixed
+
+- **A non-ASCII space in a selector is kept, not turned into a plain space**
+  (#71). CSS whitespace is space, tab, LF, CR and form feed; the selector
+  normalizer used Rust's `char::is_whitespace()`, which also matches NBSP and
+  the other Unicode spaces, and rewrote them to U+0020. So a rule written to
+  match `x&nbsp;y` silently matched `x y`:
+
+  ```
+    [a="x\u{a0}y"]   dart  [a=x\u{a0}y]   (and @charset "UTF-8")
+                     sasso [a="x y"]
+    a\u{a0}b         dart  a\u{a0}b       one type selector
+                     sasso a b            a descendant combinator
+  ```
+
+  An unquoted attribute value had the same flaw one step later: it stopped at
+  the NBSP and read the rest as a modifier, so `[a=x\u{a0}y]` became `[a=x y]`
+  — which is also what a quoted value turned into once it had lost its quotes
+  and was re-parsed, as a parent selector or by `@extend`.
+
 ## [0.19.2] - 2026-09-29
 
 _Faster again through the npm package, on the paths 0.19.1 missed. The wasm
