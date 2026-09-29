@@ -345,7 +345,13 @@ impl<'a> Evaluator<'a> {
             positional_count,
             |name| keyword.contains_key(name),
         ) {
-            return Err(self.error_at_call_with_declaration(msg, decl));
+            // The INVOCATION alone. dart renders this one with a single span —
+            // no `declaration` arm — unlike `Missing argument` below, which
+            // carries the declaration it was measured against. Verified by
+            // rendering both (r4130005295); a first-line comparison cannot see
+            // the difference, so `tests/diagnostics.rs` compares the whole
+            // block.
+            return Err(self.error_at_call(msg));
         }
         let mut pos_iter = positional.into_iter().enumerate();
         for param in &params.params {

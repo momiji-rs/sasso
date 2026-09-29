@@ -194,6 +194,50 @@ fn caret_line(block: &str) -> String {
         .to_string()
 }
 
+/// `Argument $x was passed both by position and by name.` renders ONE span, and
+/// `Missing argument $x.` renders two.
+///
+/// Both come from the same binder a line apart, and the first used the
+/// two-span helper — so it printed a `declaration` arm dart does not print. A
+/// message comparison cannot see that, which is how it reached review
+/// (r4130005295); this compares the whole block.
+///
+/// dart-sass 1.104.1, 2026-09-29:
+///
+/// ```text
+///   Error: Argument $a was passed both by position and by name.
+///     ╷
+///   2 │ a {b: f(1, $a: 2)}
+///     │       ^^^^^^^^^^^
+///     ╵
+/// ```
+#[test]
+fn the_duplicate_argument_diagnostic_has_a_single_span() {
+    let src = "@function f($a, $b: 2) {@return $a}\na {b: f(1, $a: 2)}\n";
+    let block = err_block(src, "in.scss");
+    assert!(
+        block.starts_with("Error: Argument $a was passed both by position and by name."),
+        "{block}"
+    );
+    assert!(
+        !block.contains("declaration"),
+        "dart renders this with the invocation alone:\n{block}"
+    );
+    assert!(
+        !block.contains("invocation"),
+        "a single span is not labelled:\n{block}"
+    );
+    assert_eq!(caret_line(&block), "^^^^^^^^^^^", "{block}");
+
+    // The neighbour, for contrast: a missing argument DOES carry the
+    // declaration it was measured against, so the difference is the rule's and
+    // not the renderer's.
+    let missing = err_block("@function f($a, $b: 2) {@return $a}\na {b: f()}\n", "in.scss");
+    assert!(missing.starts_with("Error: Missing argument $a."), "{missing}");
+    assert!(missing.contains("declaration"), "{missing}");
+    assert!(missing.contains("invocation"), "{missing}");
+}
+
 #[test]
 fn a_module_diagnostic_carets_the_construct_it_is_about() {
     // dart spans the whole rule, call or reference a diagnostic is about;
