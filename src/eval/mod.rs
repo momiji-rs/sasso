@@ -6302,30 +6302,39 @@ fn matching_bracket(chars: &[char], open: usize) -> usize {
     chars.len()
 }
 
-/// Validate the inner content of an `[…]` attribute selector. dart-sass allows
-/// at most a single trailing ASCII-letter modifier, directly before the close
-/// bracket: `[a]`, `[a=b]`, `[a=b ]`, `[a="b"i]`, and `[a=b i]` are valid, but
-/// `[a b]` (no operator), `[a=b cd]` (too long), `[a=b 1]`/`[a=b _]`/`[a=b ï]`
-/// (non-letter), and `[a=b i ]` (trailing space after the modifier) are not.
+/// Validate the inner content of an `[…]` attribute selector as dart's
+/// `_attributeSelector` reads it: a name (`a`, `ns|a`, `|a`, `*|a`), then
+/// either the close bracket or an operator, a value (a string or an
+/// identifier), and at most a single ASCII-letter modifier directly before
+/// the close. `[a b]` (no operator), `[a=1]` (no identifier), `[a=b cd]`,
+/// `[a=b 1]` and `[a=b i ]` are rejected with dart's message.
 fn validate_attribute(inner: &[char]) -> Result<(), Error> {
     let err = || Error::unpositioned("expected \"]\".");
+    let ident =
+        |i: usize| scan_identifier(inner, i).ok_or_else(|| Error::unpositioned("Expected identifier."));
     let mut i = 0;
     let skip_ws = |i: &mut usize| {
         while *i < inner.len() && is_css_whitespace(inner[*i]) {
             *i += 1;
         }
     };
-    // Namespace + attribute name (identifiers, escapes, and a `|` namespace
-    // separator); interpolation has already been resolved to literal text.
+    // dart's `_attributeName`; interpolation has already been resolved to
+    // literal text.
     skip_ws(&mut i);
-    while i < inner.len() {
-        let c = inner[i];
-        if c == '\\' {
-            i += 2;
-        } else if is_name_char(c) || c == '|' || c == '*' {
-            i += 1;
-        } else {
-            break;
+    match inner.get(i) {
+        Some('*') => {
+            if inner.get(i + 1) != Some(&'|') {
+                return Err(Error::unpositioned("expected \"|\"."));
+            }
+            i = ident(i + 2)?;
+        }
+        Some('|') => i = ident(i + 1)?,
+        _ => {
+            i = ident(i)?;
+            // A `|` is a namespace separator unless it starts `|=`.
+            if inner.get(i) == Some(&'|') && inner.get(i + 1) != Some(&'=') {
+                i = ident(i + 1)?;
+            }
         }
     }
     skip_ws(&mut i);
@@ -6345,22 +6354,10 @@ fn validate_attribute(inner: &[char]) -> Result<(), Error> {
     }
     i += if inner[i] == '=' { 1 } else { 2 };
     skip_ws(&mut i);
-    // The value: a quoted string or an unquoted identifier (with escapes).
+    // The value: a quoted string or an identifier (with escapes).
     match inner.get(i) {
         Some('"') | Some('\'') => i = skip_string(inner, i),
-        Some(_) => {
-            while i < inner.len() {
-                let c = inner[i];
-                if c == '\\' {
-                    i += 2;
-                } else if is_css_whitespace(c) {
-                    break;
-                } else {
-                    i += 1;
-                }
-            }
-        }
-        None => return Err(err()),
+        _ => i = ident(i)?,
     }
     skip_ws(&mut i);
     if i >= inner.len() {
@@ -6371,6 +6368,30 @@ fn validate_attribute(inner: &[char]) -> Result<(), Error> {
         return Ok(());
     }
     Err(err())
+}
+
+/// The index after the identifier at `cs[i]`, read as dart's `identifier()`
+/// does, or `None` where dart says "Expected identifier.": an optional `-`
+/// (a second one lets the name start with any body character or none), then
+/// a name-start character or an escape, then the body.
+fn scan_identifier(cs: &[char], mut i: usize) -> Option<usize> {
+    let body_from = |mut i: usize| {
+        while ident_body_at(cs, i) {
+            i = ident_char_at(cs, i)?.1;
+        }
+        Some(i)
+    };
+    if cs.get(i) == Some(&'-') {
+        i += 1;
+        if cs.get(i) == Some(&'-') {
+            return body_from(i + 1);
+        }
+    }
+    match cs.get(i) {
+        Some('\\') => body_from(ident_char_at(cs, i)?.1),
+        Some(&c) if is_name_start(c) => body_from(i + 1),
+        _ => None,
+    }
 }
 
 fn is_name_char(c: char) -> bool {

@@ -119,6 +119,13 @@ Conformance is tracked separately as a ratchet against the official
   `expression()` kept the raw line break. A `\` line continuation is still
   dropped.
 
+- **An attribute selector follows dart's grammar** (#238). Its name and its
+  unquoted value are identifiers, an optional namespace comes before a `|`,
+  and only a single-letter modifier may follow the value. sasso took any
+  characters: `[]`, `[@a=b]`, `[a=1]`, `[a==b]`, `[*a]` and `[a=b$]` all
+  compiled. Each now fails with dart's message: "Expected identifier.",
+  `expected "|".` or `expected "]".`.
+
 - **An interpolated media condition may not mix `and` and `or`.**
   `@media #{"(a) and (b) or (c)"}` compiled to `(a) or (b) or (c)`; it is an
   error, as it is when written out. A word other than the first operator now

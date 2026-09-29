@@ -14164,3 +14164,84 @@ fn parity_unquoted_private_use_character() {
         assert_parity_compressed(scss);
     }
 }
+
+#[test]
+fn an_attribute_selector_follows_dart_grammar() {
+    // dart's `_attributeSelector`: a name (`a`, `ns|a`, `|a`, `*|a`), then the
+    // close bracket or an operator, a value that is a string or an
+    // identifier, and at most one ASCII-letter modifier. sasso accepted any
+    // name and value characters (`[@a=b]`, `[a=1]`, `[a=b$]`, `[]`).
+    // Outputs and messages are dart-sass 1.104.1's. Offline.
+    for (scss, expanded, compressed) in [
+        ("[ a ] { c: d }\n", "[a] {\n  c: d;\n}", "[a]{c:d}"),
+        ("[-a] { c: d }\n", "[-a] {\n  c: d;\n}", "[-a]{c:d}"),
+        ("[--] { c: d }\n", "[--] {\n  c: d;\n}", "[--]{c:d}"),
+        ("[--1] { c: d }\n", "[--1] {\n  c: d;\n}", "[--1]{c:d}"),
+        ("[\\31 a] { c: d }\n", "[\\31 a] {\n  c: d;\n}", "[\\31 a]{c:d}"),
+        ("[a\\@b] { c: d }\n", "[a\\@b] {\n  c: d;\n}", "[a\\@b]{c:d}"),
+        ("[*|a] { c: d }\n", "[*|a] {\n  c: d;\n}", "[*|a]{c:d}"),
+        ("[|a] { c: d }\n", "[|a] {\n  c: d;\n}", "[|a]{c:d}"),
+        ("[a|b] { c: d }\n", "[a|b] {\n  c: d;\n}", "[a|b]{c:d}"),
+        ("[a|=b] { c: d }\n", "[a|=b] {\n  c: d;\n}", "[a|=b]{c:d}"),
+        ("[a|b|=c] { c: d }\n", "[a|b|=c] {\n  c: d;\n}", "[a|b|=c]{c:d}"),
+        ("[*|a=b] { c: d }\n", "[*|a=b] {\n  c: d;\n}", "[*|a=b]{c:d}"),
+        ("[a=-b] { c: d }\n", "[a=-b] {\n  c: d;\n}", "[a=-b]{c:d}"),
+        (
+            "[a=b\\ c] { c: d }\n",
+            "[a=b\\ c] {\n  c: d;\n}",
+            "[a=b\\ c]{c:d}",
+        ),
+        ("[a=\\\"] { c: d }\n", "[a=\\\"] {\n  c: d;\n}", "[a=\\\"]{c:d}"),
+        ("[a=_b] { c: d }\n", "[a=_b] {\n  c: d;\n}", "[a=_b]{c:d}"),
+        (
+            "[a=\u{e9}] { c: d }\n",
+            "@charset \"UTF-8\";\n[a=\u{e9}] {\n  c: d;\n}",
+            "\u{feff}[a=\u{e9}]{c:d}",
+        ),
+        ("[a=\"b\"i] { c: d }\n", "[a=b i] {\n  c: d;\n}", "[a=b i]{c:d}"),
+        ("[a=b I] { c: d }\n", "[a=b I] {\n  c: d;\n}", "[a=b I]{c:d}"),
+        ("b [a = c ] { c: d }\n", "b [a=c] {\n  c: d;\n}", "b [a=c]{c:d}"),
+        ("[a=#{\"x\"}] { c: d }\n", "[a=x] {\n  c: d;\n}", "[a=x]{c:d}"),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+    for (scss, message) in [
+        ("[] { c: d }\n", "Expected identifier."),
+        ("[ ] { c: d }\n", "Expected identifier."),
+        ("[-1] { c: d }\n", "Expected identifier."),
+        ("[1a] { c: d }\n", "Expected identifier."),
+        ("[-] { c: d }\n", "Expected identifier."),
+        ("[*a] { c: d }\n", "expected \"|\"."),
+        ("[*] { c: d }\n", "expected \"|\"."),
+        ("[|] { c: d }\n", "Expected identifier."),
+        ("[a|] { c: d }\n", "Expected identifier."),
+        ("[\u{1}a=b] { c: d }\n", "Expected identifier."),
+        ("[@a=b] { c: d }\n", "Expected identifier."),
+        ("[/a=b] { c: d }\n", "Expected identifier."),
+        ("[$a=b] { c: d }\n", "Expected identifier."),
+        ("[=a=b] { c: d }\n", "Expected identifier."),
+        ("[a==b] { c: d }\n", "Expected identifier."),
+        ("[a=] { c: d }\n", "Expected identifier."),
+        ("[a= ] { c: d }\n", "Expected identifier."),
+        ("[a=1] { c: d }\n", "Expected identifier."),
+        ("[a=-1] { c: d }\n", "Expected identifier."),
+        ("[a=b@] { c: d }\n", "expected \"]\"."),
+        ("[a=b@c] { c: d }\n", "expected \"]\"."),
+        ("[a=b/] { c: d }\n", "expected \"]\"."),
+        ("[a=b$] { c: d }\n", "expected \"]\"."),
+        ("[a=b\u{1}] { c: d }\n", "expected \"]\"."),
+        ("[a=b=] { c: d }\n", "expected \"]\"."),
+        ("[a=b ii] { c: d }\n", "expected \"]\"."),
+        ("[a=b 1] { c: d }\n", "expected \"]\"."),
+        ("[a=b i ] { c: d }\n", "expected \"]\"."),
+        ("[a=\"b\" \"c\"] { c: d }\n", "expected \"]\"."),
+        ("[a~b] { c: d }\n", "expected \"=\"."),
+        ("[a b] { c: d }\n", "Expected \"]\"."),
+    ] {
+        let err = compile(scss, &Options::default()).unwrap_err();
+        assert_eq!(err.message, message, "{scss}");
+    }
+}
