@@ -24,7 +24,9 @@ design work or affect compiled output are tracked as issues
 [#232](https://github.com/momiji-rs/sasso/issues/232),
 [#233](https://github.com/momiji-rs/sasso/issues/233),
 [#234](https://github.com/momiji-rs/sasso/issues/234),
-[#235](https://github.com/momiji-rs/sasso/issues/235)); the rest live here, and
+[#235](https://github.com/momiji-rs/sasso/issues/235),
+[#240](https://github.com/momiji-rs/sasso/issues/240),
+[#241](https://github.com/momiji-rs/sasso/issues/241)); the rest live here, and
 are fixed as they come up.
 
 **#62, #64, #139 and #147 have closed** — the built-in module member table, the
@@ -203,6 +205,36 @@ the wrong thing, because the clause that would have shown the unit is the one
 that should not be there (`1.5px` is `$limit: 1.5px is not an int.` in dart and
 `1.5` in sasso; `0px` is `Must be 1 or greater, was 0.` in dart). Measured
 2026-09-29.
+
+### 1.6 The legacy `if()` is not a first-class function ([#240](https://github.com/momiji-rs/sasso/issues/240))
+
+```scss
+@use "sass:meta";
+.a { b: meta.function-exists("if"); }
+// dart:  b: true;
+// sasso: b: false;
+```
+
+`if` takes unevaluated arguments and is special-cased in the evaluator, and that
+special case is invisible to the name resolver: `meta.get-function("if")` cannot
+find it, so `meta.call(meta.get-function("if"), true, 1, 2)` fails the compile
+where dart answers `1`. The predicate is the part that changes output, since it
+is normally read by an `@if`. Measured 2026-09-29.
+
+### 1.7 A function or mixin reference inside a list or interpolation is emitted, not rejected ([#241](https://github.com/momiji-rs/sasso/issues/241))
+
+```scss
+@use "sass:meta";
+.a { b: #{meta.get-function("rgb")}; }
+// dart:  Error: get-function("rgb") isn't a valid CSS value.
+// sasso: b: get-function("rgb");
+```
+
+The check exists for the whole value (`b: meta.get-function("rgb")` errors on
+both) but nothing walks into a list, a bracketed list or an interpolation looking
+for one, where the equivalent map check recurses. Eight shapes emit a meaningless
+property value — or, through an interpolated property name, a meaningless
+property. Measured 2026-09-29.
 
 ## 2. Values and built-in semantics
 

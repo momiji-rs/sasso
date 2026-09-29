@@ -1176,6 +1176,14 @@ impl Value {
     /// erased by the CSS spelling (`(a: )`), and a one-element comma list
     /// inside a map loses a level of parentheses.
     ///
+    /// A `Function` or `Mixin` reference reaches `isn't a valid CSS value.`
+    /// through its own `inspect()` rather than through here. That is sound
+    /// because neither is a list, so this method's one added rule cannot fire —
+    /// `get-function("rgb") isn't a valid CSS value.` is byte-identical on both
+    /// compilers (measured 2026-09-29) — but it is a second route to the same
+    /// sentence, and #241 is a bug in how far that route reaches rather than in
+    /// what it spells.
+    ///
     /// Verified against dart-sass 1.104.1 (2026-09-19, re-measured across the
     /// whole diagnostic surface 2026-09-29) including every list shape: a
     /// one-element space list is `(1)`, not `1`, and the one-element comma and
