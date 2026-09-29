@@ -4205,6 +4205,43 @@ fn a_non_ascii_character_starts_a_name() {
 }
 
 #[test]
+fn an_nbsp_at_the_edge_of_an_extend_target_is_part_of_it() {
+    // `@extend` trimmed its resolved target with Rust's Unicode whitespace, so
+    // `.a\u{a0}` extended `.a`. dart-sass reads the NBSP as part of the name.
+    // Outputs and messages are dart-sass 1.104.1's. Offline.
+    for (scss, expanded, compressed) in [
+        (
+            ".a { x: y } b { @extend .a !optional; }\n",
+            ".a, b {\n  x: y;\n}",
+            ".a,b{x:y}",
+        ),
+        (
+            ".a { x: y } b { @extend .a\u{a0}!optional; }\n",
+            ".a {\n  x: y;\n}",
+            ".a{x:y}",
+        ),
+    ] {
+        let css = compile(scss, &Options::default()).unwrap();
+        assert_eq!(css, expanded, "{scss}");
+        let css = compile(scss, &Options::default().with_style(OutputStyle::Compressed)).unwrap();
+        assert_eq!(css, compressed, "{scss} (compressed)");
+    }
+    for (target, message) in [
+        (".a\u{a0}", "The target selector was not found."),
+        ("#{\".a\u{a0}\"}", "The target selector was not found."),
+        (".a \u{a0}", "complex selectors may not be extended."),
+        ("\u{a0}.a", "compound selectors may no longer be extended."),
+        ("#{\"\u{a0}\"}", "The target selector was not found."),
+        ("#{\"\u{a0}, .a\"}", "The target selector was not found."),
+        ("#{\".a,\u{a0}\"}", "The target selector was not found."),
+    ] {
+        let scss = format!(".a {{ x: y }} b {{ @extend {target}; }}\n");
+        let err = compile(&scss, &Options::default()).unwrap_err().to_string();
+        assert!(err.contains(message), "{scss}: {err}");
+    }
+}
+
+#[test]
 fn the_evaluator_trims_css_whitespace_only() {
     // The evaluator trimmed, split and collapsed resolved text with Rust's Unicode
     // whitespace: an NBSP at the edge of a selector, a property name, an

@@ -97,6 +97,11 @@ Conformance is tracked separately as a ratchet against the official
   rewrites the whitespace after a leading identifier as one space, so there
   `.p { a\nb, c {…} }` stays `.p a b, .p c`, and sasso now does the same.
 
+- **An NBSP at the edge of an `@extend` target is part of it** (#238).
+  `@extend .a\u{a0}` extended `.a`; it now fails as dart's does, with "The
+  target selector was not found.", and `.a \u{a0}` and `\u{a0}.a` are the
+  complex and compound selectors they are.
+
 - **An interpolated media condition may not mix `and` and `or`.**
   `@media #{"(a) and (b) or (c)"}` compiled to `(a) or (b) or (c)`; it is an
   error, as it is when written out. A word other than the first operator now
