@@ -38,9 +38,11 @@
         default = sasso;
       });
 
-      # `nix flake check` builds both packages with their tests on — the same
-      # 15 suites CI runs (minus the opt-in dart-sass parity pass that needs a
-      # network) plus the C ABI's ctypes smoke test. `sasso` here is
+      # `nix flake check` builds both packages with their tests on: 14 test
+      # executables (the library, the CLI binary, the 12 files under `tests/`)
+      # — CI's `cargo test` minus the doctests, with the opt-in dart-sass
+      # parity pass returning early for want of a network — plus the C ABI's
+      # ctypes smoke test. `sasso` here is
       # `package.nix` as is, not the `untested` one `packages` exports.
       checks = forAllSystems (
         pkgs:
