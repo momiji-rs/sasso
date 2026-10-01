@@ -3222,10 +3222,11 @@ impl<'a> Evaluator<'a> {
                     pos,
                     length,
                     full_length,
+                    frame_name,
                 } => {
                     // Push a diagnostic call frame so an error/warning raised in
                     // the mixin body unwinds through this `@include` call site.
-                    let saved = self.enter_call(*pos, *length, mixin_frame_name(name, module).into());
+                    let saved = self.enter_call(*pos, *length, Rc::clone(frame_name));
                     let r = self.exec_include(
                         name,
                         args,
@@ -5544,12 +5545,6 @@ fn for_indices(start: i64, end: i64, inclusive: bool) -> Vec<i64> {
         }
     }
     out
-}
-
-/// The diagnostic stack-frame name for an `@include`: dart-sass prints the bare
-/// mixin name with empty parens (`name()`), without the `ns.` namespace.
-fn mixin_frame_name(name: &str, _module: &Option<String>) -> String {
-    format!("{name}()")
 }
 
 /// Whether a mixin body contains a reachable `@content`. dart-sass scans the

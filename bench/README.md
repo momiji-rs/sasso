@@ -56,7 +56,7 @@ the others reached:
 | `gate/use_graph/redundant.scss` | ditto, redundant `@use` | **−42.2%** | — |
 | `gate/selector_lists.scss` | `eval_style_rule`'s `share_current == false` branch, and the #119/#120 span mapping | — (coverage, no lever) | — |
 | `gate/module_calls.scss` | built-in calls through `@use "sass:<module>"` (#260) | **−3.96%** | −0.31% |
-| `gate/user_functions.scss` | user `@function` and `@mixin` calls | **−13.68%** | −0.14% |
+| `gate/user_functions.scss` | user `@function` and `@mixin` calls | **−14.38%** | −0.37% |
 
 All seven are compiled through the `diagnostics_live()` helper in
 `../benches/compile.rs`, which is the only place the URL-and-silent-handler
