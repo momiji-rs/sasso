@@ -56,7 +56,7 @@ the others reached:
 | `gate/use_graph/redundant.scss` | ditto, redundant `@use` | **−42.2%** | — |
 | `gate/selector_lists.scss` | `eval_style_rule`'s `share_current == false` branch, and the #119/#120 span mapping | — (coverage, no lever) | — |
 | `gate/module_calls.scss` | built-in calls through `@use "sass:<module>"` (#260) | **−3.96%** | −0.31% |
-| `gate/user_functions.scss` | user `@function` and `@mixin` calls | see below | 0 |
+| `gate/user_functions.scss` | user `@function` and `@mixin` calls | **−13.68%** | −0.14% |
 
 All seven are compiled through the `diagnostics_live()` helper in
 `../benches/compile.rs`, which is the only place the URL-and-silent-handler
@@ -97,6 +97,15 @@ calls is `math.div`, which returns before that path, so when #260 found it
 verifying every call twice, nothing here moved. Its row is marginal
 instructions on Linux/x86_64, not the macOS wall-time figure of the rows above:
 the change that added it measured −3.96% here against −0.31% on `large.scss`.
+
+`user_functions.scss` (added 2026-10-01) is a token sheet built from its own
+`@function`s and `@mixin`s, with five modules `@use`d: `rem()` with a default
+`$root`, a function with a local and an `@if`, functions calling functions, and
+a mixin taking `@content`. No other corpus defines a `@function`, so a user
+call's own work went unmeasured: binding the arguments, swapping in the
+environment the callable captured, and pushing the diagnostics frame. Its row is
+marginal instructions on Linux/x86_64, from the change that added it, which made
+that environment and that frame shared instead of copied per call.
 
 One more plan benchmark, `large_expanded_with_map_silent`, arrived on 2026-09-17
 without a corpus of its own: it compiles `generated/large.scss` through

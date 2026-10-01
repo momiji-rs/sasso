@@ -71,6 +71,30 @@ Conformance is tracked separately as a ratchet against the official
     legacy_deprecations.scss      121.53M    119.11M    -1.99%
     large.scss, expanded          98.87M     98.23M     -0.65%
   ```
+- **Calling a user `@function` or `@mixin` copies nothing** (#260's
+  analysis). Each call used to clone the `@use` tables its callable captured,
+  four of them, every entry copied. That made a call ~140 instructions
+  dearer for each module in scope. Each call also formatted its `name()` for
+  the diagnostics stack and copied the file's url there. The tables are now
+  shared and copied only when a `@use` changes them. The frame name is made
+  once per definition, and the url is shared between frames. A call to a
+  one-argument function went from 4,904 to 4,092 instructions, the same with
+  six modules in scope as with none. Errors and warnings print byte for byte
+  as before. Marginal instructions on Linux/x86_64:
+
+  ```
+                                  before     now        change
+    user_functions.scss (new)     27.26M     23.53M     -13.68%
+    bulma                         2141.2M    1994.5M    -6.85%
+    govuk-frontend                207.0M     199.9M     -3.43%
+    uswds                         6096.3M    5972.7M    -2.03%
+    minimal-mistakes              172.1M     169.5M     -1.55%
+    vuetify                       350.3M     345.4M     -1.42%
+  ```
+
+  The last five are pinned real-world projects from `bench/real-world`, with
+  output byte-identical before and after. `bench/corpus/gate/user_functions.scss`
+  is new: no benchmark defined a `@function` until now.
 
 ## [0.19.3] - 2026-09-30
 
