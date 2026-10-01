@@ -133,6 +133,37 @@ impl<'a> Evaluator<'a> {
         })
     }
 
+    /// Swap a user callable's captured environment in for its body: its file,
+    /// its five scope chains, its `@use` tables, and a fresh scope for its
+    /// parameters. Every way a user `@function` or `@mixin` runs goes through
+    /// this, and [`Self::leave_callable`] puts the caller's back.
+    pub(super) fn enter_callable(&mut self, c: &UserCallable) -> SavedCallerEnv {
+        let file = self.enter_origin_file(Some(&c.origin));
+        let saved = SavedCallerEnv {
+            file,
+            scopes: std::mem::replace(&mut self.scopes, c.env.clone()),
+            var_spans: std::mem::replace(&mut self.var_spans, c.env_spans.clone()),
+            semi: std::mem::replace(&mut self.scope_semi_global, c.env_semi.clone()),
+            fns: std::mem::replace(&mut self.functions, c.env_fns.clone()),
+            mixins: std::mem::replace(&mut self.mixins, c.env_mixins.clone()),
+            modules: self.install_env_modules(&c.env_modules),
+        };
+        self.push_scope(false);
+        saved
+    }
+
+    /// Undo [`Self::enter_callable`], in the reverse order.
+    pub(super) fn leave_callable(&mut self, saved: SavedCallerEnv) {
+        self.pop_scope();
+        self.scopes = saved.scopes;
+        self.var_spans = saved.var_spans;
+        self.scope_semi_global = saved.semi;
+        self.functions = saved.fns;
+        self.mixins = saved.mixins;
+        self.restore_env_modules(saved.modules);
+        self.leave_module_file(saved.file);
+    }
+
     /// Install a callable's captured `@use` namespace tables for the duration
     /// of its body, returning the caller's tables for [`Self::restore_env_modules`].
     pub(super) fn install_env_modules(&mut self, m: &EnvModules) -> EnvModules {
@@ -493,4 +524,16 @@ fn rebind<T>(vars: &mut HashMap<String, T>, name: &str, val: T) {
             vars.insert(name.to_string(), val);
         }
     }
+}
+
+/// The caller's environment, held by [`Evaluator::enter_callable`] while a user
+/// callable's body runs and put back by [`Evaluator::leave_callable`].
+pub(super) struct SavedCallerEnv {
+    file: Option<super::modules::SavedModuleFile>,
+    scopes: Vec<Scope>,
+    var_spans: Vec<SpanScope>,
+    semi: Vec<bool>,
+    fns: Vec<FnFrame>,
+    mixins: Vec<FnFrame>,
+    modules: EnvModules,
 }
