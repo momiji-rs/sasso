@@ -791,7 +791,8 @@ impl<'a> Evaluator<'a> {
                 if !ms_alpha_filter && !css_filter_call {
                     match &via_star {
                         // A global call: what it is deprecated for is the
-                        // name's, worked out by the parser.
+                        // name's, read from this call site's facts (worked out
+                        // on its first evaluation, above).
                         None => self.emit_call_deprecations_with(
                             canonical,
                             None,
