@@ -139,13 +139,19 @@ impl<'a> Evaluator<'a> {
     /// this, and [`Self::leave_callable`] puts the caller's back.
     pub(super) fn enter_callable(&mut self, c: &UserCallable) -> SavedCallerEnv {
         let file = self.enter_origin_file(Some(&c.origin));
+        let mut bufs = self.chain_pool.pop().unwrap_or_default();
+        bufs.scopes.extend_from_slice(&c.env);
+        bufs.var_spans.extend_from_slice(&c.env_spans);
+        bufs.semi.extend_from_slice(&c.env_semi);
+        bufs.fns.extend_from_slice(&c.env_fns);
+        bufs.mixins.extend_from_slice(&c.env_mixins);
         let saved = SavedCallerEnv {
             file,
-            scopes: std::mem::replace(&mut self.scopes, c.env.clone()),
-            var_spans: std::mem::replace(&mut self.var_spans, c.env_spans.clone()),
-            semi: std::mem::replace(&mut self.scope_semi_global, c.env_semi.clone()),
-            fns: std::mem::replace(&mut self.functions, c.env_fns.clone()),
-            mixins: std::mem::replace(&mut self.mixins, c.env_mixins.clone()),
+            scopes: std::mem::replace(&mut self.scopes, bufs.scopes),
+            var_spans: std::mem::replace(&mut self.var_spans, bufs.var_spans),
+            semi: std::mem::replace(&mut self.scope_semi_global, bufs.semi),
+            fns: std::mem::replace(&mut self.functions, bufs.fns),
+            mixins: std::mem::replace(&mut self.mixins, bufs.mixins),
             modules: self.install_env_modules(&c.env_modules),
         };
         self.push_scope(false);
@@ -155,11 +161,17 @@ impl<'a> Evaluator<'a> {
     /// Undo [`Self::enter_callable`], in the reverse order.
     pub(super) fn leave_callable(&mut self, saved: SavedCallerEnv) {
         self.pop_scope();
-        self.scopes = saved.scopes;
-        self.var_spans = saved.var_spans;
-        self.scope_semi_global = saved.semi;
-        self.functions = saved.fns;
-        self.mixins = saved.mixins;
+        // The callee's chains go back to the pool emptied, keeping their
+        // capacity; clearing drops exactly what dropping the `Vec`s would.
+        let mut bufs = ChainBufs {
+            scopes: std::mem::replace(&mut self.scopes, saved.scopes),
+            var_spans: std::mem::replace(&mut self.var_spans, saved.var_spans),
+            semi: std::mem::replace(&mut self.scope_semi_global, saved.semi),
+            fns: std::mem::replace(&mut self.functions, saved.fns),
+            mixins: std::mem::replace(&mut self.mixins, saved.mixins),
+        };
+        bufs.clear();
+        self.chain_pool.push(bufs);
         self.restore_env_modules(saved.modules);
         self.leave_module_file(saved.file);
     }
@@ -536,4 +548,24 @@ pub(super) struct SavedCallerEnv {
     fns: Vec<FnFrame>,
     mixins: Vec<FnFrame>,
     modules: EnvModules,
+}
+
+/// One call depth's worth of chain buffers, for [`Evaluator::chain_pool`].
+#[derive(Default)]
+pub(super) struct ChainBufs {
+    scopes: Vec<Scope>,
+    var_spans: Vec<SpanScope>,
+    semi: Vec<bool>,
+    fns: Vec<FnFrame>,
+    mixins: Vec<FnFrame>,
+}
+
+impl ChainBufs {
+    fn clear(&mut self) {
+        self.scopes.clear();
+        self.var_spans.clear();
+        self.semi.clear();
+        self.fns.clear();
+        self.mixins.clear();
+    }
 }
