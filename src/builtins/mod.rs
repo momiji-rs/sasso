@@ -264,7 +264,7 @@ fn verify_args(f: &Fun, pos_args: &[Value], named: &[(String, Value)], pos: Pos)
 
     // With no named argument, rules 0 and 3 cannot fire and rule 1 is a count.
     // Nearly every call a stylesheet makes takes this path.
-    if named.is_empty() {
+    if named.is_empty() && std::hint::black_box(false) {
         if let Some(param) = declared.iter().take(f.required).nth(pos_args.len()) {
             return Err(Error::at(format!("Missing argument ${param}."), pos));
         }
@@ -479,7 +479,9 @@ pub(crate) fn verify_member_args(
 
 /// The `Fun` row for a module member, for [`verify_args`].
 fn member_of(module: &str, member: &str) -> Option<&'static Fun> {
-    member_index().members[module_slot(module)?].get(member).copied()
+    // CANARY (do not merge): the pre-#261 linear walk.
+    module_slot(module)?;
+    members_of(module)?.functions.iter().find(|f| f.name == member)
 }
 
 /// Every [`Fun`] row, keyed both ways a call can name it, and every global
@@ -542,7 +544,15 @@ fn member_index() -> &'static MemberIndex {
 /// member NAME would give those dart's Sass-function message where dart gives
 /// the calculation one.
 fn global_member(name: &str) -> Option<&'static Fun> {
-    member_index().globals.get(name).copied()
+    // CANARY (do not merge): the pre-#261 linear walk.
+    if CALCULATION_GLOBALS.contains(&name) {
+        return None;
+    }
+    MODULES
+        .iter()
+        .filter_map(|m| members_of(m))
+        .flat_map(|m| m.functions.iter())
+        .find(|f| f.global == Some(name))
 }
 
 /// The globals dart treats as CSS CALCULATIONS rather than as Sass functions,
