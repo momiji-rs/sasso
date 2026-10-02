@@ -11,6 +11,30 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Performance
+
+- **A variable reached through `@use … as *` no longer scans every module it
+  misses in.** A variable written without a namespace is looked up in each
+  module `@use`d `as *`, in order, and in each module's forwarded members, until
+  one has it. `-` and `_` are one character in a variable name, so a miss
+  compared the name against every variable the module had, one by one, in case
+  one was spelled the other way. The parser already writes every variable name
+  with `-`, so when none of a module's names contains `_` (nearly always), one
+  lookup now gives the same answer. A design system whose packages each
+  star-load a large shared core pays for that on every reference. uswds spent
+  a third of its compile there. Marginal instructions on Linux/x86_64, output
+  byte-identical:
+
+  ```
+                                  before     now        change
+    uswds                         5840.9M    3447.7M    -40.97%
+    star_forward (new corpus)     186.3M     17.5M      -90.6%
+    govuk-frontend                193.0M     192.2M     -0.38%
+  ```
+
+  `bench/corpus/gate/star_forward/` is new: no corpus reached this path
+  before.
+
 ## [0.20.0] - 2026-10-02
 
 _Faster, and nothing else changes: output and diagnostics are byte-identical
