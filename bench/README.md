@@ -103,7 +103,7 @@ is string escaping rather than mapping arithmetic.
 
 One limit those deltas do not show. CodSpeed's simulation mode does not
 report raw instructions (its docs describe an estimated-cycles model): on the
-2026-10-01 gate canary (#263) it read 0.86–0.94× of the marginal-instruction
+2026-10-01 gate canary (#263) it read 0.80–0.94× of the marginal-instruction
 delta `perf stat` measured for the same commit, so compare a change against
 CodSpeed's own figure and not a local one. The first CI run put the
 `@use`-graph benchmarks at 6.7 ms simulated against 3.5 ms of wall time here,
