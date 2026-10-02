@@ -1172,6 +1172,12 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     manifest(ours);
     // A platform package from before the binary shipped in it: nothing to name.
     assert.equal(ask(nodePath), "null", "binary: a platform package without the binary answers null");
+    // … and one that is also an older version, which is what a pre-binary
+    // package usually is: still null, not a mismatch, since there is no
+    // binary for the mismatch to be about.
+    manifest("0.0.1");
+    assert.equal(ask(nodePath), "null", "binary: an older platform package without the binary answers null");
+    manifest(ours);
     writeFileSync(join(pkgDir, "sasso"), "");
     assert.equal(
       ask(nodePath),

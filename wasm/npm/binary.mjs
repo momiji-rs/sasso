@@ -33,9 +33,10 @@ function ownVersion() {
  * dependencies, or a platform package from before the binary shipped in it.
  *
  * Throws, with `code: "SASSO_ADDON_VERSION_MISMATCH"`, when the platform
- * package is a different version from this `sasso` — the same refusal the
- * native addon makes, for the same reason: the two are released together,
- * and a binary of another version accepts a different set of flags.
+ * package carries a binary but is a different version from this `sasso` —
+ * the same refusal the native addon makes, for the same reason: the two are
+ * released together, and a binary of another version accepts a different
+ * set of flags.
  */
 export function binaryPath() {
   const pkg = SUPPORTED[platformKey()];
@@ -46,6 +47,12 @@ export function binaryPath() {
   } catch {
     return null;
   }
+  // Presence first: a platform package from before the binary shipped is
+  // usually an OLDER one too, and with nothing to hand out there is nothing a
+  // version mismatch could make wrong. The pairing is checked only for a
+  // binary this would actually return.
+  const bin = join(dirname(manifest), "sasso");
+  if (!existsSync(bin)) return null;
   let theirs = null;
   try {
     theirs = JSON.parse(readFileSync(manifest, "utf8")).version ?? null;
@@ -53,8 +60,7 @@ export function binaryPath() {
     // No readable manifest: nothing to compare, so nothing to refuse.
   }
   assertAddonVersion(ownVersion(), theirs, pkg);
-  const bin = join(dirname(manifest), "sasso");
-  return existsSync(bin) ? bin : null;
+  return bin;
 }
 
 export default { binaryPath };

@@ -9,7 +9,8 @@
  * dependencies skipped, or a platform package older than the binary).
  *
  * Throws an `Error` with `code: "SASSO_ADDON_VERSION_MISMATCH"` when the
- * platform package is not the same version as this `sasso`.
+ * platform package carries a binary but is not the same version as this
+ * `sasso`.
  */
 export function binaryPath(): string | null;
 

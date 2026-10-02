@@ -231,8 +231,8 @@ Nothing switches over by itself. `node_modules/.bin/sasso` stays the node
 CLI, because an install script is the only way to repoint it, and npm 12,
 pnpm 12 and yarn 4 all skip dependency install scripts by default (pnpm 12
 fails the install over an unapproved one). `binaryPath()` throws, as
-`"sasso/native"` does, if the platform package is not the same version as
-`sasso`.
+`"sasso/native"` does, if the platform package carries a binary but is not the
+same version as `sasso`.
 
 ```js
 import { compileString } from "sasso";

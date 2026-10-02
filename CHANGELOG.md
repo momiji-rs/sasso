@@ -18,8 +18,8 @@ Conformance is tracked separately as a ratchet against the official
   the release's command-line binary beside the addon, byte-identical to the
   one on the Releases page, and `binaryPath()` returns its absolute path. It
   returns `null` where there is no prebuild (Windows, musl) or optional
-  dependencies were skipped, and it throws, as `"sasso/native"` does, on a
-  version skew. It is for tools that spawn the compiler, and for those it
+  dependencies were skipped, and it throws, as `"sasso/native"` does, when
+  the binary it would return is from another version. It is for tools that spawn the compiler, and for those it
   removes node from the run. One entry of a real-world project, Linux/x86_64:
   38.3 ms through `node_modules/.bin/sasso`, 4.3 ms through the binary, 20.7 ms
   for dart-sass. Nothing uses the binary unless asked. `.bin/sasso` stays the
