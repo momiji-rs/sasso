@@ -26,10 +26,13 @@ Conformance is tracked separately as a ratchet against the official
   Linux/x86_64, medians of 60 interleaved runs:
 
   ```
-                            0.20.0     now        change
-    --embed-sources         51.3 ms    39.0 ms    -24.1%
-    --style=compressed      49.6 ms    34.4 ms    -30.7%
+                                             0.20.0     now        change
+    --embed-sources                          51.3 ms    39.0 ms    -24.1%
+    --style=compressed --no-source-map       49.6 ms    34.4 ms    -30.7%
   ```
+
+  The second row is faster partly because it writes no source map: only
+  `--embed-sources` still triggers one young-generation GC (3.4 ms).
 
   148 entries in one process: −5.4% (196.2 → 185.6 ms). On macOS/arm64, which
   never paid the Linux glibc check, one entry is −6.6%. The wasm engine and the
