@@ -77,11 +77,6 @@ pub(crate) fn call(
 /// canonical spelling, `written` the one in the source, and `d` what
 /// [`Dispatch::of`] made from `name`. Verifies against the same row and runs the
 /// same chain, only without looking either up again.
-///
-/// Never inlined: inlined into the evaluator's expression match it made every
-/// namespaced call there 30–170 instructions dearer, measured, by growing the
-/// function they all run through.
-#[inline(never)]
 pub(crate) fn call_dispatched(
     name: &str,
     written: &str,
