@@ -11,7 +11,50 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Added
+
+- **`"sasso/binary"`: the native `sasso` binary ships in the npm package**
+  (#272). Each prebuilt platform package (`sasso-native-<target>`) now carries
+  the release's command-line binary beside the addon, byte-identical to the
+  one on the Releases page, and `binaryPath()` returns its absolute path. It
+  returns `null` where there is no prebuild (Windows, musl) or optional
+  dependencies were skipped, and it throws, as `"sasso/native"` does, when
+  the binary it would return is from another version. It is for tools that spawn the compiler, and for those it
+  removes node from the run. One entry of a real-world project, Linux/x86_64:
+  38.3 ms through `node_modules/.bin/sasso`, 4.3 ms through the binary, 20.7 ms
+  for dart-sass. Nothing uses the binary unless asked. `.bin/sasso` stays the
+  node CLI, and there is no install script: npm 12, pnpm 12 and yarn 4 skip
+  dependency install scripts by default, and pnpm 12 fails the install over
+  one. Each platform package's tarball grows by 1.2–1.4 MB (darwin-arm64: 1.45
+  → 2.62 MB).
+
 ### Performance
+
+- **The npm CLI compiles a single entry 24–31% faster on the native addon**
+  (#272). A build watcher that spawns the CLI on every save compiles one
+  entry each time, and most of that run went to loading code the command
+  line never used. It loaded the whole JS API (importers, the Value classes,
+  the wasm loader) to reach the addon, and it imported `node:fs` through
+  ESM, whose export facade loads node's stream stack. It also loaded
+  `node:child_process` and `node:worker_threads` with nothing to spawn, and
+  on Linux it checked glibc by building the full diagnostic report three
+  times. The CLI now loads the addon core and what a command line uses. One
+  entry of a real-world project, run through a pnpm `.bin` shim, on
+  Linux/x86_64, medians of 60 interleaved runs:
+
+  ```
+                                             0.20.0     now        change
+    --embed-sources                          51.3 ms    39.0 ms    -24.1%
+    --style=compressed --no-source-map       49.6 ms    34.4 ms    -30.7%
+  ```
+
+  The second row is faster partly because it writes no source map: only
+  `--embed-sources` still triggers one young-generation GC (3.4 ms).
+
+  148 entries in one process: −5.4% (196.2 → 185.6 ms). On macOS/arm64, which
+  never paid the Linux glibc check, one entry is −6.6%. The wasm engine and the
+  hand-off to a binary on `PATH` are within 3%. Output, stderr and exit codes
+  are byte-identical to 0.20.0 on every engine.
 
 - **A variable reached through `@use … as *` no longer scans every module it
   misses in.** A variable written without a namespace is looked up in each
