@@ -940,8 +940,7 @@ pub(crate) struct Extension {
     /// downstream store whose absorption created it) — within a home store,
     /// derived entries follow the absorption order of their trigger.
     pub via_origin: Option<String>,
-    // Module-origin set, built in eval (`closure_cache`); kept on std `HashSet`
-    // so the FxHash migration stays scoped to this file's selector maps.
+    // Module-origin set, built in eval (`closure_cache`).
     pub origin_closure: std::rc::Rc<crate::fxhash::FxHashSet<String>>,
 }
 
