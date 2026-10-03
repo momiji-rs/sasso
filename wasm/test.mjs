@@ -3495,10 +3495,14 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   // past `isNativeImage`, and a marker after them, but they are not programs:
   // whatever the CLI decides about them, it has to decide without a working
   // `--version`.
-  const fakeImage = (name, version) =>
+  // `pad` zero bytes go between the image's first bytes and the marker (or the
+  // end of the file, when `version` is null), to place the marker where the
+  // scan's byte budget does or does not reach.
+  const fakeImage = (name, version, pad = 0) =>
     dirWith(name, (d) => {
       const f = join(d, process.platform === "win32" ? "sasso.exe" : "sasso");
-      writeFileSync(f, Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46]), Buffer.from(`\0sasso-cli-version=${version}\0\n`)]));
+      const tail = version === null ? Buffer.alloc(0) : Buffer.from(`\0sasso-cli-version=${version}\0\n`);
+      writeFileSync(f, Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46]), Buffer.alloc(pad), tail]));
       chmodSync(f, 0o755);
     });
   {
@@ -3513,6 +3517,19 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     compiles("a binary whose marker matches but which cannot answer --version", same, "o2.css");
     assert.match(same.stderr, /does not answer --version with `sasso <version>`/, "cli: … a matching marker still goes through the --version gate");
     assert.ok(!/handing the command line to/.test(same.stderr), `cli: … and nothing was handed the command line (stderr: ${same.stderr})`);
+    // The scan has a byte budget (`MARKER_SCAN_BYTES`, 8 MiB from the end).
+    // A file bigger than that with no marker in its tail is not "no marker":
+    // the CLI cannot tell without reading the rest, so it asks --version as it
+    // did before the marker existed, rather than stall on a large file.
+    const big = runWith(packageSaying("1.2.3"), argv("o3.css"), { PATH: fakeImage("big-unmarked", null, 9 << 20) });
+    compiles("a large binary with no marker in its tail", big, "o3.css");
+    assert.match(big.stderr, /does not answer --version with `sasso <version>`/, "cli: … past the scan budget, --version decides");
+    assert.ok(!/carries no sasso version marker/.test(big.stderr), "cli: … and it is not reported as markerless");
+    // A marker near the end of a large file is still found: the budget limits
+    // how far the scan reads, and it reads from the end.
+    const bigMarked = runWith(packageSaying("1.2.3"), argv("o4.css"), { PATH: fakeImage("big-marked", "9.9.9", 9 << 20) });
+    compiles("a large binary with a marker at its end", bigMarked, "o4.css");
+    assert.match(bigMarked.stderr, /is 9\.9\.9 \(its version marker\)/, "cli: … declined on the marker it found");
     // `--engine` asks the binary itself, so what it reports is the binary's
     // own answer rather than the marker's.
     const asked = runWith(packageSaying("1.2.3"), ["--engine"], { PATH: fakeImage("marked-engine", "9.9.9") });

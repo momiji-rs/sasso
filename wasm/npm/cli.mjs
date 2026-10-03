@@ -333,6 +333,8 @@ function binaryVersion(path) {
 }
 
 const VERSION_MARK = Buffer.from("\0sasso-cli-version=");
+// How much of a binary `markedVersion` reads, from the end, before giving up.
+const MARKER_SCAN_BYTES = 8 << 20;
 
 /**
  * The version a binary's marker names, read from the file without running it:
@@ -350,6 +352,13 @@ const VERSION_MARK = Buffer.from("\0sasso-cli-version=");
  * Read from the end in overlapping windows, since the marker sits in the
  * read-only data near the end of the image (92% of the way into a 2.5 MB
  * macOS/arm64 release build).
+ *
+ * At most MARKER_SCAN_BYTES from the end are read. Showing a file has NO
+ * marker means reading all of it, and a large or slow file named `sasso`
+ * would stall every run for as long as that takes, where `--version` is at
+ * least capped by its timeout. Past the bound this answers `undefined`, and
+ * the caller asks `--version` as it did before the marker. Release binaries
+ * are 2.4-3.2 MB, so they stay well inside it.
  */
 function markedVersion(path) {
   let fd;
@@ -361,7 +370,10 @@ function markedVersion(path) {
     // past its end catches one that straddles the boundary.
     const KEEP = VERSION_MARK.length + 64;
     const buf = Buffer.allocUnsafe(CHUNK + KEEP);
+    const floor = Math.max(0, size - MARKER_SCAN_BYTES);
     for (let end = size; end > 0; ) {
+      // Out of budget before the start of the file: no answer, not "no marker".
+      if (end <= floor) return undefined;
       const start = Math.max(0, end - CHUNK);
       const n = readSync(fd, buf, 0, Math.min(size, end + KEEP) - start, start);
       const view = buf.subarray(0, n);
