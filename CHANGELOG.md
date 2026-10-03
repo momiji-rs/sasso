@@ -55,6 +55,21 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Performance
 
+- **An `@extend` inside `@media` no longer re-reads the stylesheet.** Each
+  such extension made sasso parse every top-level selector again to check its
+  media context, so the check cost the number of rules times the number of
+  in-media extensions. All the checks now share one pass that parses each
+  rule at most once (#285). Marginal instructions on Linux/x86_64, output
+  byte-identical:
+
+  | project | before | after | change |
+  | --- | ---: | ---: | ---: |
+  | quasar | 1,580,862,648 | 692,030,378 | −56.22% |
+  | tabler | 1,306,069,941 | 1,029,178,066 | −21.20% |
+  | bootstrap | 797,093,957 | 690,231,885 | −13.41% |
+
+  No other measured project moved by more than ±0.15%.
+
 - **`map.get` and `map.has-key` no longer copy the map they read.** Each call
   copied every entry of the map before looking one up, so a lookup cost the
   size of the map. A design system that reads its large configuration maps on
