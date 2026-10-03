@@ -3482,9 +3482,41 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     // would otherwise be handed the project's command line. `echo` prints back
     // whatever it is given, which makes it a stranger claiming to be any version
     // asked for — here, the package's own.
+    // Since the version marker, such a stranger is not even run: it carries no
+    // marker, so it is declined from the file alone. The shape check on the
+    // `--version` line is exercised below, by a file whose marker matches.
     const claimed = runWith(packageSaying("--version"), argv("i2.css"), { PATH: strangerDir });
     compiles("a stranger whose --version output equals the package version", claimed, "i2.css");
-    assert.match(claimed.stderr, /does not answer --version with `sasso <version>`/, "cli: … declined on the shape of the line, not its last field");
+    assert.match(claimed.stderr, /carries no sasso version marker/, "cli: … declined from the file, without being run");
+  }
+
+  // The version marker (`VERSION_MARKER` in src/main.rs) is read before any
+  // binary is run. These files have a native image's first bytes, so they get
+  // past `isNativeImage`, and a marker after them, but they are not programs:
+  // whatever the CLI decides about them, it has to decide without a working
+  // `--version`.
+  const fakeImage = (name, version) =>
+    dirWith(name, (d) => {
+      const f = join(d, process.platform === "win32" ? "sasso.exe" : "sasso");
+      writeFileSync(f, Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46]), Buffer.from(`\0sasso-cli-version=${version}\0\n`)]));
+      chmodSync(f, 0o755);
+    });
+  {
+    // Another version in the marker: declined, and from the marker alone.
+    const other = runWith(packageSaying("1.2.3"), argv("o1.css"), { PATH: fakeImage("marked-other", "9.9.9") });
+    compiles("a binary whose marker names another version", other, "o1.css");
+    assert.match(other.stderr, /is 9\.9\.9 \(its version marker\), this package is 1\.2\.3/, "cli: … declined on the marker, without running it");
+    // The SAME version in the marker is not enough on its own: the binary
+    // still has to answer `--version` with `sasso <version>`, and this file
+    // cannot answer at all.
+    const same = runWith(packageSaying("1.2.3"), argv("o2.css"), { PATH: fakeImage("marked-same", "1.2.3") });
+    compiles("a binary whose marker matches but which cannot answer --version", same, "o2.css");
+    assert.match(same.stderr, /does not answer --version with `sasso <version>`/, "cli: … a matching marker still goes through the --version gate");
+    assert.ok(!/handing the command line to/.test(same.stderr), `cli: … and nothing was handed the command line (stderr: ${same.stderr})`);
+    // `--engine` asks the binary itself, so what it reports is the binary's
+    // own answer rather than the marker's.
+    const asked = runWith(packageSaying("1.2.3"), ["--engine"], { PATH: fakeImage("marked-engine", "9.9.9") });
+    assert.match(asked.stdout, /^binary: +not used — .* does not answer --version/m, `cli: --engine runs --version even with a marker (stdout: ${asked.stdout})`);
   }
 
   // And now the real thing, wherever this machine keeps one: no stand-in can
