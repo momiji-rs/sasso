@@ -2822,17 +2822,19 @@ fn debug_names_its_file_as_a_frame_does() {
         assert_eq!(out.len(), 1, "one debug event for {url}");
         out.into_iter().next().unwrap()
     };
-    // The JS front ends: a file URL, decoded and made relative to the cwd.
+    // The JS front ends: a file URL, decoded and made relative to the cwd,
+    // with the platform's separator, as a frame is (and as dart does, #151).
+    let sep = std::path::MAIN_SEPARATOR;
     assert_eq!(
         debug("file:///work/proj/sub/a%20b.scss"),
         (
-            "sub/a b.scss:1 DEBUG: x".to_string(),
+            format!("sub{sep}a b.scss:1 DEBUG: x"),
             "file:///work/proj/sub/a%20b.scss".to_string()
         )
     );
     assert_eq!(
         debug("file:///work/outside/o.scss").0,
-        "../outside/o.scss:1 DEBUG: x"
+        format!("..{sep}outside{sep}o.scss:1 DEBUG: x")
     );
     // The binary: a path, which already read as dart prints it.
     assert_eq!(debug("main.scss").0, "main.scss:1 DEBUG: x");
