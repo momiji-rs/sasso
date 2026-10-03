@@ -42,8 +42,7 @@ impl<'a> Evaluator<'a> {
         if let Some((_, msg)) = super::find_stray_selector_char(&target) {
             return Err(Error::at(msg, pos));
         }
-        let media = (!self.media_queries.is_empty())
-            .then(|| super::serialize_media_queries(&self.media_queries, self.compressed()));
+        let media = self.media_context();
         for t in split_commas(&target).iter() {
             let t = t.trim_matches(is_css_whitespace);
             if t.is_empty() {
@@ -180,46 +179,6 @@ impl<'a> Evaluator<'a> {
         // misplaced sibling stores with unequal upstream counts — bulma's
         // form vs elements modules.)
 
-        // One extension written twice, in two different media contexts, is an
-        // error however the targets fall (dart's `MergedExtension.merge`):
-        // "the same" is the same extender and the same target, and only two
-        // contexts that are both set and differ conflict, so a copy outside
-        // any `@media` merges with one inside. The error points at the second
-        // copy. dart merges within one extension store, so this compares
-        // extensions written in the same module. Identity is the PARSED
-        // selector, as in dart, not its spelling: `.foo` and `.f\6f o` are one
-        // target.
-        {
-            type Key<'k> = (&'k str, crate::selector::Complex, &'k crate::selector::Simple);
-            let mut seen: HashMap<Key<'_>, Option<&str>> = HashMap::default();
-            for pe in &self.extends {
-                let extenders = pe
-                    .extenders
-                    .iter()
-                    .filter_map(|e| crate::selector::parse_list(e))
-                    .flatten();
-                for extender in extenders {
-                    let key = (pe.origin.as_str(), extender, &pe.target);
-                    match seen.get_mut(&key) {
-                        Some(prev) => match (*prev, pe.media.as_deref()) {
-                            (Some(a), Some(b)) if a != b => {
-                                return Err(Error::at(
-                                    "You may not @extend the same selector from within different media queries.",
-                                    pe.pos,
-                                ));
-                            }
-                            // The merged extension takes the first context set.
-                            (None, Some(b)) => *prev = Some(b),
-                            _ => {}
-                        },
-                        None => {
-                            seen.insert(key, pe.media.as_deref());
-                        }
-                    }
-                }
-            }
-        }
-
         // Per-module visibility: an extension's origin can rewrite a module's
         // CSS when that module is (transitively) loaded by the origin.
         // Parallel to the (sorted) extensions list.
@@ -228,6 +187,25 @@ impl<'a> Evaluator<'a> {
             .iter()
             .map(|(k, v)| (k.clone(), (**v).clone()))
             .collect();
+
+        // dart checks media contexts as extensions and selectors register,
+        // which this deferred pass replays (see `first_media_error`). It needs
+        // `extensions` in registration order, so it runs before any reorder.
+        let sites: Vec<&TargetSite> = self
+            .placeholder_rules
+            .iter()
+            .chain(&self.bogus_selectors)
+            .collect();
+        if let Some(e) = first_media_error(
+            &self.extends,
+            &extensions,
+            out,
+            &sites,
+            &closures,
+            &self.media_context_aliases,
+        ) {
+            return Err(e);
+        }
         // The store-merge order context: reverse load edges + first-load
         // ranks (an origin's registrations are contiguous, so its smallest
         // reg index is its load rank).
@@ -263,33 +241,6 @@ impl<'a> Evaluator<'a> {
             first_reg,
             has_import_clones,
         };
-        // An `@extend` written inside `@media` may only extend selectors in that
-        // same media context (dart's `assertCompatibleMediaContext`): a match at
-        // the root, or inside a different `@media`, is "You may not @extend
-        // selectors across media queries.". An extension outside any `@media`
-        // applies everywhere. Only selectors the extension can actually reach
-        // count, by the rewrite's own visibility rule, so a sibling module's
-        // rule never does. A placeholder rule that emitted nothing is still a
-        // target (`placeholder_rules`), as it is for "target not found".
-        for pe in &self.extends {
-            let Some(media) = pe.media.as_deref() else {
-                continue;
-            };
-            let reach = ExtendReach::new(&pe.origin, &pe.target, &closures);
-            let in_tree = rule_outside_media_contains_target(out, "", None, media, &reach);
-            let empty_placeholder = self.placeholder_rules.iter().any(|(m, s, ctx)| {
-                reach.sees(m)
-                    && ctx.as_deref() != Some(media)
-                    && crate::selector::selector_contains_simple(s, &pe.target)
-            });
-            if in_tree || empty_placeholder {
-                return Err(Error::at(
-                    "You may not @extend selectors across media queries.",
-                    pe.pos,
-                ));
-            }
-        }
-
         rewrite_nodes_scoped(out, "", &extensions, &origins, &closures, &order);
 
         // Report the first unmatched non-optional extend. A target that only
@@ -306,14 +257,14 @@ impl<'a> Evaluator<'a> {
                 && !self
                     .bogus_selectors
                     .iter()
-                    .any(|s| crate::selector::selector_contains_simple(s, &pe.target))
-                && !self.placeholder_rules.iter().any(|(m, s, _)| {
+                    .any(|b| crate::selector::selector_contains_simple(&b.selector, &pe.target))
+                && !self.placeholder_rules.iter().any(|p| {
                     let visible = if private {
-                        *m == ext.origin
+                        p.module == ext.origin
                     } else {
-                        ext.origin_closure.contains(m)
+                        ext.origin_closure.contains(&p.module)
                     };
-                    visible && crate::selector::selector_contains_simple(s, &pe.target)
+                    visible && crate::selector::selector_contains_simple(&p.selector, &pe.target)
                 })
             {
                 return Err(Error::at(

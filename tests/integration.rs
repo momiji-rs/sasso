@@ -2617,11 +2617,31 @@ fn extend_across_media_contexts() {
         ),
         "Error: You may not @extend the same selector from within different media queries.",
     );
-    // An empty placeholder rule emits nothing but is still a target.
-    assert_eq!(
-        compile_err("@media print { %p {} }\n@media screen { a {@extend %p} }\n"),
-        across
-    );
+    // An empty placeholder rule emits nothing but is still a target, and so
+    // is an omitted bogus one.
+    for src in [
+        "@media print { %p {} }\n@media screen { a {@extend %p} }\n",
+        "@media print {.x > + y {z: w}}\n@media screen {a {@extend .x}}\n",
+    ] {
+        assert_eq!(compile_err(src), across, "{src}");
+    }
+    // dart raises whichever error comes first as extensions and selectors
+    // register (second review on #285). An extension applies to a rule that
+    // already exists as it registers, so the across error beats the later
+    // copy's merge error ...
+    for src in [
+        "b {x: y}\n@media screen {a {@extend b}}\n@media print {a {@extend b}}\n",
+        // ... and to a rule that registers later as THAT registers.
+        "@media screen {a {@extend b}}\nb {x: y}\n@media print {a {@extend b}}\n",
+        "@media screen {a {@extend b}}\n@media print {b {x: y}}\n@media print {a {@extend b}}\n",
+        // A later rule meets the merged extension, whose context is the first
+        // one set: here `screen`, from the second copy.
+        "a {@extend b}\n@media screen {a {@extend b}}\nb {x: y}\n",
+        // `(color) or (hover)` is `(color) and (hover)` to dart, not `screen`.
+        "@media screen {a {@extend .x}}\n@media (color) or (hover) {.x {a: b}}\n",
+    ] {
+        assert_eq!(compile_err(src), across, "{src}");
+    }
 
     let in_screen = "@media screen {\n  a, d {\n    b: c;\n  }\n}\n";
     for (src, want) in [
@@ -2649,6 +2669,17 @@ fn extend_across_media_contexts() {
         (
             "a {@extend b !optional}\n@media screen {\n  a {@extend b !optional}\n}\n",
             "",
+        ),
+        // A merged copy is not re-applied to a rule that already exists, so
+        // the root `b` never meets the `screen` context.
+        (
+            "b {x: y}\na {@extend b}\n@media screen {\n  a {@extend b}\n}\n",
+            "b, a {\n  x: y;\n}\n",
+        ),
+        // dart's media-query equality ignores `and` vs `or`.
+        (
+            "@media (color) and (hover) {\n  .x {a: b}\n}\n@media (color) or (hover) {\n  d {@extend .x}\n}\n",
+            "@media (color) and (hover) {\n  .x, d {\n    a: b;\n  }\n}\n",
         ),
         // An interpolated `@#{"media"}` is a generic at-rule, not a media
         // query, so the target inside it is still in `screen` (review on #285).

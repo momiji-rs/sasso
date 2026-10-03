@@ -34,9 +34,24 @@ Conformance is tracked separately as a ratchet against the official
   `.foo` and `.f\6f o` are one. A copy outside any `@media` still combines with
   one inside, as in dart. Only selectors the extension can reach count, which
   means its own module and the modules it loads, never a sibling. An empty
-  placeholder rule (`%p {}`) counts too, though it emits nothing. A stylesheet
-  that relied on the cross-media extend compiling now fails, as it does in
-  dart.
+  placeholder rule (`%p {}`) and an omitted bogus one (`.x > + y`) count too,
+  though they emit nothing. Two queries that differ only in `and` versus `or`
+  are one context, because dart's media-query equality ignores the
+  conjunction. When a stylesheet breaks both rules, the error reported is the
+  one dart raises first, in registration order. A stylesheet that relied on
+  the cross-media extend compiling now fails, as it does in dart.
+
+  One shape that dart compiles now compiles in sasso too. A copy of an
+  extension merges into the first copy, and the merged copy is never
+  re-applied to a rule that already exists:
+
+  ```
+    b {x: y}
+    a {@extend b}
+    @media screen { a {@extend b} }
+                     dart   b, a { x: y; }
+                     sasso  was: You may not @extend selectors across media queries.
+  ```
 
 ### Performance
 
