@@ -1160,10 +1160,12 @@ pub(crate) struct Evaluator<'a> {
     /// Bogus-combinator selectors omitted from the CSS (`.a > + x`): they
     /// still satisfy `@extend` target matching like dart's extend graph.
     bogus_selectors: Vec<String>,
-    /// Placeholder-rule selectors seen during eval (module key, selector).
-    /// An empty placeholder rule is pruned from the output tree but still
-    /// counts as an `@extend` target within the modules the extension sees.
-    placeholder_rules: Vec<(String, String)>,
+    /// Placeholder-rule selectors seen during eval (module key, selector,
+    /// media context as [`PendingExtend::media`] records it). An empty
+    /// placeholder rule is pruned from the output tree but still counts as an
+    /// `@extend` target within the modules the extension sees, and its media
+    /// context still decides whether an in-`@media` extension may reach it.
+    placeholder_rules: Vec<(String, String, Option<String>)>,
     /// Set while module loads run inside a module-loading `@import`: dart
     /// clones the whole import subtree's CSS at the import site (the same
     /// `_combineCss(clone: true)` as meta.load-css). All loads in the chain
@@ -3509,8 +3511,10 @@ impl<'a> Evaluator<'a> {
     /// is recorded with its module scope).
     fn note_placeholder_rule(&mut self, s: &str) {
         if s.contains('%') {
+            let media = (!self.media_queries.is_empty())
+                .then(|| serialize_media_queries(&self.media_queries, self.compressed()));
             self.placeholder_rules
-                .push((self.current_module.clone(), s.to_string()));
+                .push((self.current_module.clone(), s.to_string(), media));
         }
     }
 
@@ -6795,42 +6799,83 @@ fn unquote_plain_attribute_value(raw: &str) -> String {
 /// Whether any TOP-LEVEL style rule (not nested inside an at-rule such as
 /// `@media`) contains the extend `target` simple selector. Used to detect an
 /// `@extend` that crosses a media-query boundary.
-/// Whether a style rule whose selector contains `target` sits in a media
-/// context other than `media`, which is where an extension written in `media`
-/// would have to apply. `context` is the context of `nodes`: the prelude of the
-/// nearest enclosing `@media`, as the evaluator serialized it, or `None` at the
-/// root. `@keyframes` bodies hold keyframe stops, not style rules, so they are
-/// skipped, as the extend rewrite skips them.
+/// Which module scopes an extension can reach, by the rewrite's own rule
+/// ([`rewrite_nodes_scoped`]): its own module and every module whose CSS it
+/// can rewrite along load edges, and only its own for a private placeholder.
+pub(super) struct ExtendReach<'a> {
+    origin: &'a str,
+    private: bool,
+    closure: Option<&'a crate::fxhash::FxHashSet<String>>,
+    target: &'a crate::selector::Simple,
+}
+
+impl<'a> ExtendReach<'a> {
+    pub(super) fn new(
+        origin: &'a str,
+        target: &'a crate::selector::Simple,
+        closures: &'a HashMap<String, crate::fxhash::FxHashSet<String>>,
+    ) -> Self {
+        let private = matches!(target,
+            crate::selector::Simple::Placeholder(n) if n.starts_with('-') || n.starts_with('_'));
+        ExtendReach {
+            origin,
+            private,
+            closure: closures.get(origin),
+            target,
+        }
+    }
+
+    pub(super) fn sees(&self, scope: &str) -> bool {
+        if self.private {
+            return scope == self.origin;
+        }
+        scope == self.origin || self.closure.is_some_and(|c| c.contains(scope))
+    }
+}
+
+/// Whether a style rule the extension can reach, whose selector contains its
+/// target, sits in a media context other than `media`, the one the extension
+/// was written in. `scope` and `context` describe `nodes`: the module scope
+/// (switched by [`OutNode::ModuleScope`]) and the prelude of the nearest
+/// enclosing real `@media` (`None` at the root). An interpolated
+/// `@#{"media"}` is a generic at-rule, not a media query, so it changes
+/// nothing, and `@keyframes` bodies hold keyframe stops, not style rules.
 fn rule_outside_media_contains_target(
     nodes: &[OutNode],
+    scope: &str,
     context: Option<&str>,
     media: &str,
-    target: &crate::selector::Simple,
+    reach: &ExtendReach<'_>,
 ) -> bool {
     nodes.iter().any(|node| match node {
         OutNode::Rule { selectors, .. } => {
             context != Some(media)
+                && reach.sees(scope)
                 && selectors.to_strings().iter().any(|s| {
                     crate::selector::parse_list(s)
-                        .map(|cs| crate::selector::list_contains_simple(&cs, target))
+                        .map(|cs| crate::selector::list_contains_simple(&cs, reach.target))
                         .unwrap_or(false)
                 })
         }
         OutNode::AtRule {
-            name, prelude, body, ..
+            name,
+            prelude,
+            body,
+            kind,
+            ..
         } => {
             if is_keyframes_name(name) {
                 return false;
             }
-            let inner = if name == "media" {
+            let inner = if kind.is_conditional() && name == "media" {
                 Some(prelude.as_str())
             } else {
                 context
             };
-            rule_outside_media_contains_target(body, inner, media, target)
+            rule_outside_media_contains_target(body, scope, inner, media, reach)
         }
-        OutNode::ModuleScope { nodes, .. } => {
-            rule_outside_media_contains_target(nodes, context, media, target)
+        OutNode::ModuleScope { key, nodes } => {
+            rule_outside_media_contains_target(nodes, key, context, media, reach)
         }
         _ => false,
     })

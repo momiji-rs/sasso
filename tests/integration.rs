@@ -2610,6 +2610,18 @@ fn extend_across_media_contexts() {
         ),
         "Error: You may not @extend the same selector from within different media queries.",
     );
+    // "The same" is the parsed selector, not its spelling (review on #285).
+    assert_eq!(
+        compile_err(
+            "@media screen { a {@extend .foo !optional} }\n@media print { a {@extend .f\\6f o !optional} }\n"
+        ),
+        "Error: You may not @extend the same selector from within different media queries.",
+    );
+    // An empty placeholder rule emits nothing but is still a target.
+    assert_eq!(
+        compile_err("@media print { %p {} }\n@media screen { a {@extend %p} }\n"),
+        across
+    );
 
     let in_screen = "@media screen {\n  a, d {\n    b: c;\n  }\n}\n";
     for (src, want) in [
@@ -2638,9 +2650,65 @@ fn extend_across_media_contexts() {
             "a {@extend b !optional}\n@media screen {\n  a {@extend b !optional}\n}\n",
             "",
         ),
+        // An interpolated `@#{"media"}` is a generic at-rule, not a media
+        // query, so the target inside it is still in `screen` (review on #285).
+        (
+            "@media screen {\n  @#{\"media\"} print {\n    a {b: c}\n  }\n  d {@extend a}\n}\n",
+            "@media screen {\n  @media print {\n    a, d {\n      b: c;\n    }\n  }\n}\n",
+        ),
     ] {
         assert_eq!(css(src), want, "{src}");
     }
+}
+
+/// The cross-media check sees only the selectors an extension can reach, by
+/// the extend rewrite's own visibility rule (review on #285): a module's
+/// extensions reach that module and the modules it loads, never a sibling, and
+/// a private placeholder only its own module. Measured against dart-sass
+/// 1.105.1 on 2026-10-03.
+#[test]
+fn extend_across_media_contexts_respects_module_reach() {
+    let dir = std::env::temp_dir().join(format!("sasso_xmedia_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let imp = sasso::FsImporter::new(vec![dir.clone()]);
+    let run = |modules: &[(&str, &str)], entry: &str| {
+        for (name, text) in modules {
+            std::fs::write(dir.join(format!("_{name}.scss")), text).unwrap();
+        }
+        compile(entry, &Options::default().with_importer(&imp)).map_err(err_message)
+    };
+    let across = "Error: You may not @extend selectors across media queries.".to_string();
+    // A sibling's rule is out of reach: dart compiles this.
+    assert_eq!(
+        run(
+            &[
+                ("xa", "@media screen { a {@extend .x !optional} }\n"),
+                ("xb", "@media print { .x {y: z} }\n"),
+            ],
+            "@use \"xa\";\n@use \"xb\";\n",
+        ),
+        Ok("@media print {\n  .x {\n    y: z;\n  }\n}".to_string()),
+    );
+    // A module the extension's own file loads is in reach.
+    assert_eq!(
+        run(
+            &[("xu", "@media print { .x {y: z} }\n")],
+            "@use \"xu\";\n@media screen { a {@extend .x} }\n"
+        ),
+        Err(across.clone()),
+    );
+    // A private placeholder, extended from its own module.
+    assert_eq!(
+        run(
+            &[(
+                "xp",
+                "@media screen { %-p {x: y} }\n@media print { a {@extend %-p !optional} }\n"
+            )],
+            "@use \"xp\";\n",
+        ),
+        Err(across),
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

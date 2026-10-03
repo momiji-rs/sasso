@@ -30,9 +30,13 @@ Conformance is tracked separately as a ratchet against the official
   selector in the enclosing one. And one extension written in two different
   media contexts is now dart's own error, `You may not @extend the same
   selector from within different media queries.`, even with `!optional` and
-  nothing to extend. A copy outside any `@media` still combines with one
-  inside, as in dart. A stylesheet that relied on the cross-media extend
-  compiling now fails, as it does in dart.
+  nothing to extend, and "the same" means the same parsed selector, so
+  `.foo` and `.f\6f o` are one. A copy outside any `@media` still combines with
+  one inside, as in dart. Only selectors the extension can reach count, which
+  means its own module and the modules it loads, never a sibling. An empty
+  placeholder rule (`%p {}`) counts too, though it emits nothing. A stylesheet
+  that relied on the cross-media extend compiling now fails, as it does in
+  dart.
 
 ### Performance
 
