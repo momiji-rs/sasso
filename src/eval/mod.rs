@@ -1730,8 +1730,13 @@ struct PendingExtend {
     /// inherits its extender's flag, dart's ComplexSelector.lineBreak).
     extender_breaks: Vec<bool>,
     optional: bool,
-    /// Whether this `@extend` was registered inside a `@media` context.
-    in_media: bool,
+    /// The media context the `@extend` was written in: its enclosing `@media`
+    /// queries, merged and serialized as an emitted `@media` prelude would be
+    /// (`None` outside any `@media`). dart compares these contexts, not just
+    /// whether there is one: an extension may only apply to a selector in the
+    /// same context, and two copies of one extension may not sit in different
+    /// ones.
+    media: Option<String>,
     /// The canonical key of the module this `@extend` was written in
     /// (empty for the root stylesheet).
     origin: String,
@@ -6790,13 +6795,43 @@ fn unquote_plain_attribute_value(raw: &str) -> String {
 /// Whether any TOP-LEVEL style rule (not nested inside an at-rule such as
 /// `@media`) contains the extend `target` simple selector. Used to detect an
 /// `@extend` that crosses a media-query boundary.
-fn root_rule_contains_target(nodes: &[OutNode], target: &crate::selector::Simple) -> bool {
+/// Whether a style rule whose selector contains `target` sits in a media
+/// context other than `media`, which is where an extension written in `media`
+/// would have to apply. `context` is the context of `nodes`: the prelude of the
+/// nearest enclosing `@media`, as the evaluator serialized it, or `None` at the
+/// root. `@keyframes` bodies hold keyframe stops, not style rules, so they are
+/// skipped, as the extend rewrite skips them.
+fn rule_outside_media_contains_target(
+    nodes: &[OutNode],
+    context: Option<&str>,
+    media: &str,
+    target: &crate::selector::Simple,
+) -> bool {
     nodes.iter().any(|node| match node {
-        OutNode::Rule { selectors, .. } => selectors.to_strings().iter().any(|s| {
-            crate::selector::parse_list(s)
-                .map(|cs| crate::selector::list_contains_simple(&cs, target))
-                .unwrap_or(false)
-        }),
+        OutNode::Rule { selectors, .. } => {
+            context != Some(media)
+                && selectors.to_strings().iter().any(|s| {
+                    crate::selector::parse_list(s)
+                        .map(|cs| crate::selector::list_contains_simple(&cs, target))
+                        .unwrap_or(false)
+                })
+        }
+        OutNode::AtRule {
+            name, prelude, body, ..
+        } => {
+            if is_keyframes_name(name) {
+                return false;
+            }
+            let inner = if name == "media" {
+                Some(prelude.as_str())
+            } else {
+                context
+            };
+            rule_outside_media_contains_target(body, inner, media, target)
+        }
+        OutNode::ModuleScope { nodes, .. } => {
+            rule_outside_media_contains_target(nodes, context, media, target)
+        }
         _ => false,
     })
 }

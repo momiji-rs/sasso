@@ -42,7 +42,8 @@ impl<'a> Evaluator<'a> {
         if let Some((_, msg)) = super::find_stray_selector_char(&target) {
             return Err(Error::at(msg, pos));
         }
-        let in_media = !self.media_queries.is_empty();
+        let media = (!self.media_queries.is_empty())
+            .then(|| super::serialize_media_queries(&self.media_queries, self.compressed()));
         for t in split_commas(&target).iter() {
             let t = t.trim_matches(is_css_whitespace);
             if t.is_empty() {
@@ -57,7 +58,7 @@ impl<'a> Evaluator<'a> {
                         extenders: extenders.clone(),
                         extender_breaks: self.current_linebreaks.clone(),
                         optional,
-                        in_media,
+                        media: media.clone(),
                         pos,
                     });
                 }
@@ -179,16 +180,51 @@ impl<'a> Evaluator<'a> {
         // misplaced sibling stores with unequal upstream counts — bulma's
         // form vs elements modules.)
 
-        // An `@extend` registered inside `@media` may not extend a selector
-        // outside any media context (dart-sass "You may not @extend selectors
-        // across media queries."). Detect when an in-media extend's target
-        // matches a root-level (non-media) rule.
+        // One extension written twice, in two different media contexts, is an
+        // error however the targets fall (dart's `MergedExtension.merge`):
+        // "the same" is the same extender and the same target, and only two
+        // contexts that are both set and differ conflict, so a copy outside
+        // any `@media` merges with one inside. The error points at the second
+        // copy. dart merges within one extension store, so this compares
+        // extensions written in the same module.
+        {
+            let mut seen: HashMap<(&str, &str, &str), Option<&str>> = HashMap::default();
+            for pe in &self.extends {
+                for extender in pe.extenders.iter() {
+                    let key = (pe.origin.as_str(), extender.as_str(), pe.target_str.as_str());
+                    match seen.get_mut(&key) {
+                        Some(prev) => match (*prev, pe.media.as_deref()) {
+                            (Some(a), Some(b)) if a != b => {
+                                return Err(Error::at(
+                                    "You may not @extend the same selector from within different media queries.",
+                                    pe.pos,
+                                ));
+                            }
+                            // The merged extension takes the first context set.
+                            (None, Some(b)) => *prev = Some(b),
+                            _ => {}
+                        },
+                        None => {
+                            seen.insert(key, pe.media.as_deref());
+                        }
+                    }
+                }
+            }
+        }
+
+        // An `@extend` written inside `@media` may only extend selectors in that
+        // same media context (dart's `assertCompatibleMediaContext`): a match at
+        // the root, or inside a different `@media`, is "You may not @extend
+        // selectors across media queries.". An extension outside any `@media`
+        // applies everywhere.
         for pe in &self.extends {
-            if pe.in_media && root_rule_contains_target(out, &pe.target) {
-                return Err(Error::at(
-                    "You may not @extend selectors across media queries.",
-                    pe.pos,
-                ));
+            if let Some(media) = pe.media.as_deref() {
+                if rule_outside_media_contains_target(out, None, media, &pe.target) {
+                    return Err(Error::at(
+                        "You may not @extend selectors across media queries.",
+                        pe.pos,
+                    ));
+                }
             }
         }
 

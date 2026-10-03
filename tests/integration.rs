@@ -2584,6 +2584,65 @@ fn selector_pseudo_grammar_matches_dart() {
     }
 }
 
+/// An extension written inside `@media` may only apply to selectors in the same
+/// media context, and one extension written in two different contexts is an
+/// error even when nothing matches (#282). dart has rejected the cross-media
+/// shapes since well before 1.105; sasso used to check only an in-media
+/// extension against a rule at the root. Every expectation here was measured
+/// against dart-sass 1.105.1 on 2026-10-03.
+#[test]
+fn extend_across_media_contexts() {
+    let across = "Error: You may not @extend selectors across media queries.";
+    for src in [
+        // Extension in one `@media`, target in another.
+        "@media screen {\n  a {@extend b}\n}\n\n@media print {\n  b {c: d}\n}\n",
+        "@media print {\n  a {b: c}\n}\n\n@media screen {\n  d {@extend a}\n}\n",
+        // Extension in the root's child context, target in the parent's.
+        "@media screen {\n  a {b: c}\n  @media (min-width: 10px) {\n    d {@extend a}\n  }\n}\n",
+        // The shape the old check did catch: target at the root.
+        "@media screen {\n  a {@extend b}\n}\n\nb {c: d}\n",
+    ] {
+        assert_eq!(compile_err(src), across, "{src}");
+    }
+    assert_eq!(
+        compile_err(
+            "@media screen {\n  a {@extend b !optional}\n}\n\n@media print {\n  a {@extend b !optional}\n}\n"
+        ),
+        "Error: You may not @extend the same selector from within different media queries.",
+    );
+
+    let in_screen = "@media screen {\n  a, d {\n    b: c;\n  }\n}\n";
+    for (src, want) in [
+        ("@media screen {\n  a {b: c}\n  d {@extend a}\n}\n", in_screen),
+        // An extension outside any `@media` applies everywhere.
+        ("@media screen { a {b: c} }\nd {@extend a}\n", in_screen),
+        // Two `@media` blocks with the same query are one context.
+        (
+            "@media screen { a {b: c} }\n@media screen { d {@extend a} }\n",
+            in_screen,
+        ),
+        (
+            "@media screen {\n  @media (min-width: 10px) {\n    a {b: c}\n    d {@extend a}\n  }\n}\n",
+            "@media screen and (min-width: 10px) {\n  a, d {\n    b: c;\n  }\n}\n",
+        ),
+        (
+            "@media screen {\n  %p {b: c}\n  d {@extend %p}\n}\n",
+            "@media screen {\n  d {\n    b: c;\n  }\n}\n",
+        ),
+        (
+            "@supports (display: grid) {\n  @media screen {\n    a {b: c}\n    d {@extend a}\n  }\n}\n",
+            "@supports (display: grid) {\n  @media screen {\n    a, d {\n      b: c;\n    }\n  }\n}\n",
+        ),
+        // A copy outside any `@media` merges with one inside: no conflict.
+        (
+            "a {@extend b !optional}\n@media screen {\n  a {@extend b !optional}\n}\n",
+            "",
+        ),
+    ] {
+        assert_eq!(css(src), want, "{src}");
+    }
+}
+
 #[test]
 fn selector_bang_and_extend_leading_comma_match_dart() {
     let err = |src: &str| compile(src, &Options::default()).unwrap_err().message;

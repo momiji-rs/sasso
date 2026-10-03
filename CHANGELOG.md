@@ -11,6 +11,29 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Fixed
+
+- **An `@extend` across media queries is an error in every shape dart
+  rejects** (#282). An `@extend` written inside `@media` may only extend
+  selectors in that same media context. sasso enforced this only against a
+  rule outside any `@media`, so an extension in one `@media` reaching a
+  selector in another compiled. dart has always rejected that:
+
+  ```
+    @media print { a {b: c} }
+    @media screen { d {@extend a} }
+                     dart   You may not @extend selectors across media queries.
+                     sasso  compiled, with d added to the print rule
+  ```
+
+  The same goes for an extension in a nested `@media` that reaches a
+  selector in the enclosing one. And one extension written in two different
+  media contexts is now dart's own error, `You may not @extend the same
+  selector from within different media queries.`, even with `!optional` and
+  nothing to extend. A copy outside any `@media` still combines with one
+  inside, as in dart. A stylesheet that relied on the cross-media extend
+  compiling now fails, as it does in dart.
+
 ### Performance
 
 - **`map.get` and `map.has-key` no longer copy the map they read.** Each call
