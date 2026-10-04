@@ -1160,10 +1160,11 @@ pub(crate) struct Evaluator<'a> {
     /// Bogus-combinator selectors omitted from the CSS (`.a > + x`): they
     /// still satisfy `@extend` target matching like dart's extend graph.
     bogus_selectors: Vec<TargetSite>,
-    /// Placeholder-rule selectors seen during eval. An empty placeholder rule
-    /// is pruned from the output tree but still counts as an `@extend` target
-    /// within the modules the extension sees.
-    placeholder_rules: Vec<TargetSite>,
+    /// Style rules whose own block emitted nothing (`.x {}`, `%p {c: null}`,
+    /// a rule holding only nested rules). They are not in the output tree,
+    /// but dart registers every style rule's selector, so each is still an
+    /// `@extend` target within the modules the extension sees.
+    empty_rules: Vec<TargetSite>,
     /// Emitted `@media` preludes whose media context ([`media_context_key`])
     /// is spelled differently: only a query that joins its conditions with
     /// `or`. Lets the output-tree walk recover the context from a prelude.
@@ -1746,12 +1747,12 @@ struct PendingExtend {
     pos: Pos,
 }
 
-/// A selector that is an `@extend` target but is not a style rule in the
-/// output tree at extend time: an empty placeholder rule, or a bogus one.
+/// Selectors that are `@extend` targets but are not a style rule in the
+/// output tree at extend time: an empty rule's, or a bogus one.
 struct TargetSite {
     /// The canonical key of the module the rule was written in.
     module: String,
-    selector: String,
+    selectors: Rc<Vec<String>>,
     /// As [`PendingExtend::media`].
     media: Option<String>,
     /// As [`OutNode::Rule`]'s `extend_base`.
@@ -1839,7 +1840,7 @@ impl<'a> Evaluator<'a> {
             cur_rule_lines: SrcLines::default(),
             cur_rule_extend_base: usize::MAX,
             bogus_selectors: Vec::new(),
-            placeholder_rules: Vec::new(),
+            empty_rules: Vec::new(),
             media_context_aliases: HashMap::default(),
             used_modules: Rc::default(),
             star_modules: Rc::default(),
@@ -3516,33 +3517,14 @@ impl<'a> Evaluator<'a> {
         Ok(())
     }
 
-    /// Evaluate a style rule: resolve its selector against `parents`, run its
-    /// body into a fresh rule sink, then hand the produced block and the
-    /// rules that bubbled out of it to the enclosing `sink`.
-    /// A placeholder rule stays an `@extend` target even when its body produces
-    /// nothing (`%bam { bam: null }` is "found", dart keeps every rule in the
-    /// extend graph; we prune empty rules from the output tree, so the selector
-    /// is recorded with its module scope).
-    fn note_placeholder_rule(&mut self, s: &str) {
-        if s.contains('%') {
-            self.note_target_site(s, false);
-        }
-    }
-
-    /// Record `selector`, a style rule's selector, as an `@extend` target
-    /// registered now, in the current module and media context: a placeholder
-    /// one, or an omitted `bogus` one.
-    fn note_target_site(&mut self, selector: &str, bogus: bool) {
-        let site = TargetSite {
+    /// `selectors`, registered after `extend_base` `@extend`s, as an
+    /// `@extend` target site in the current module and media context.
+    fn target_site(&self, selectors: Rc<Vec<String>>, extend_base: usize) -> TargetSite {
+        TargetSite {
             module: self.current_module.clone(),
-            selector: selector.to_string(),
+            selectors,
             media: self.media_context(),
-            extend_base: self.extends.len(),
-        };
-        if bogus {
-            self.bogus_selectors.push(site);
-        } else {
-            self.placeholder_rules.push(site);
+            extend_base,
         }
     }
 
@@ -3620,26 +3602,23 @@ impl<'a> Evaluator<'a> {
         // all-false. Keyframe selector lists always take it (dart re-serializes
         // the stops joined with ", ", dropping author line breaks that
         // style-rule selectors preserve).
-        // `maybe_bogus` / `any_percent` are the resolver's aggregate answers to
-        // the two questions the block below would otherwise ask per selector, one
-        // full byte scan each. A keyframe list is resolved here rather than by
-        // `resolve_selectors_opt`, so it gets the conservative answer — and a
-        // keyframe stop really does carry a `%`.
-        let (current, full_lbs, maybe_bogus, any_percent): (Vec<String>, Vec<bool>, bool, bool) =
-            if self.in_keyframes {
-                (parse_keyframe_selector(&sel_str)?, Vec::new(), true, true)
-            } else {
-                let resolved = resolve_selectors_opt(
-                    &sel_str,
-                    parents,
-                    !self.at_root_excluding_style_rule,
-                    &part_lbs,
-                    parent_lbs,
-                    !lbs_fast,
-                )?;
-                let (maybe_bogus, any_percent) = (resolved.maybe_bogus, resolved.any_percent);
-                (resolved.sels, resolved.lbs, maybe_bogus, any_percent)
-            };
+        // `maybe_bogus` is the resolver's aggregate answer to the question the
+        // block below would otherwise ask per selector, one full byte scan each.
+        // A keyframe list is resolved here rather than by
+        // `resolve_selectors_opt`, so it gets the conservative answer.
+        let (current, full_lbs, maybe_bogus): (Vec<String>, Vec<bool>, bool) = if self.in_keyframes {
+            (parse_keyframe_selector(&sel_str)?, Vec::new(), true)
+        } else {
+            let resolved = resolve_selectors_opt(
+                &sel_str,
+                parents,
+                !self.at_root_excluding_style_rule,
+                &part_lbs,
+                parent_lbs,
+                !lbs_fast,
+            )?;
+            (resolved.sels, resolved.lbs, resolved.maybe_bogus)
+        };
         // Drop "bogus combinator" complex selectors from the emitted block;
         // dart-sass omits them from the generated CSS. A top-level TRAILING
         // combinator (`a >`) is bogus as a leaf (its own declaration block is
@@ -3679,15 +3658,7 @@ impl<'a> Evaluator<'a> {
         // every style rule in every stylesheet to serve a branch that fires on
         // a handful; it is taken on first need instead.
         let mut src_text: Option<Rc<str>> = None;
-        if share_current {
-            // Only a `%`-bearing selector can be a placeholder rule, and the
-            // resolver's scan already answered that for the whole list.
-            if any_percent {
-                for s in current.iter() {
-                    self.note_placeholder_rule(s);
-                }
-            }
-        } else {
+        if !share_current {
             emit_selectors.reserve(current.len());
             emit_linebreaks.reserve(current.len());
             let mut own_parts: Option<usize> = None;
@@ -3711,11 +3682,9 @@ impl<'a> Evaluator<'a> {
                     // The omitted selector still participates in @extend target
                     // matching (dart keeps the rule in the extend graph and only
                     // omits it from the emitted CSS).
-                    self.note_target_site(s, true);
+                    let site = self.target_site(Rc::new(vec![s.clone()]), self.extends.len());
+                    self.bogus_selectors.push(site);
                     continue;
-                }
-                if any_percent {
-                    self.note_placeholder_rule(s);
                 }
                 emit_selectors.push(s.clone());
                 if !full_lbs.is_empty() {
@@ -3808,6 +3777,12 @@ impl<'a> Evaluator<'a> {
         self.cur_rule_extend_base = prev_rule_extend_base;
         self.pop_scope();
         result?;
+        // A rule whose own block never emitted is in no output tree, but dart
+        // registered its selector all the same (a keyframe stop is not one).
+        if flushed.is_none() && !self.in_keyframes {
+            let site = self.target_site(Rc::clone(&current), extend_base);
+            self.empty_rules.push(site);
+        }
         // The body's own trailing-invisible state gates THIS rule's group
         // end; then report this rule's contribution to the PARENT body
         // (empty output = dart's invisible node).
@@ -6966,6 +6941,7 @@ fn first_media_error(
         }
     }
     groups.retain(|g| g.copies.iter().any(|c| c.1.is_some()));
+    let needles = TargetNeedles::new(groups.iter().map(|g| g.reach.target));
 
     let mut first: Option<(usize, Pos, &'static str)> = None;
     let mut note = |time: usize, pos: Pos, msg: &'static str| {
@@ -7006,12 +6982,63 @@ fn first_media_error(
         }
     };
     for site in sites {
-        across(&site.module, site.media.as_deref(), site.extend_base, &|t| {
-            crate::selector::selector_contains_simple(&site.selector, t)
-        });
+        let context = site.media.as_deref();
+        if !groups
+            .iter()
+            .any(|g| g.reach.sees(&site.module) && g.may_conflict(context))
+            || !site.selectors.iter().any(|s| needles.may_contain(s))
+        {
+            continue;
+        }
+        across(&site.module, context, site.extend_base, &|t| site.contains(t));
     }
-    walk_media_targets(out, "", None, &groups, aliases, &mut across);
+    walk_media_targets(out, "", None, &groups, &needles, aliases, &mut across);
     first.map(|(_, pos, msg)| Error::at(msg, pos))
+}
+
+/// A textual pre-test for "this selector may contain one of the targets",
+/// so a selector that cannot is never parsed. A class, id, placeholder or
+/// type target is spelled by its name in any selector holding it, unless the
+/// selector escapes something; an escaped name or any other kind of target
+/// defeats the pre-test.
+struct TargetNeedles<'a> {
+    names: Vec<&'a str>,
+    exhaustive: bool,
+}
+
+impl<'a> TargetNeedles<'a> {
+    fn new(targets: impl Iterator<Item = &'a crate::selector::Simple>) -> Self {
+        use crate::selector::Simple;
+        let mut names = Vec::new();
+        let mut exhaustive = true;
+        for t in targets {
+            match t {
+                Simple::Class(n) | Simple::Id(n) | Simple::Placeholder(n) | Simple::Type(n)
+                    if !n.contains('\\') =>
+                {
+                    if !names.contains(&n.as_str()) {
+                        names.push(n.as_str());
+                    }
+                }
+                _ => exhaustive = false,
+            }
+        }
+        TargetNeedles { names, exhaustive }
+    }
+
+    fn may_contain(&self, selector: &str) -> bool {
+        !self.exhaustive || selector.contains('\\') || self.names.iter().any(|n| selector.contains(n))
+    }
+}
+
+impl TargetSite {
+    /// Whether one of these selectors contains `target`. Lenient about bogus
+    /// combinators, which [`crate::selector::parse_list`] would reject.
+    fn contains(&self, target: &crate::selector::Simple) -> bool {
+        self.selectors
+            .iter()
+            .any(|s| crate::selector::selector_contains_simple(s, target))
+    }
 }
 
 /// Whether a selector contains an extension's target.
@@ -7032,6 +7059,7 @@ fn walk_media_targets(
     scope: &str,
     context: Option<&str>,
     groups: &[MediaGroup<'_>],
+    needles: &TargetNeedles<'_>,
     aliases: &HashMap<String, String>,
     visit: &mut VisitTarget<'_>,
 ) {
@@ -7048,8 +7076,11 @@ fn walk_media_targets(
                 {
                     continue;
                 }
-                let parsed: Vec<crate::selector::Complex> = selectors
-                    .to_strings()
+                let strings = selectors.to_strings();
+                if !strings.iter().any(|s| needles.may_contain(s)) {
+                    continue;
+                }
+                let parsed: Vec<crate::selector::Complex> = strings
                     .iter()
                     .filter_map(|s| crate::selector::parse_list(s))
                     .flatten()
@@ -7073,10 +7104,10 @@ fn walk_media_targets(
                 } else {
                     context
                 };
-                walk_media_targets(body, scope, inner, groups, aliases, visit);
+                walk_media_targets(body, scope, inner, groups, needles, aliases, visit);
             }
             OutNode::ModuleScope { key, nodes } => {
-                walk_media_targets(nodes, key, context, groups, aliases, visit)
+                walk_media_targets(nodes, key, context, groups, needles, aliases, visit)
             }
             _ => {}
         }
@@ -7893,10 +7924,6 @@ struct ResolvedSelectors {
     /// scanning every byte of every selector. `true` means "not proved", never
     /// "has one".
     maybe_bogus: bool,
-    /// True if any selector in `sels` contains a `%`. Only a `%`-bearing
-    /// selector can be a placeholder rule, so `false` lets the emitter skip its
-    /// per-selector placeholder bookkeeping outright.
-    any_percent: bool,
 }
 
 impl ResolvedSelectors {
@@ -7906,7 +7933,6 @@ impl ResolvedSelectors {
             lbs: Vec::new(),
             flags,
             maybe_bogus: false,
-            any_percent: false,
         }
     }
 
@@ -7948,7 +7974,6 @@ impl ResolvedSelectors {
 
     fn push_normalized(&mut self, n: Normalized, lb: bool) {
         self.maybe_bogus |= !n.canonical;
-        self.any_percent |= n.percent;
         self.push_merged(n.sel, lb);
     }
 
@@ -7957,7 +7982,6 @@ impl ResolvedSelectors {
     /// carry no facts of their own.
     fn absorb(&mut self, other: &ResolvedSelectors) {
         self.maybe_bogus |= other.maybe_bogus;
-        self.any_percent |= other.any_percent;
     }
 }
 
@@ -8385,20 +8409,17 @@ pub(crate) fn normalize_selector(s: &str) -> String {
     normalize_selector_facts(s).sel
 }
 
-/// A normalized selector plus the two facts its canonical scan yielded **for
+/// A normalized selector plus the fact its canonical scan yielded **for
 /// free**. `canonical` is a *proof* that the selector carries no
 /// bogus-combinator trigger, because [`canonical_plain`]'s byte set is disjoint
-/// from `has_bogus_trigger`'s `> + ~ (`; `percent` is the placeholder probe the
-/// emitter would otherwise repeat per selector. Both fall out of a loop that had
-/// to run anyway to decide the fast path, which is the entire reason they are
-/// collected here instead of scanned for downstream.
+/// from `has_bogus_trigger`'s `> + ~ (`. It falls out of a loop that had to run
+/// anyway to decide the fast path, which is the entire reason it is collected
+/// here instead of scanned for downstream.
 struct Normalized {
     sel: String,
     /// The selector was *proved* canonical. `false` means "not proved" — it
     /// says nothing about whether a trigger byte is actually present.
     canonical: bool,
-    /// The normalized selector contains a `%`.
-    percent: bool,
 }
 
 /// [`normalize_selector`], reporting what the canonical scan saw.
@@ -8408,41 +8429,32 @@ fn normalize_selector_facts(s: &str) -> Normalized {
     // debug-built test run and every debug spec run re-checks fast == slow on
     // every call, which is the harness this fast path was originally validated
     // against and is cheaper to keep than to rebuild.
-    match canonical_plain(s) {
-        Some(percent) => {
-            debug_assert_canonical(s, percent);
-            Normalized {
-                sel: s.to_string(),
-                canonical: true,
-                percent,
-            }
+    if canonical_plain(s) {
+        debug_assert_canonical(s);
+        Normalized {
+            sel: s.to_string(),
+            canonical: true,
         }
-        None => {
-            let sel = normalize_selector_slow(s);
-            let percent = sel.contains('%');
-            Normalized {
-                sel,
-                canonical: false,
-                percent,
-            }
+    } else {
+        Normalized {
+            sel: normalize_selector_slow(s),
+            canonical: false,
         }
     }
 }
 
-/// The three invariants the canonical fast path rests on, checked on every call
+/// The two invariants the canonical fast path rests on, checked on every call
 /// in a debug build and compiled out of release: the normalizer would have
-/// returned the selector unchanged, the scan's `%` answer matches a plain
-/// search, and the accepted byte set really is disjoint from the
-/// bogus-combinator triggers — the last one so that widening
+/// returned the selector unchanged, and the accepted byte set really is
+/// disjoint from the bogus-combinator triggers — the last one so that widening
 /// [`canonical_plain`] cannot silently break `ResolvedSelectors::maybe_bogus`.
 #[inline]
-fn debug_assert_canonical(s: &str, percent: bool) {
+fn debug_assert_canonical(s: &str) {
     debug_assert_eq!(
         normalize_selector_slow(s),
         s,
         "canonical_plain accepted a selector the normalizer would rewrite"
     );
-    debug_assert_eq!(percent, s.contains('%'), "canonical scan missed a `%`");
     debug_assert!(
         !has_bogus_trigger(s),
         "the canonical byte set overlaps a bogus-combinator trigger"
@@ -8451,10 +8463,7 @@ fn debug_assert_canonical(s: &str, percent: bool) {
 
 /// Whether `s` is already in canonical form without running the normalizer:
 /// only plain compound characters (ASCII letters/digits, `_-.#%:`) separated
-/// by single descendant spaces, with no leading/trailing space. `None` means
-/// not canonical; `Some(percent)` means canonical, and reports whether the scan
-/// passed a `%` — the same loop over the same bytes answers both questions,
-/// which is what makes [`ResolvedSelectors::any_percent`] free. Every rewrite
+/// by single descendant spaces, with no leading/trailing space. Every rewrite
 /// `normalize_selector` performs — whitespace collapse, hex-escape handling,
 /// attribute/pseudo/combinator canonicalization — is triggered by a character
 /// outside this set.
@@ -8486,32 +8495,27 @@ fn debug_assert_canonical(s: &str, percent: bool) {
 /// carries no bogus-combinator trigger — an invariant
 /// [`ResolvedSelectors::maybe_bogus`] now depends on and
 /// [`debug_assert_canonical`] pins.
-fn canonical_plain(s: &str) -> Option<bool> {
+fn canonical_plain(s: &str) -> bool {
     let b = s.as_bytes();
     if b.is_empty() || b[0] == b' ' || b[b.len() - 1] == b' ' {
-        return None;
+        return false;
     }
     let mut prev_space = false;
-    let mut percent = false;
     for &c in b {
         match c {
-            b'%' => {
-                percent = true;
-                prev_space = false;
-            }
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b'.' | b'#' | b':' => {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b'.' | b'#' | b'%' | b':' => {
                 prev_space = false;
             }
             b' ' => {
                 if prev_space {
-                    return None;
+                    return false;
                 }
                 prev_space = true;
             }
-            _ => return None,
+            _ => return false,
         }
     }
-    Some(percent)
+    true
 }
 
 /// [`normalize_selector`] for a string the caller already owns: hands the
@@ -8520,23 +8524,16 @@ fn canonical_plain(s: &str) -> Option<bool> {
 /// substituting a parent (`format!("{parent} {part}")`, `replace_parent_refs`)
 /// is owned and canonical, which is the common shape of a nested rule.
 fn normalize_selector_owned_facts(s: String) -> Normalized {
-    match canonical_plain(&s) {
-        Some(percent) => {
-            debug_assert_canonical(&s, percent);
-            Normalized {
-                sel: s,
-                canonical: true,
-                percent,
-            }
+    if canonical_plain(&s) {
+        debug_assert_canonical(&s);
+        Normalized {
+            sel: s,
+            canonical: true,
         }
-        None => {
-            let sel = normalize_selector_slow(&s);
-            let percent = sel.contains('%');
-            Normalized {
-                sel,
-                canonical: false,
-                percent,
-            }
+    } else {
+        Normalized {
+            sel: normalize_selector_slow(&s),
+            canonical: false,
         }
     }
 }

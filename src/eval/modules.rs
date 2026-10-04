@@ -191,11 +191,7 @@ impl<'a> Evaluator<'a> {
         // dart checks media contexts as extensions and selectors register,
         // which this deferred pass replays (see `first_media_error`). It needs
         // `extensions` in registration order, so it runs before any reorder.
-        let sites: Vec<&TargetSite> = self
-            .placeholder_rules
-            .iter()
-            .chain(&self.bogus_selectors)
-            .collect();
+        let sites: Vec<&TargetSite> = self.empty_rules.iter().chain(&self.bogus_selectors).collect();
         if let Some(e) = first_media_error(
             &self.extends,
             &extensions,
@@ -254,17 +250,14 @@ impl<'a> Evaluator<'a> {
                 crate::selector::Simple::Placeholder(n) if n.starts_with('-') || n.starts_with('_'));
             if !ext.optional
                 && !ext.matched.get()
-                && !self
-                    .bogus_selectors
-                    .iter()
-                    .any(|b| crate::selector::selector_contains_simple(&b.selector, &pe.target))
-                && !self.placeholder_rules.iter().any(|p| {
+                && !self.bogus_selectors.iter().any(|b| b.contains(&pe.target))
+                && !self.empty_rules.iter().any(|p| {
                     let visible = if private {
                         p.module == ext.origin
                     } else {
                         ext.origin_closure.contains(&p.module)
                     };
-                    visible && crate::selector::selector_contains_simple(&p.selector, &pe.target)
+                    visible && p.contains(&pe.target)
                 })
             {
                 return Err(Error::at(
