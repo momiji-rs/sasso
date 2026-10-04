@@ -6020,8 +6020,19 @@ for (const how of ["fails-to-start", "dies"]) {
   const want = [`${join("sub", "_p.scss")}:1 DEBUG: partial`, `${join("sub", "a b ü.scss")}:2 DEBUG: entry`];
   const debugLines = (s) => s.split("\n").filter((l) => l.includes("DEBUG:"));
   const engines = ["wasm"];
+  // As the frame case above does: native is skipped only when the addon is
+  // genuinely absent, and that has to be the reason the probe failed. Any
+  // other failure is a native regression, and skipping on it would hide it.
   const probe = spawnSync(process.execPath, [cliPath, "--stdin"], { input: ".a{b:1}\n", encoding: "utf8", env: { ...process.env, SASSO_ENGINE: "native" } });
-  if (probe.status === 0) engines.push("native");
+  if (probe.status === 0) {
+    engines.push("native");
+  } else {
+    assert.match(
+      probe.stderr,
+      /SASSO_ENGINE=native/,
+      `debug: native was skipped, and the reason must be a missing addon (stderr: ${probe.stderr})`,
+    );
+  }
   for (const engine of engines) {
     for (const entry of [join("sub", "a b ü.scss"), join(ddir, "sub", "a b ü.scss")]) {
       const r = spawnSync(process.execPath, [cliPath, "--no-source-map", entry], { cwd: ddir, encoding: "utf8", env: { ...process.env, SASSO_ENGINE: engine } });
