@@ -2187,8 +2187,10 @@ impl<'a> Evaluator<'a> {
     /// the display string it already has.
     fn frame_name(&self, url: &str) -> String {
         // An entry the host gave no url is dart's null source URL, which its
-        // frames and `@debug` both call `-` (#288). Only that entry: a file
-        // that is really named `stdin` keeps its name.
+        // frames and `@debug` both call `-` (#288). The match is by display
+        // name, which holds for a file: one `stdin.scss` keeps its name. A
+        // custom importer's key whose last segment is exactly the
+        // source-map path's `stdin` placeholder would also print as `-`.
         if self.anonymous_entry.as_deref() == Some(url) {
             return "-".to_string();
         }
