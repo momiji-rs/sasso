@@ -5165,6 +5165,137 @@ fn extend_component_compound(
     Some(options)
 }
 
+/// The span dart labels `extended selector`: the compound, in a style rule's
+/// SOURCE selector, that holds `target`, when the compound is the target
+/// alone, and otherwise the whole complex selector around it (dart extends a
+/// lone simple in place but unifies a larger compound, under the complex's
+/// span). The selector starts at the 1-based
+/// `line` and `col` of `source` and runs to its block's `{`. A compound with
+/// `&` or `#{…}` in it can only be told by its resolved text, which is gone
+/// by now, so it stands in only when no plain compound holds the target: the
+/// shape `&-x` or `.#{$n}` that produced the target from its parent or a
+/// value. `None` when nothing in the selector can be the target's compound,
+/// for one inherited unchanged from a parent rule.
+pub(crate) fn locate_compound(
+    source: &str,
+    line: usize,
+    col: usize,
+    target: &Simple,
+) -> Option<crate::diag::Span> {
+    let start = crate::diag::byte_offset_at(source, line, col)?;
+    let text = &source[start..];
+    let bytes = text.as_bytes();
+    let (mut depth, mut i, mut quote) = (0usize, 0usize, None::<u8>);
+    let mut compounds: Vec<(usize, usize)> = Vec::new();
+    // Where each complex of the list ends: its top-level comma.
+    let mut commas: Vec<usize> = Vec::new();
+    let mut open: Option<usize> = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' {
+                i += 1;
+            } else if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            if let Some(s) = open.take() {
+                compounds.push((s, i));
+            }
+            i = text[i + 2..].find("*/").map_or(bytes.len(), |e| i + 2 + e + 2);
+            continue;
+        }
+        match b {
+            b'"' | b'\'' => quote = Some(b),
+            // An escape is part of its compound, a hex one with the single
+            // whitespace that may end it (`\\31 23` is one class).
+            b'\\' => {
+                open.get_or_insert(i);
+                let hex = bytes[i + 1..]
+                    .iter()
+                    .take(6)
+                    .take_while(|c| c.is_ascii_hexdigit())
+                    .count();
+                i += 1 + hex.max(1);
+                if hex > 0 && bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+                    i += 1;
+                }
+                continue;
+            }
+            b'#' if bytes.get(i + 1) == Some(&b'{') => {
+                open.get_or_insert(i);
+                depth += 1;
+                i += 2;
+                continue;
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b'}' if depth > 0 => depth -= 1,
+            b'{' | b';' | b'}' if depth == 0 => break,
+            b',' | b'>' | b'+' | b'~' if depth == 0 => {
+                if let Some(s) = open.take() {
+                    compounds.push((s, i));
+                }
+                if b == b',' {
+                    commas.push(i);
+                }
+                i += 1;
+                continue;
+            }
+            _ if depth == 0 && b.is_ascii_whitespace() => {
+                if let Some(s) = open.take() {
+                    compounds.push((s, i));
+                }
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        open.get_or_insert(i);
+        i += 1;
+    }
+    if let Some(s) = open {
+        compounds.push((s, i.min(bytes.len())));
+    }
+    let dynamic = |c: &str| c.contains('&') || c.contains("#{");
+    let end = i.min(bytes.len());
+    let plain = compounds
+        .iter()
+        .copied()
+        .find(|&(s, e)| !dynamic(&text[s..e]) && selector_contains_simple(&text[s..e], target));
+    let hit = match plain {
+        Some((s, e)) if !compound_is_only(&text[s..e], target) => {
+            // The complex: between the commas around the compound, trimmed.
+            let from = commas.iter().rev().find(|&&c| c < s).map_or(0, |&c| c + 1);
+            let to = commas.iter().find(|&&c| c >= e).map_or(end, |&c| c);
+            let complex = &text[from..to];
+            let lead = complex.len() - complex.trim_start().len();
+            (from + lead, from + complex.trim_end().len())
+        }
+        Some(found) => found,
+        None => compounds.iter().copied().find(|&(s, e)| dynamic(&text[s..e]))?,
+    };
+    let at = start + hit.0;
+    let before = &source[..at];
+    let line = before.matches('\n').count() + 1;
+    let col = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+    Some(crate::diag::Span {
+        line,
+        col,
+        length: hit.1 - hit.0,
+    })
+}
+
+/// Whether the compound `text` is `target` and nothing else.
+fn compound_is_only(text: &str, target: &Simple) -> bool {
+    parse_complex(text).is_some_and(|c| {
+        matches!(c.components.as_slice(), [only] if only.compound.simples.len() == 1 && only.compound.simples[0] == *target)
+    })
+}
+
 /// Whether any compound in `s` contains `target` as one of its simple
 /// selectors (used to satisfy `@extend` target lookup against rules whose
 /// bogus combinators omitted them from the CSS).

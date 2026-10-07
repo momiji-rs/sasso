@@ -90,6 +90,17 @@ impl Scanner {
         self.chars[start..end].iter().map(|c| c.len_utf8()).sum()
     }
 
+    /// [`Self::byte_len_from`] without the whitespace the span ended on: a
+    /// span that a parse step left after its trailing blanks.
+    pub(crate) fn trimmed_byte_len_from(&self, m: Mark) -> usize {
+        let start = m.pos.min(self.chars.len());
+        let mut end = self.pos.min(self.chars.len());
+        while end > start && self.chars[end - 1].is_whitespace() {
+            end -= 1;
+        }
+        self.chars[start..end].iter().map(|c| c.len_utf8()).sum()
+    }
+
     pub(crate) fn reset(&mut self, m: Mark) {
         self.pos = m.pos;
         self.line = m.line;
