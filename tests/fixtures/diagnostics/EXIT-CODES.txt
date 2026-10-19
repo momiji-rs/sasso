@@ -56,3 +56,7 @@ extend-cross-media-interpolated-list     65
 extend-cross-media-parent-suffix-beside  65
 extend-cross-media-silent-comment        65
 extend-cross-media-two-interpolations    65
+extend-cross-media-extension-spacing     65
+extend-cross-media-indented              65
+extend-cross-media-parent-on-the-right   65
+extend-cross-media-two-parent-suffixes   65

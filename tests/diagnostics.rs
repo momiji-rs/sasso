@@ -71,6 +71,10 @@ const MATCHING: &[&str] = &[
     "extend-cross-media-two-interpolations",
     "extend-cross-media-interpolated-list",
     "extend-cross-media-parent-suffix-beside",
+    "extend-cross-media-indented",
+    "extend-cross-media-parent-on-the-right",
+    "extend-cross-media-two-parent-suffixes",
+    "extend-cross-media-extension-spacing",
     // Compile errors with a positioned span (undefined variable).
     "compile-undefined-variable",
     "compile-undefined-variable-stack",
@@ -137,13 +141,15 @@ fn fixtures_dir() -> std::path::PathBuf {
 }
 
 /// Run sasso from inside the fixtures dir with the bare basename + --no-unicode,
-/// returning captured stderr verbatim.
+/// returning captured stderr verbatim. A fixture written in the indented
+/// syntax is `<name>.sass`.
 fn run_sasso_stderr(name: &str) -> String {
     let bin = env!("CARGO_BIN_EXE_sasso");
+    let indented = fixtures_dir().join(format!("{name}.sass")).exists();
     let out = Command::new(bin)
         .current_dir(fixtures_dir())
         .arg("--no-unicode")
-        .arg(format!("{name}.scss"))
+        .arg(format!("{name}.{}", if indented { "sass" } else { "scss" }))
         .output()
         .expect("run sasso");
     String::from_utf8_lossy(&out.stderr).into_owned()

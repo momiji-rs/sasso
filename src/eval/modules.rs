@@ -348,6 +348,7 @@ impl<'a> Evaluator<'a> {
                 source,
                 line as usize,
                 lines.start_col as usize + 1,
+                if lines.start != 0 { lines.start } else { line } as usize,
                 target,
                 selectors,
             )?;
