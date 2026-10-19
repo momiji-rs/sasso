@@ -52,3 +52,7 @@ extend-cross-media-parent-rule           65
 extend-cross-media-parent-suffix         65
 extend-cross-media-query-list            65
 extend-cross-media-same-line             65
+extend-cross-media-interpolated-list     65
+extend-cross-media-parent-suffix-beside  65
+extend-cross-media-silent-comment        65
+extend-cross-media-two-interpolations    65

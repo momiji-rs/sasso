@@ -332,7 +332,7 @@ impl<'a> Evaluator<'a> {
             .map(TargetSite::site)
             .chain(self.empty_rules.iter().map(EmptyRule::site))
             .collect();
-        let locate = |lines: &SrcLines, target: &crate::selector::Simple| {
+        let locate = |lines: &SrcLines, selectors: &[String], target: &crate::selector::Simple| {
             let file = if lines.map_file != 0 {
                 lines.map_file
             } else {
@@ -349,6 +349,7 @@ impl<'a> Evaluator<'a> {
                 line as usize,
                 lines.start_col as usize + 1,
                 target,
+                selectors,
             )?;
             Some(super::SourceSpan { file, span })
         };

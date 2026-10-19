@@ -67,6 +67,10 @@ const MATCHING: &[&str] = &[
     "extend-cross-media-same-line",
     "extend-cross-media-hex-escape",
     "extend-cross-media-optional-first",
+    "extend-cross-media-silent-comment",
+    "extend-cross-media-two-interpolations",
+    "extend-cross-media-interpolated-list",
+    "extend-cross-media-parent-suffix-beside",
     // Compile errors with a positioned span (undefined variable).
     "compile-undefined-variable",
     "compile-undefined-variable-stack",

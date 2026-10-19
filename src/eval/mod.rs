@@ -7138,9 +7138,17 @@ pub(super) struct Candidate<'c> {
     /// The rule's position, to find the compound dart labels; `None` when
     /// unknown.
     lines: Option<&'c SrcLines>,
+    /// Its resolved selector list, which tells which source compound made
+    /// the target (see `selector::locate_compound`).
+    selectors: &'c [String],
     /// The last query of the rule's media context.
     media_span: Option<SourceSpan>,
 }
+
+/// Finds the `extended selector` span of a rule: its position, its resolved
+/// selector list, the target (see `selector::locate_compound`).
+pub(super) type LocateCompound<'a> =
+    &'a dyn Fn(&SrcLines, &[String], &crate::selector::Simple) -> Option<SourceSpan>;
 
 /// The first media-context error dart raises while registering these
 /// extensions and selectors, if any. Both errors come from the extension
@@ -7170,7 +7178,7 @@ fn first_media_error(
     closures: &HashMap<String, crate::fxhash::FxHashSet<String>>,
     aliases: &HashMap<String, String>,
     media_node_spans: &MediaNodeSpans,
-    locate: &dyn Fn(&SrcLines, &crate::selector::Simple) -> Option<SourceSpan>,
+    locate: LocateCompound<'_>,
 ) -> Option<(Pos, &'static str, MediaConflict)> {
     let in_media: crate::fxhash::FxHashSet<&crate::selector::Simple> = extends
         .iter()
@@ -7237,7 +7245,7 @@ fn first_media_error(
             if !beats(&first, time, 0) {
                 continue;
             }
-            let selector = c.lines.and_then(|l| locate(l, g.reach.target));
+            let selector = c.lines.and_then(|l| locate(l, c.selectors, g.reach.target));
             let rank = u8::from(selector.is_none());
             if beats(&first, time, rank) {
                 let conflict = MediaConflict::Across {
@@ -7265,6 +7273,7 @@ fn first_media_error(
             extend_base: site.extend_base,
             contains: &|t| site.contains(t),
             lines: site.lines,
+            selectors: site.selectors,
             media_span: site.media_span,
         };
         across(&|r| r.sees(site.module), &candidate);
@@ -7422,6 +7431,7 @@ impl MediaWalk<'_> {
                         extend_base: *extend_base,
                         contains: &|t| crate::selector::list_contains_simple(&parsed, t),
                         lines: Some(lines),
+                        selectors: &strings,
                         media_span,
                     };
                     visit(scope, &candidate);
