@@ -264,7 +264,8 @@ pub(crate) enum Stmt {
         selector: Vec<TplPiece>,
         optional: bool,
         pos: Pos,
-        /// Byte length of `@extend <selector> [!optional]`, before the `;`.
+        /// Byte length of `@extend <selector> [!optional]` and the blanks after
+        /// it on its line, before the `;` (dart's span).
         length: usize,
     },
     /// `@warn <expr>;` — writes to stderr, emits no CSS. `pos` is the 1-based

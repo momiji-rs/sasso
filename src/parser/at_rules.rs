@@ -810,8 +810,8 @@ impl Parser {
             }
             optional = true;
         }
-        let length = self.sc.trimmed_byte_len_from(start_mark);
         self.skip_ws_inline();
+        let length = self.sc.inline_byte_len_from(start_mark);
         self.sc.eat(';');
         Ok(Stmt::Extend {
             selector,
