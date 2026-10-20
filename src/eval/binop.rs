@@ -4,7 +4,7 @@ use super::*;
 /// numbers, produce a slash-separated value that serializes as `a/b` but
 /// behaves numerically as the quotient; otherwise perform real division.
 pub(crate) fn eval_div(l: Value, r: Value, slash: bool, pos: Pos) -> Result<Value, Error> {
-    if let Some(e) = callable_value_error(&l, &r, pos) {
+    if let Some(e) = callable_value_error(&l, "/", &r, pos) {
         return Err(e);
     }
     // The parser only sets `slash` when both operands are numeric literals
@@ -128,7 +128,7 @@ pub(super) fn binary_add(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
     if color_arith_undefined(&l, &r) {
         return Err(undefined_op(&l, "+", &r, pos));
     }
-    if let Some(e) = callable_value_error(&l, &r, pos) {
+    if let Some(e) = callable_value_error(&l, "+", &r, pos) {
         return Err(e);
     }
     // A calculation can only be `+`-concatenated with a string; against any
@@ -176,7 +176,7 @@ pub(super) fn binary_sub(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
     if color_arith_undefined(&l, &r) {
         return Err(undefined_op(&l, "-", &r, pos));
     }
-    if let Some(e) = callable_value_error(&l, &r, pos) {
+    if let Some(e) = callable_value_error(&l, "-", &r, pos) {
         return Err(e);
     }
     if matches!(&l, Value::Calc(_)) || matches!(&r, Value::Calc(_)) {
@@ -322,17 +322,30 @@ pub(super) fn serialize_pair_error(l: &Value, r: &Value, pos: Pos) -> Option<Err
 
 /// A first-class function or mixin reference is not a valid CSS value, so it
 /// cannot appear in arithmetic or a slash: dart-sass errors "<inspect> isn't a
-/// valid CSS value." for the first such operand (left before right).
-pub(super) fn callable_value_error(l: &Value, r: &Value, pos: Pos) -> Option<Error> {
+/// valid CSS value." for the first such operand (left before right). A
+/// first-class module is rejected too, but as "Undefined operation" (the
+/// `sym` that joins them), where `+`, `-` and `/` would otherwise join it as
+/// a string. One pass over both operands serves both checks: this runs on
+/// every `+`, `-` and `/`.
+pub(super) fn callable_value_error(l: &Value, sym: &str, r: &Value, pos: Pos) -> Option<Error> {
     for v in [l, r] {
         let inspect = match v {
-            Value::Function(f) => Some(f.inspect()),
-            Value::Mixin(m) => Some(m.inspect()),
-            _ => None,
+            Value::Function(f) => f.inspect(),
+            Value::Mixin(m) => m.inspect(),
+            Value::Module(_) => {
+                // A leading `/` parses as a division with an empty left
+                // operand, which dart reports as the unary slash it is.
+                if let Value::Str(s) = l {
+                    if sym == "/" && s.text.is_empty() && !s.quoted {
+                        let msg = format!("Undefined operation \"/{}\".", r.to_css(false));
+                        return Some(Error::at(msg, pos));
+                    }
+                }
+                return Some(undefined_op(l, sym, r, pos));
+            }
+            _ => continue,
         };
-        if let Some(s) = inspect {
-            return Some(Error::at(format!("{s} isn't a valid CSS value."), pos));
-        }
+        return Some(Error::at(format!("{inspect} isn't a valid CSS value."), pos));
     }
     None
 }

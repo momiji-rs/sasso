@@ -1421,6 +1421,7 @@ static META_MEMBERS: Members = Members {
         f("module-mixins", None, &["module"], 1),
         f("get-function", None, &["name", "css", "module"], 1),
         f("get-mixin", None, &["name", "module"], 1),
+        f("get-module", None, &["module"], 1),
         f_kw("call", None, &["function", "args..."], 1),
     ],
     mixins: &["load-css", "apply"],
@@ -1439,8 +1440,20 @@ static META_MEMBERS: Members = Members {
 /// a namespace that is not a built-in; the caller has resolved the namespace
 /// by then.
 pub(crate) fn module_function_names(module: &str) -> Vec<&'static str> {
-    members_of(module).map_or_else(Vec::new, |m| m.functions.iter().map(|f| f.name).collect())
+    members_of(module).map_or_else(Vec::new, |m| {
+        m.functions
+            .iter()
+            .map(|f| f.name)
+            .filter(|n| !(module == "meta" && UNANNOUNCED_META.contains(n)))
+            .collect()
+    })
 }
+
+/// `sass:meta` members of dart-sass 1.105 that this build implements but
+/// does not list yet. CI's parity runs against the pinned dart (1.104.1),
+/// whose `meta.module-functions("meta")` has none of them; they join the list
+/// in the pin flip that completes #281 (#284).
+const UNANNOUNCED_META: &[&str] = &["get-module"];
 
 /// A built-in module's MIXIN members, in dart's order.
 pub(crate) fn module_mixin_names(module: &str) -> &'static [&'static str] {

@@ -520,6 +520,14 @@ impl Eq for ResolvedQuery {}
 /// lookup allocates nothing.
 pub(super) type MediaNodeSpans = HashMap<[u32; 7], Vec<(String, SourceSpan)>>;
 
+/// "<value> isn't a valid CSS value." for a first-class function, mixin or
+/// module in a declaration (see `eval_decl`).
+#[cold]
+#[inline(never)]
+fn not_a_css_value(value: &Value, pos: Pos) -> Error {
+    Error::at(format!("{} isn't a valid CSS value.", value.to_css(false)), pos)
+}
+
 /// Every field of a `SrcLines`, as a hashable key.
 pub(super) fn src_lines_key(l: &SrcLines) -> [u32; 7] {
     [l.file, l.start, l.end, l.col, l.start_col, l.map_file, l.map_line]
@@ -1487,6 +1495,9 @@ struct Module {
     /// As `origins_canonical`, for `fn_origins` / `mixin_origins`.
     fn_origins_canonical: bool,
     mixin_origins_canonical: bool,
+    /// The name a first-class reference to this module inspects as: the
+    /// default namespace of its URL (see [`crate::value::SassModule::name`]).
+    default_name: Option<String>,
 }
 
 /// Whether every key of `map` is canonical (no `_`), cached in `cache` against
@@ -2532,7 +2543,8 @@ impl<'a> Evaluator<'a> {
             | Value::Slash(_, _)
             | Value::Calc(_)
             | Value::Function(_)
-            | Value::Mixin(_) => false,
+            | Value::Mixin(_)
+            | Value::Module(_) => false,
         }
     }
 
@@ -4002,19 +4014,11 @@ impl<'a> Evaluator<'a> {
                 d.pos,
             ));
         }
-        // A first-class function reference is likewise not a valid CSS value.
-        if let Value::Function(f) = &value {
-            return Err(Error::at(
-                format!("{} isn't a valid CSS value.", f.inspect()),
-                d.pos,
-            ));
-        }
-        // A first-class mixin reference is likewise not a valid CSS value.
-        if let Value::Mixin(m) = &value {
-            return Err(Error::at(
-                format!("{} isn't a valid CSS value.", m.inspect()),
-                d.pos,
-            ));
+        // A first-class function, mixin or module is likewise not a valid
+        // CSS value. One test on the hot path; the message is built out of
+        // line, where it costs `eval_decl` nothing.
+        if matches!(value, Value::Function(_) | Value::Mixin(_) | Value::Module(_)) {
+            return Err(not_a_css_value(&value, d.pos));
         }
         // An empty unbracketed list (`()`, or e.g. `list.join((), ())`) cannot
         // serialize as a CSS value; a bracketed `[]` is fine, as is any list
@@ -10273,6 +10277,10 @@ fn serialize_if_value(v: &Value) -> Result<String, Error> {
             f.inspect()
         ))),
         Value::Mixin(m) => Err(Error::unpositioned(format!(
+            "{} isn't a valid CSS value.",
+            m.inspect()
+        ))),
+        Value::Module(m) => Err(Error::unpositioned(format!(
             "{} isn't a valid CSS value.",
             m.inspect()
         ))),

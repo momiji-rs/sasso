@@ -1414,6 +1414,7 @@ impl<'a> Evaluator<'a> {
                 mixins_canon: std::cell::Cell::new((0, true)),
                 fn_origins_canonical,
                 mixin_origins_canonical,
+                default_name: super::default_namespace(key, Pos::NONE).ok(),
             },
             consumed,
         ))
@@ -1899,7 +1900,7 @@ impl<'a> Evaluator<'a> {
         match self.used_modules.get(ns) {
             Some(module) => crate::builtins::module_var(module, name, pos),
             None => Err(Error::at(
-                format!("There is no module with the namespace \"{ns}\"."),
+                format!("There is no module with namespace \"{ns}\"."),
                 pos,
             )),
         }

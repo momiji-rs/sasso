@@ -2692,6 +2692,80 @@ fn extend_across_media_contexts() {
     }
 }
 
+/// A first-class module (dart-sass 1.105, #281): `meta.get-module`, what it
+/// inspects as, what it equals, and every `sass:meta` function that takes it
+/// as `$module`. Measured against dart-sass 1.105.1 on 2026-10-20.
+#[test]
+fn a_module_value_names_its_module() {
+    let dir = std::env::temp_dir().join(format!("sasso_module_value_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("_other.scss"),
+        "$v: 1;\n@function f() { @return 1; }\n@mixin m { a: b; }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("_1.scss"), "").unwrap();
+    let imp = sasso::FsImporter::new(vec![dir.clone()]);
+    let run = |entry: &str| compile(entry, &Options::default().with_importer(&imp)).map_err(err_message);
+    let head = "@use \"sass:meta\";\n@use \"sass:math\" as m;\n@use \"other\" as o;\n@use \"other\";\n@use \"1\" as one;\n\
+                $mm: meta.get-module(m);\n";
+    assert_eq!(
+        run(&format!(
+            "{head}a {{\n\
+             b: meta.inspect($mm) meta.inspect(meta.get-module(o)) meta.inspect(meta.get-module(one));\n\
+             c: meta.type-of($mm) ($mm == meta.get-module($mm)) (meta.get-module(o) == meta.get-module(other)) ($mm == meta.get-module(o));\n\
+             d: meta.function-exists(\"f\", meta.get-module(o)) meta.mixin-exists(\"m\", meta.get-module(o)) \
+             meta.global-variable-exists(\"e\", meta.get-module(m));\n\
+             e: meta.inspect(meta.module-variables(meta.get-module(o)));\n\
+             f: meta.call(meta.get-function(\"f\", $module: meta.get-module(o)));\n\
+             g: meta.inspect(meta.get-mixin(\"m\", meta.get-module(o)));\n}}\n"
+        )),
+        Ok("a {\n  b: get-module(\"math\") get-module(\"other\") get-module();\n  c: module true true false;\n  \
+            d: true true true;\n  e: (\"v\": 1);\n  f: 1;\n  g: get-mixin(\"m\");\n}"
+            .to_string()),
+    );
+    for (expr, want) in [
+        (
+            "meta.get-module(null)",
+            "$module: null is neither a string nor a module reference.",
+        ),
+        (
+            "meta.get-module(\"color\")",
+            "There is no module with namespace \"color\".",
+        ),
+        (
+            "meta.function-exists(\"f\", 1)",
+            "$module: 1 is neither a string nor a module reference.",
+        ),
+        (
+            "meta.module-functions(nope)",
+            "There is no module with namespace \"nope\".",
+        ),
+        (
+            "meta.get-module(meta) + 1",
+            "Undefined operation \"get-module(\"meta\") + 1\".",
+        ),
+        // dart writes a negated module in parentheses, however it was spelled,
+        // and a leading slash as the unary operator it is.
+        (
+            "- meta.get-module(meta)",
+            "Undefined operation \"-(get-module(\"meta\"))\".",
+        ),
+        (
+            "/meta.get-module(meta)",
+            "Undefined operation \"/get-module(\"meta\")\".",
+        ),
+        (
+            "+meta.get-module(meta)",
+            "Undefined operation \"+get-module(\"meta\")\".",
+        ),
+    ] {
+        let got = run(&format!("@use \"sass:meta\";\na {{b: {expr}}}\n"));
+        assert_eq!(got, Err(format!("Error: {want}")), "{expr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A user-defined function or mixin value inspects as its declared name,
 /// hyphenated, not as the spelling it was reached through (#283). Measured
 /// against dart-sass 1.105.1 on 2026-10-07.
