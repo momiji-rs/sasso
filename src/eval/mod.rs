@@ -1126,6 +1126,11 @@ pub(crate) struct Evaluator<'a> {
     /// load cycle (dart-sass "This file is already being loaded."); a path that
     /// has finished loading may be imported again (`@import` re-evaluates).
     loading: Vec<String>,
+    /// How many evaluations whose CSS lands outside the main tree enclose this
+    /// point: a module first evaluated for a `meta.load-css` copy. A module
+    /// first loaded in one is not in the main tree yet, so a later plain
+    /// `@use` of it must still emit it (see `Module::emitted_main`).
+    outside_main: u32,
     /// Per-compile `@import` cache (dart-sass ImportCache analogue): keyed by
     /// (url, importing dir), holding (resolved key, syntax, parsed sheet).
     import_cache: HashMap<(String, Option<String>), CachedImport>,
@@ -1901,6 +1906,7 @@ impl<'a> Evaluator<'a> {
             css_buf: String::new(),
             options,
             loading: Vec::new(),
+            outside_main: 0,
             import_cache: HashMap::default(),
             current_url_stamp: 0,
             functions: vec![None],
