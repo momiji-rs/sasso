@@ -1087,19 +1087,28 @@ impl<'a> Evaluator<'a> {
                 // Its own first evaluation embedded the dependencies it loaded
                 // first; one already in the main tree by now is dropped, the
                 // rest are claimed for it, so each lands there once.
-                let nodes = if self.outside_main == 0 {
-                    existing.emitted_main.set(true);
-                    self.claim_embedded(existing.css.clone())
-                } else {
-                    existing.css.clone()
+                let nodes = match self.outside_main.last_mut() {
+                    None => {
+                        existing.emitted_main.set(true);
+                        Some(self.claim_embedded(existing.css.clone()))
+                    }
+                    // Outside it, a module the CSS being built already embeds
+                    // is not embedded again: each repeat edge would clone its
+                    // whole tree once more, exponentially down a chain.
+                    Some(frame) => frame.insert(key.clone()).then(|| {
+                        frame.extend(existing.embedded.iter().cloned());
+                        existing.css.clone()
+                    }),
                 };
-                splice_nodes(
-                    sink,
-                    vec![OutNode::ModuleScope {
-                        key: key.clone(),
-                        nodes: reparent_nodes(nodes, parents),
-                    }],
-                );
+                if let Some(nodes) = nodes {
+                    splice_nodes(
+                        sink,
+                        vec![OutNode::ModuleScope {
+                            key: key.clone(),
+                            nodes: reparent_nodes(nodes, parents),
+                        }],
+                    );
+                }
             }
             return Ok((existing, Vec::new()));
         }
@@ -1183,8 +1192,9 @@ impl<'a> Evaluator<'a> {
         let mut css_buf: Vec<OutNode> = Vec::new();
         // A `meta.load-css` copy is not the main tree: a module first loaded
         // while evaluating it is not emitted there yet.
-        if is_load_css {
-            self.outside_main += 1;
+        let outside = is_load_css || !self.outside_main.is_empty();
+        if outside {
+            self.outside_main.push(crate::fxhash::FxHashSet::default());
         }
         let evaluated = {
             let mut buf_sink = Sink::Top(&mut css_buf);
@@ -1200,11 +1210,14 @@ impl<'a> Evaluator<'a> {
                 is_css,
             )
         };
-        if is_load_css {
-            self.outside_main -= 1;
-        }
+        let embedded = if outside {
+            self.outside_main.pop().unwrap_or_default()
+        } else {
+            crate::fxhash::FxHashSet::default()
+        };
         let (mut module, consumed) = evaluated?;
         module.css = css_buf.clone();
+        module.embedded = embedded;
         let module = Rc::new(module);
         self.module_cache
             .borrow_mut()
@@ -1230,8 +1243,12 @@ impl<'a> Evaluator<'a> {
                 }],
             );
         } else {
-            if self.outside_main == 0 {
-                module.emitted_main.set(true);
+            match self.outside_main.last_mut() {
+                Some(frame) => {
+                    frame.insert(key.clone());
+                    frame.extend(module.embedded.iter().cloned());
+                }
+                None => module.emitted_main.set(true),
             }
             splice_nodes(
                 sink,
@@ -1459,6 +1476,7 @@ impl<'a> Evaluator<'a> {
                 mixin_origins,
                 config_origin: std::cell::Cell::new(self.pending_config_id),
                 emitted_main: std::cell::Cell::new(false),
+                embedded: crate::fxhash::FxHashSet::default(),
                 css: Vec::new(),
                 // (0, true) is right for an empty table and wrong for nothing:
                 // the first lookup that finds a different count recomputes it.
