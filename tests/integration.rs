@@ -2831,6 +2831,10 @@ fn a_module_value_names_its_module() {
             "meta.call(meta.get-function(\"foo\", $css: true), meta.get-module(meta))",
             "get-module(\"meta\") isn't a valid CSS value.",
         ),
+        (
+            "meta.call(meta.get-function(\"foo\", $css: true), $a: 1)",
+            "Plain CSS functions don't support keyword arguments.",
+        ),
     ] {
         let got = run(&format!("@use \"sass:meta\";\na {{b: {expr}}}\n"));
         assert_eq!(got, Err(format!("Error: {want}")), "{expr}");
