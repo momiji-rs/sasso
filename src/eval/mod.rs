@@ -5821,7 +5821,7 @@ fn is_supports_calc_function(name: &str) -> bool {
 /// any depth, in order: a map, or a first-class function, mixin or module.
 /// dart's serializer errors "<inspect> isn't a valid CSS value." on the
 /// first one it meets, so CSS output positions reject that one.
-fn find_not_css(v: &Value) -> Option<&Value> {
+pub(crate) fn find_not_css(v: &Value) -> Option<&Value> {
     match v {
         Value::Map(_) | Value::Function(_) | Value::Mixin(_) | Value::Module(_) => Some(v),
         Value::List(l) => l.items.iter().find_map(find_not_css),
@@ -7721,9 +7721,12 @@ fn default_namespace(url: &str, pos: Pos) -> Result<String, Error> {
 /// `file:///c:/x/_a.scss`), and otherwise a native path, whose separators on
 /// Windows are `\`. `None` when the result is no Sass identifier.
 fn module_default_name(key: &str) -> Option<String> {
-    let windows_path = key.as_bytes().get(1) == Some(&b':')
-        && key.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-        || key.starts_with("\\");
+    // A drive letter needs a separator after its colon: `x:theme.scss` is a
+    // URL with a one-letter scheme, `c:\\x` and `c:/x` are paths.
+    let b = key.as_bytes();
+    let windows_path =
+        (b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\'))
+            || key.starts_with("\\\\");
     let scheme = !windows_path
         && key.split_once(':').is_some_and(|(s, _)| {
             s.starts_with(|c: char| c.is_ascii_alphabetic())
@@ -7843,9 +7846,17 @@ fn member_set(
 
 /// Whether `s` is a valid Sass identifier usable as a module namespace.
 fn is_valid_namespace(s: &str) -> bool {
+    let name_start = |c: char| c == '_' || c.is_ascii_alphabetic() || !c.is_ascii();
     let mut chars = s.chars();
     match chars.next() {
-        Some(c) if c == '_' || c == '-' || c.is_ascii_alphabetic() || !c.is_ascii() => {}
+        Some(c) if name_start(c) => {}
+        // A leading `-` needs a name start or a second `-` after it, as in
+        // dart's identifier grammar: `-a` and `--a` are names, `-` and `-1`
+        // are not.
+        Some('-') => match chars.clone().next() {
+            Some(c) if c == '-' || name_start(c) => {}
+            _ => return false,
+        },
         _ => return false,
     }
     chars.all(|c| c == '_' || c == '-' || c.is_ascii_alphanumeric() || !c.is_ascii())
@@ -10381,6 +10392,14 @@ mod module_default_name_tests {
             ("pkg:%5Fspaced.scss", Some("spaced")),
             ("/src/_1.scss", None),
             ("pkg:", None),
+            // A one-letter scheme is not a drive.
+            ("x:theme.scss", Some("theme")),
+            ("c:/project/_other.scss", Some("other")),
+            // `-` and `-1` are no identifiers; `-a` and `--b` are.
+            ("/src/_-1.scss", None),
+            ("/src/_-.scss", None),
+            ("/src/_-a.scss", Some("-a")),
+            ("/src/_--b.scss", Some("--b")),
         ] {
             assert_eq!(module_default_name(key).as_deref(), want, "{key}");
         }
