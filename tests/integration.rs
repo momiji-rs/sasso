@@ -2813,10 +2813,39 @@ fn a_module_value_names_its_module() {
             "meta.get-function(\"abs\") (a: b)",
             "get-function(\"abs\") isn't a valid CSS value.",
         ),
+        // So in a plain CSS function's arguments, however the call is made.
+        (
+            "foo(meta.get-module(meta))",
+            "get-module(\"meta\") isn't a valid CSS value.",
+        ),
+        (
+            "foo(1, [meta.get-module(meta)])",
+            "get-module(\"meta\") isn't a valid CSS value.",
+        ),
+        (
+            "f#{1}(meta.get-module(meta))",
+            "get-module(\"meta\") isn't a valid CSS value.",
+        ),
+        ("f#{1}((a: b))", "(a: b) isn't a valid CSS value."),
+        (
+            "meta.call(meta.get-function(\"foo\", $css: true), meta.get-module(meta))",
+            "get-module(\"meta\") isn't a valid CSS value.",
+        ),
     ] {
         let got = run(&format!("@use \"sass:meta\";\na {{b: {expr}}}\n"));
         assert_eq!(got, Err(format!("Error: {want}")), "{expr}");
     }
+    // `-1` is no Sass identifier: no name to inspect as, and no default
+    // namespace for a bare `@use`.
+    std::fs::write(dir.join("_-1.scss"), "").unwrap();
+    assert_eq!(
+        run("@use \"sass:meta\";\n@use \"-1\" as x;\na {b: meta.inspect(meta.get-module(x))}\n"),
+        Ok("a {\n  b: get-module();\n}".to_string()),
+    );
+    assert_eq!(
+        run("@use \"-1\";\n"),
+        Err("Error: The default namespace \"-1\" is not a valid Sass identifier.".to_string()),
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

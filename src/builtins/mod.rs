@@ -839,7 +839,8 @@ pub(super) fn clamp01(v: f64) -> f64 {
 
 /// Preserve an unknown function call verbatim as an unquoted CSS string.
 /// Plain CSS has no keyword arguments, and a value with no CSS
-/// representation (an empty unbracketed list, a map) is rejected — while
+/// representation (an empty unbracketed list; a map or a first-class
+/// function, mixin or module, nested in a list too) is rejected — while
 /// `null` serializes to nothing and a bracketed empty list stays `[]`
 /// (dart-sass).
 fn plain_css_function(
@@ -860,13 +861,15 @@ fn plain_css_function(
             Value::List(l) if l.items.is_empty() && !l.bracketed => {
                 return Err(Error::at("() isn't a valid CSS value.", pos));
             }
-            Value::Map(_) => {
-                return Err(Error::at(
-                    format!("{} isn't a valid CSS value.", v.to_inspect_message()),
-                    pos,
-                ));
+            _ => {
+                if let Some(bad) = crate::eval::find_not_css(v) {
+                    return Err(Error::at(
+                        format!("{} isn't a valid CSS value.", bad.to_inspect_message()),
+                        pos,
+                    ));
+                }
+                parts.push(v.to_css(false));
             }
-            _ => parts.push(v.to_css(false)),
         }
     }
     Ok(Value::Str(SassStr {

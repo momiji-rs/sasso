@@ -469,6 +469,11 @@ impl<'a> Evaluator<'a> {
                     // STRING, and dart builds one with the default style
                     // whatever the output style is.
                     let v = self.eval_expr(&a.value)?;
+                    // As on the direct plain-CSS call path, a value with no
+                    // CSS form is rejected rather than written into the call.
+                    if let Some(msg) = css_value_error_msg(&v) {
+                        return Err(Error::at(msg, *pos));
+                    }
                     parts.push(v.to_css(false));
                 }
                 Ok(Value::Str(SassStr {

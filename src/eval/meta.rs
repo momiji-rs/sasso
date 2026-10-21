@@ -767,6 +767,15 @@ impl<'a> Evaluator<'a> {
         }
         // A plain-CSS reference is preserved verbatim as a CSS function call.
         if f.css {
+            // A map or a first-class value has no CSS form and is rejected
+            // rather than written into the call. An empty list is not: dart
+            // writes `foo()` for `meta.call(<css fn>, ())`.
+            for v in pos_args.iter().chain(named.iter().map(|(_, v)| v)) {
+                if let Some(bad) = find_not_css(v) {
+                    let msg = format!("{} isn't a valid CSS value.", bad.to_inspect_message());
+                    return Err(Error::at(msg, pos));
+                }
+            }
             let mut parts: Vec<String> = pos_args.iter().map(|v| v.to_css(false)).collect();
             for (n, v) in &named {
                 parts.push(format!("${n}: {}", v.to_css(false)));
