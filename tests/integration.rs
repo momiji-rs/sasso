@@ -2698,7 +2698,7 @@ fn extend_across_media_contexts() {
 /// emitted again. Measured against dart-sass 1.105.1 on 2026-10-21.
 #[test]
 fn a_module_first_loaded_in_a_load_css_copy_is_emitted_by_a_later_use() {
-    let dir = std::env::temp_dir().join(format!("sasso_emit_after_copy_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("sasso_emit_after_copy#1_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
     for (name, text) in [
         ("dep", ".dep {c: d}\n"),

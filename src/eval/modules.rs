@@ -814,7 +814,9 @@ impl<'a> Evaluator<'a> {
             }
             dropped = false;
             match node {
-                OutNode::ModuleScope { key, nodes } if !key.contains('#') => {
+                // A copy's key names no cached module, so it stays as is; a
+                // canonical URL may itself contain `#`.
+                OutNode::ModuleScope { key, nodes } => {
                     let dep = self.module_cache.borrow().get(&key).cloned();
                     match dep {
                         Some(dep) if dep.emitted_main.get() => dropped = true,
