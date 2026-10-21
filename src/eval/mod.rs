@@ -525,7 +525,10 @@ pub(super) type MediaNodeSpans = HashMap<[u32; 7], Vec<(String, SourceSpan)>>;
 #[cold]
 #[inline(never)]
 fn not_a_css_value(value: &Value, pos: Pos) -> Error {
-    Error::at(format!("{} isn't a valid CSS value.", value.to_css(false)), pos)
+    Error::at(
+        format!("{} isn't a valid CSS value.", value.to_inspect_message()),
+        pos,
+    )
 }
 
 /// Every field of a `SrcLines`, as a hashable key.
@@ -4004,21 +4007,11 @@ impl<'a> Evaluator<'a> {
         if matches!(value, Value::Null) {
             return Ok(None);
         }
-        // A map is not a valid CSS value (even when nested inside a list).
-        if let Some(m) = find_map(&value) {
-            return Err(Error::at(
-                format!(
-                    "{} isn't a valid CSS value.",
-                    Value::Map(m.clone()).to_inspect_message()
-                ),
-                d.pos,
-            ));
-        }
-        // A first-class function, mixin or module is likewise not a valid
-        // CSS value. One test on the hot path; the message is built out of
+        // A map, or a first-class function, mixin or module, is not a valid
+        // CSS value, nested inside a list too. The message is built out of
         // line, where it costs `eval_decl` nothing.
-        if matches!(value, Value::Function(_) | Value::Mixin(_) | Value::Module(_)) {
-            return Err(not_a_css_value(&value, d.pos));
+        if let Some(bad) = find_not_css(&value) {
+            return Err(not_a_css_value(bad, d.pos));
         }
         // An empty unbracketed list (`()`, or e.g. `list.join((), ())`) cannot
         // serialize as a CSS value; a bracketed `[]` is fine, as is any list
@@ -4116,14 +4109,8 @@ impl<'a> Evaluator<'a> {
         if let Some(value_expr) = &ps.value {
             let value = self.eval_expr(value_expr)?;
             if !matches!(value, Value::Null) {
-                if let Some(m) = find_map(&value) {
-                    return Err(Error::at(
-                        format!(
-                            "{} isn't a valid CSS value.",
-                            Value::Map(m.clone()).to_inspect_message()
-                        ),
-                        ps.pos,
-                    ));
+                if let Some(bad) = find_not_css(&value) {
+                    return Err(not_a_css_value(bad, ps.pos));
                 }
                 let vstr = self.declared_css(&value);
                 sink.push_item(OutItem::Decl {
@@ -5830,32 +5817,31 @@ fn is_supports_calc_function(name: &str) -> bool {
     )
 }
 
-/// Find a map anywhere in a value (including nested in a list), returning a
-/// reference to the first one. Used to reject maps in CSS output positions,
-/// where dart-sass errors with "(…) isn't a valid CSS value.".
-fn find_map(v: &Value) -> Option<&Map> {
+/// The first value with no CSS form in `v`, itself or an item of a list at
+/// any depth, in order: a map, or a first-class function, mixin or module.
+/// dart's serializer errors "<inspect> isn't a valid CSS value." on the
+/// first one it meets, so CSS output positions reject that one.
+fn find_not_css(v: &Value) -> Option<&Value> {
     match v {
-        Value::Map(m) => Some(m),
-        Value::List(l) => l.items.iter().find_map(find_map),
+        Value::Map(_) | Value::Function(_) | Value::Mixin(_) | Value::Module(_) => Some(v),
+        Value::List(l) => l.items.iter().find_map(find_not_css),
         _ => None,
     }
 }
 
 /// The dart-sass "isn't a valid CSS value." error message for a value that
 /// cannot be serialized to CSS, or `None` if it can. Mirrors the
-/// declaration-emit guard exactly: a MAP found anywhere (including nested in a
-/// list) is rejected with its own serialization, and a TOP-LEVEL empty
+/// declaration-emit guard exactly: a map or a first-class function, mixin or
+/// module found anywhere (including nested in a list) is rejected with its
+/// own serialization (see [`find_not_css`]), and a TOP-LEVEL empty
 /// unbracketed list (`()`) is rejected as `()`. A bracketed `[]`, and an empty
 /// list merely nested inside a non-empty list, both serialize fine. Reused at
 /// every other CSS-serialization site (unary `-`/`+`, the `+`/`-`/`/` string
 /// joins, and `#{…}` interpolation) so they reject the same shapes dart does
 /// instead of silently emitting bogus output.
 pub(super) fn css_value_error_msg(v: &Value) -> Option<String> {
-    if let Some(m) = find_map(v) {
-        return Some(format!(
-            "{} isn't a valid CSS value.",
-            Value::Map(m.clone()).to_inspect_message()
-        ));
+    if let Some(bad) = find_not_css(v) {
+        return Some(format!("{} isn't a valid CSS value.", bad.to_inspect_message()));
     }
     if let Value::List(l) = v {
         if l.items.is_empty() && !l.bracketed {
@@ -5865,8 +5851,8 @@ pub(super) fn css_value_error_msg(v: &Value) -> Option<String> {
     None
 }
 
-/// Serialize a value for interpolation, erroring (like dart-sass) if it is a
-/// map or empty list that cannot become CSS. Shared by every interpolation
+/// Serialize a value for interpolation, erroring (like dart-sass) if it is
+/// one that cannot become CSS (see [`css_value_error_msg`]). Shared by every interpolation
 /// context that turns a value into text (`@media`/`@supports` queries and
 /// feature decls). The error carries no span — these template sites have no
 /// per-piece source position — but matches dart's message and non-zero exit.
@@ -10329,22 +10315,10 @@ fn serialize_if_value(v: &Value) -> Result<String, Error> {
         Value::List(l) if l.items.is_empty() && !l.bracketed => {
             Err(Error::unpositioned("() isn't a valid CSS value."))
         }
-        Value::Function(f) => Err(Error::unpositioned(format!(
-            "{} isn't a valid CSS value.",
-            f.inspect()
-        ))),
-        Value::Mixin(m) => Err(Error::unpositioned(format!(
-            "{} isn't a valid CSS value.",
-            m.inspect()
-        ))),
-        Value::Module(m) => Err(Error::unpositioned(format!(
-            "{} isn't a valid CSS value.",
-            m.inspect()
-        ))),
-        other => match find_map(other) {
-            Some(m) => Err(Error::unpositioned(format!(
+        other => match find_not_css(other) {
+            Some(bad) => Err(Error::unpositioned(format!(
                 "{} isn't a valid CSS value.",
-                Value::Map(m.clone()).to_inspect_message()
+                bad.to_inspect_message()
             ))),
             None => Ok(other.to_css(false)),
         },

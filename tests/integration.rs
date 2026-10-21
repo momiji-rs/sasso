@@ -2778,6 +2778,41 @@ fn a_module_value_names_its_module() {
             "meta.get-function(\"abs\") + meta.get-module(meta)",
             "Undefined operation \"get-function(\"abs\") + get-module(\"meta\")\".",
         ),
+        // Nested in a list it is still no CSS value, in a declaration, an
+        // interpolation, a string join or `if()`; and the first such value
+        // in order is the one named, a function before a map.
+        (
+            "[meta.get-module(meta)]",
+            "get-module(\"meta\") isn't a valid CSS value.",
+        ),
+        (
+            "1 meta.get-module(meta)",
+            "get-module(\"meta\") isn't a valid CSS value.",
+        ),
+        (
+            "[meta.get-function(\"abs\")]",
+            "get-function(\"abs\") isn't a valid CSS value.",
+        ),
+        (
+            "\"#{meta.get-module(meta)}\"",
+            "get-module(\"meta\") isn't a valid CSS value.",
+        ),
+        (
+            "x#{[meta.get-module(meta)]}",
+            "get-module(\"meta\") isn't a valid CSS value.",
+        ),
+        (
+            "\"a\" + [meta.get-module(meta)]",
+            "get-module(\"meta\") isn't a valid CSS value.",
+        ),
+        (
+            "if(css(): meta.get-module(meta); else: 1)",
+            "get-module(\"meta\") isn't a valid CSS value.",
+        ),
+        (
+            "meta.get-function(\"abs\") (a: b)",
+            "get-function(\"abs\") isn't a valid CSS value.",
+        ),
     ] {
         let got = run(&format!("@use \"sass:meta\";\na {{b: {expr}}}\n"));
         assert_eq!(got, Err(format!("Error: {want}")), "{expr}");
