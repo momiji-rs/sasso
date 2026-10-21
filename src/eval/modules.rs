@@ -1414,7 +1414,7 @@ impl<'a> Evaluator<'a> {
                 mixins_canon: std::cell::Cell::new((0, true)),
                 fn_origins_canonical,
                 mixin_origins_canonical,
-                default_name: super::default_namespace(key, Pos::NONE).ok(),
+                default_name: super::module_default_name(key),
             },
             consumed,
         ))

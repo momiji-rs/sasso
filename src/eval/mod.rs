@@ -7728,6 +7728,63 @@ fn default_namespace(url: &str, pos: Pos) -> Result<String, Error> {
     Ok(stem.to_string())
 }
 
+/// The default namespace of a loaded module, from its canonical key, as
+/// dart's `defaultNamespace(module.url)` names a first-class reference to it
+/// (`get-module("other")`). dart reads the URL's last decoded path segment.
+/// A key here is a URL when the importer made one (`pkg:theme.scss`,
+/// `file:///c:/x/_a.scss`), and otherwise a native path, whose separators on
+/// Windows are `\`. `None` when the result is no Sass identifier.
+fn module_default_name(key: &str) -> Option<String> {
+    let windows_path = key.as_bytes().get(1) == Some(&b':')
+        && key.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        || key.starts_with("\\");
+    let scheme = !windows_path
+        && key.split_once(':').is_some_and(|(s, _)| {
+            s.starts_with(|c: char| c.is_ascii_alphabetic())
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        });
+    let segment = if scheme {
+        let path = key.split_once(':').map_or(key, |(_, rest)| rest);
+        let path = path.split(['?', '#']).next().unwrap_or(path);
+        percent_decode(path.rsplit('/').next().unwrap_or(path))
+    } else if windows_path {
+        key.rsplit(['/', '\\']).next().unwrap_or(key).to_string()
+    } else {
+        // A `\` is an ordinary file-name character outside Windows.
+        key.rsplit('/').next().unwrap_or(key).to_string()
+    };
+    let name = segment.strip_prefix('_').unwrap_or(&segment);
+    let name = name.split('.').next().unwrap_or(name);
+    is_valid_namespace(name).then(|| name.to_string())
+}
+
+/// `%XX` escapes decoded, as a URL path segment is read; anything that does
+/// not decode to UTF-8 is kept as written.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        match (
+            bytes[i],
+            bytes.get(i + 1).and_then(|&b| hex(b)),
+            bytes.get(i + 2).and_then(|&b| hex(b)),
+        ) {
+            (b'%', Some(h), Some(l)) => {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+            }
+            (b, ..) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
 /// Build a predicate deciding whether an upstream `$variable` (by bare name) is
 /// re-exported through a `@forward`'s `show`/`hide` clause.
 fn forward_var_visibility(
@@ -10331,6 +10388,29 @@ enum DepProbePath {
     /// Its `[color-module-compat]` half, gated on which overload the argument
     /// took.
     ColorModuleCompat = 2,
+}
+
+#[cfg(test)]
+mod module_default_name_tests {
+    use super::module_default_name;
+
+    #[test]
+    fn names_a_module_by_its_last_path_segment() {
+        for (key, want) in [
+            ("/src/_other.scss", Some("other")),
+            ("/src/dir/deep.sass", Some("deep")),
+            ("c:\\project\\_other.scss", Some("other")),
+            ("\\\\server\\share\\_theme.scss", Some("theme")),
+            ("pkg:theme.scss", Some("theme")),
+            ("file:///c:/x/_a.scss", Some("a")),
+            ("https://example.com/p/_b.css?v=1#x", Some("b")),
+            ("pkg:%5Fspaced.scss", Some("spaced")),
+            ("/src/_1.scss", None),
+            ("pkg:", None),
+        ] {
+            assert_eq!(module_default_name(key).as_deref(), want, "{key}");
+        }
+    }
 }
 
 #[cfg(test)]
