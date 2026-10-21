@@ -322,27 +322,40 @@ pub(super) fn serialize_pair_error(l: &Value, r: &Value, pos: Pos) -> Option<Err
 
 /// A first-class function or mixin reference is not a valid CSS value, so it
 /// cannot appear in arithmetic or a slash: dart-sass errors "<inspect> isn't a
-/// valid CSS value." for the first such operand (left before right). A
-/// first-class module is rejected too, but as "Undefined operation" (the
-/// `sym` that joins them), where `+`, `-` and `/` would otherwise join it as
-/// a string. One pass over both operands serves both checks: this runs on
-/// every `+`, `-` and `/`.
+/// valid CSS value." for the first such operand (left before right).
+///
+/// A first-class module is checked first, because dart's `SassModule`
+/// overrides the operators: one on either side is "Undefined operation" (the
+/// `sym` that joins them), a function on the other side included. The one
+/// exception is a string on the left of `+`, which joins its right operand as
+/// a string and so serializes the module: "isn't a valid CSS value." One pass
+/// over the operands serves every check, since this runs on each `+`, `-` and
+/// `/`.
 pub(super) fn callable_value_error(l: &Value, sym: &str, r: &Value, pos: Pos) -> Option<Error> {
+    match (l, r) {
+        (Value::Module(_), _) => return Some(undefined_op(l, sym, r, pos)),
+        (Value::Str(s), Value::Module(m)) => {
+            if sym == "+" {
+                return Some(Error::at(
+                    format!("{} isn't a valid CSS value.", m.inspect()),
+                    pos,
+                ));
+            }
+            // A leading `/` parses as a division with an empty left operand,
+            // which dart reports as the unary slash it is.
+            if sym == "/" && s.text.is_empty() && !s.quoted {
+                let msg = format!("Undefined operation \"/{}\".", r.to_css(false));
+                return Some(Error::at(msg, pos));
+            }
+            return Some(undefined_op(l, sym, r, pos));
+        }
+        (_, Value::Module(_)) => return Some(undefined_op(l, sym, r, pos)),
+        _ => {}
+    }
     for v in [l, r] {
         let inspect = match v {
             Value::Function(f) => f.inspect(),
             Value::Mixin(m) => m.inspect(),
-            Value::Module(_) => {
-                // A leading `/` parses as a division with an empty left
-                // operand, which dart reports as the unary slash it is.
-                if let Value::Str(s) = l {
-                    if sym == "/" && s.text.is_empty() && !s.quoted {
-                        let msg = format!("Undefined operation \"/{}\".", r.to_css(false));
-                        return Some(Error::at(msg, pos));
-                    }
-                }
-                return Some(undefined_op(l, sym, r, pos));
-            }
             _ => continue,
         };
         return Some(Error::at(format!("{inspect} isn't a valid CSS value."), pos));

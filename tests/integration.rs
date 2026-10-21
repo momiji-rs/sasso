@@ -2759,6 +2759,25 @@ fn a_module_value_names_its_module() {
             "+meta.get-module(meta)",
             "Undefined operation \"+get-module(\"meta\")\".",
         ),
+        // A string on the left of `+` joins the module as a string, so it is
+        // the module's serialization that fails; anything else on either
+        // side, a function reference included, is "Undefined operation".
+        (
+            "\"a\" + meta.get-module(meta)",
+            "get-module(\"meta\") isn't a valid CSS value.",
+        ),
+        (
+            "a + meta.get-module(meta)",
+            "get-module(\"meta\") isn't a valid CSS value.",
+        ),
+        (
+            "meta.get-module(meta) + \"a\"",
+            "Undefined operation \"get-module(\"meta\") + \"a\"\".",
+        ),
+        (
+            "meta.get-function(\"abs\") + meta.get-module(meta)",
+            "Undefined operation \"get-function(\"abs\") + get-module(\"meta\")\".",
+        ),
     ] {
         let got = run(&format!("@use \"sass:meta\";\na {{b: {expr}}}\n"));
         assert_eq!(got, Err(format!("Error: {want}")), "{expr}");
