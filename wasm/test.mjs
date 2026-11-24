@@ -7089,6 +7089,28 @@ for (const how of ["fails-to-start", "dies"]) {
     await assert.rejects(api.compileStringAsync(mixin(100000)), overflows, "recursion: runaway @mixin (async)");
     const after = await Promise.all([1, 2, 3].map(() => api.compileStringAsync(fn(300))));
     assert.ok(after.every((r) => r.css.includes("b: 300")), "recursion: async engines recover");
+    // A compile re-entered from a custom function overflows while the outer
+    // compile is still running on the same instance. The outer compile's
+    // replies must still reach its own memory, so it finishes normally.
+    const caught = api.compileString("a { b: inner(); }", {
+      functions: {
+        "inner()": () => {
+          try {
+            api.compileString(mixin(100000));
+            return new size.SassString("compiled");
+          } catch (e) {
+            return new size.SassString(e.sassMessage);
+          }
+        },
+      },
+    });
+    assert.ok(caught.css.includes('b: "Stack Overflow"'), `recursion: a nested overflow leaves the outer compile intact: ${caught.css}`);
+    assert.throws(
+      () => api.compileString("a { b: inner(); }", { functions: { "inner()": () => api.compileString(mixin(100000)) } }),
+      (e) => e instanceof size.Exception && /Stack Overflow/.test(e.message),
+      "recursion: an uncaught nested overflow fails the outer compile as a Sass error",
+    );
+    assert.ok(api.compileString(fn(300)).css.includes("b: 300"), "recursion: and the next compile is whole");
   }
   console.log("ok: runaway recursion — Stack Overflow, sync and async, and the engine recovers");
 }

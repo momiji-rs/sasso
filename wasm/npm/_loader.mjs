@@ -496,63 +496,73 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     return frame;
   }
 
-  const syncHost = {
-    host_canonicalize(uPtr, uLen, fromImport, cPtr, cLen, outPtr, outLen) {
-      const url = readStr(syncEx, uPtr, uLen);
-      const containing = cLen ? readStr(syncEx, cPtr, cLen) : null;
-      try {
-        const canon = syncChain ? syncChain.canonicalize(url, fromImport !== 0, containing) : null;
-        if (canon == null) return 0;
-        deliver(syncEx, frameCanon(syncChain, canon), outPtr, outLen);
-        return 1;
-      } catch (e) {
-        deliver(syncEx, encoder.encode(errMessage(e)), outPtr, outLen);
-        return -1;
-      }
-    },
-    host_load(kPtr, kLen, outPtr, outLen) {
-      const canon = readStr(syncEx, kPtr, kLen);
-      try {
-        const res = syncChain ? syncChain.load(canon) : null;
-        if (res == null) return 0;
-        deliver(syncEx, frameLoad(res), outPtr, outLen);
-        return 1;
-      } catch (e) {
-        deliver(syncEx, encoder.encode(errMessage(e)), outPtr, outLen);
-        return -1;
-      }
-    },
-    host_call_function(index, argsPtr, argsLen, outPtr, outLen) {
-      try {
-        const argBytes = argsLen ? new Uint8Array(syncEx.memory.buffer, argsPtr, argsLen).slice() : new Uint8Array(0);
-        const fn = syncFunctions[index];
-        if (!fn) throw new Error(`sasso: custom function #${index} is not registered`);
-        const r = fn(deserializeArgs(argBytes));
-        if (r && typeof r.then === "function") {
-          throw new Error("sasso: asynchronous custom functions require compileStringAsync / compileAsync");
+  // Host functions for ONE sync instance. They reach memory through
+  // `self.ex`, the instance they were created for, never the global `syncEx`:
+  // a compile re-entered from a custom function or importer can fault and
+  // retire the global instance while the outer compile is still running on
+  // this one, and the outer compile's replies must still land in its own
+  // memory (#308).
+  function makeSyncHost(self) {
+    return {
+      host_canonicalize(uPtr, uLen, fromImport, cPtr, cLen, outPtr, outLen) {
+        const url = readStr(self.ex, uPtr, uLen);
+        const containing = cLen ? readStr(self.ex, cPtr, cLen) : null;
+        try {
+          const canon = syncChain ? syncChain.canonicalize(url, fromImport !== 0, containing) : null;
+          if (canon == null) return 0;
+          deliver(self.ex, frameCanon(syncChain, canon), outPtr, outLen);
+          return 1;
+        } catch (e) {
+          deliver(self.ex, encoder.encode(errMessage(e)), outPtr, outLen);
+          return -1;
         }
-        if (r == null) throw new Error("sasso: a custom function returned no value");
-        deliver(syncEx, serializeValue(r), outPtr, outLen);
-        return 1;
-      } catch (e) {
-        deliver(syncEx, encoder.encode(errMessage(e)), outPtr, outLen);
-        return -1;
-      }
-    },
-    host_warn(bufPtr, bufLen) {
-      try {
-        dispatchWarn(syncLogger, decodeWarn(syncEx, bufPtr, bufLen));
-      } catch {
-        // A logging failure must never fail the compile.
-      }
-    },
-  };
+      },
+      host_load(kPtr, kLen, outPtr, outLen) {
+        const canon = readStr(self.ex, kPtr, kLen);
+        try {
+          const res = syncChain ? syncChain.load(canon) : null;
+          if (res == null) return 0;
+          deliver(self.ex, frameLoad(res), outPtr, outLen);
+          return 1;
+        } catch (e) {
+          deliver(self.ex, encoder.encode(errMessage(e)), outPtr, outLen);
+          return -1;
+        }
+      },
+      host_call_function(index, argsPtr, argsLen, outPtr, outLen) {
+        try {
+          const argBytes = argsLen ? new Uint8Array(self.ex.memory.buffer, argsPtr, argsLen).slice() : new Uint8Array(0);
+          const fn = syncFunctions[index];
+          if (!fn) throw new Error(`sasso: custom function #${index} is not registered`);
+          const r = fn(deserializeArgs(argBytes));
+          if (r && typeof r.then === "function") {
+            throw new Error("sasso: asynchronous custom functions require compileStringAsync / compileAsync");
+          }
+          if (r == null) throw new Error("sasso: a custom function returned no value");
+          deliver(self.ex, serializeValue(r), outPtr, outLen);
+          return 1;
+        } catch (e) {
+          deliver(self.ex, encoder.encode(errMessage(e)), outPtr, outLen);
+          return -1;
+        }
+      },
+      host_warn(bufPtr, bufLen) {
+        try {
+          dispatchWarn(syncLogger, decodeWarn(self.ex, bufPtr, bufLen));
+        } catch {
+          // A logging failure must never fail the compile.
+        }
+      },
+    };
+  }
 
   let syncModule = null; // compiled once; an instance is rebuilt after a fault
   function syncInstance() {
     if (syncEx) return syncEx;
     if (!syncModule) syncModule = new WebAssembly.Module(readFileSync(syncWasmUrl));
-    syncEx = new WebAssembly.Instance(syncModule, { sasso_host: syncHost }).exports;
+    const self = { ex: null };
+    self.ex = new WebAssembly.Instance(syncModule, { sasso_host: makeSyncHost(self) }).exports;
+    syncEx = self.ex;
     if (pendingArenaBytes !== null) syncEx.sasso_set_arena_bytes(pendingArenaBytes);
     return syncEx;
   }
@@ -937,7 +947,8 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       throw new TypeError("compileString(source): source must be a string");
     }
     const chain = buildChain(options, false);
-    const callbacks = registerFunctions(syncInstance(), options);
+    const instance = syncInstance();
+    const callbacks = registerFunctions(instance, options);
     const prevChain = syncChain;
     const prevFns = syncFunctions;
     const prevLog = syncLogger;
@@ -951,8 +962,9 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       syncChain = prevChain;
       syncFunctions = prevFns;
       syncLogger = prevLog;
-      // Gone when the compile faulted; the next compile builds a fresh one.
-      if (syncEx) syncEx.sasso_clear_functions();
+      // Retired when the compile faulted (see `wasmFault`); the next compile
+      // builds a fresh one.
+      if (syncEx === instance) instance.sasso_clear_functions();
     }
     return makeResult(raw, options.url ? toFileUrl(options.url).href : null, chain.loaded);
   }
@@ -966,7 +978,8 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     const entryHref = toFileUrl(entryPath).href;
     const syntax = options.syntax != null ? syntaxCode(options.syntax) : syntaxForPath(entryPath);
     const chain = buildChain(options, false);
-    const callbacks = registerFunctions(syncInstance(), options);
+    const instance = syncInstance();
+    const callbacks = registerFunctions(instance, options);
     const prevChain = syncChain;
     const prevFns = syncFunctions;
     const prevLog = syncLogger;
@@ -980,8 +993,9 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       syncChain = prevChain;
       syncFunctions = prevFns;
       syncLogger = prevLog;
-      // Gone when the compile faulted; the next compile builds a fresh one.
-      if (syncEx) syncEx.sasso_clear_functions();
+      // Retired when the compile faulted (see `wasmFault`); the next compile
+      // builds a fresh one.
+      if (syncEx === instance) instance.sasso_clear_functions();
     }
     return makeResult(raw, entryHref, chain.loaded);
   }
