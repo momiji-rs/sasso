@@ -376,18 +376,16 @@ fn fn_is_bracketed(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> R
 fn fn_zip(pos_args: &[Value]) -> Result<Value, Error> {
     let lists: Vec<Cow<'_, [Value]>> = pos_args.iter().map(|v| as_items(v).0).collect();
     let rows = lists.iter().map(|l| l.len()).min().unwrap_or(0);
-    let mut out = Vec::with_capacity(rows);
-    for i in 0..rows {
-        let row: Vec<Value> = lists.iter().map(|l| l[i].clone()).collect();
-        out.push(Value::List(List {
-            items: row.into(),
+    let out = collect_items((0..rows).map(|i| {
+        Value::List(List {
+            items: collect_items(lists.iter().map(|l| l[i].clone())),
             sep: ListSep::Space,
             bracketed: false,
             keywords: None,
-        }));
-    }
+        })
+    }));
     Ok(Value::List(List {
-        items: out.into(),
+        items: out,
         sep: ListSep::Comma,
         bracketed: false,
         keywords: None,
