@@ -134,8 +134,21 @@ pub(crate) fn check() -> Result<(), Error> {
 mod tests {
     use super::*;
 
+    /// How much stack the guard had measured when it first failed.
+    fn used() -> usize {
+        let (base, _) = GUARD.with(Cell::get);
+        base.saturating_sub(position())
+    }
+
+    thread_local! {
+        static FAILED_AT: Cell<usize> = const { Cell::new(0) };
+    }
+
     fn recurse(n: usize) -> Result<usize, Error> {
-        check()?;
+        if let Err(e) = check() {
+            FAILED_AT.with(|f| f.set(used()));
+            return Err(e);
+        }
         // A frame big enough that the limit is reached quickly.
         let pad = std::hint::black_box([0u8; 512]);
         if n == 0 {
@@ -152,17 +165,45 @@ mod tests {
     #[test]
     fn a_guarded_compile_fails_past_its_limit_and_restores_the_guard() {
         {
-            let _scope = enter(64 << 10);
+            let limit = 64 << 10;
+            let _scope = enter(limit);
             let err = recurse(1_000_000).unwrap_err();
-            // The backstop fires past the limit plus its slack, not before.
-            assert!(!exhausted(FALLBACK_SLACK));
             assert_eq!(err.message, MESSAGE);
+            // The unpositioned backstop fires past the limit plus its slack,
+            // and within a frame of it (each level here is a little over
+            // 512 bytes; 4 KiB covers any build's frame overhead).
+            let at = FAILED_AT.with(Cell::get);
+            assert!(at > limit + FALLBACK_SLACK, "fired at {at}, before limit + slack");
+            assert!(
+                at < limit + FALLBACK_SLACK + (4 << 10),
+                "fired at {at}, well past limit + slack"
+            );
             // Shallow recursion within the limit still works.
             assert!(recurse(10).is_ok());
         }
         // The scope is gone, so the guard is off again.
         assert!(recurse(50).is_ok());
         assert_eq!(GUARD.with(Cell::get).0, 0);
+    }
+
+    #[test]
+    fn a_positioned_check_fires_at_the_limit_itself() {
+        let limit = 64 << 10;
+        let _scope = enter(limit);
+        fn positioned(n: usize) -> Result<usize, Error> {
+            if let Err(e) = check_at(crate::scanner::Pos { line: 1, col: 1 }, 0) {
+                FAILED_AT.with(|f| f.set(used()));
+                return Err(e);
+            }
+            let pad = std::hint::black_box([0u8; 512]);
+            if n == 0 {
+                return Ok(pad[0] as usize);
+            }
+            Ok(positioned(n - 1)? + 1)
+        }
+        assert!(positioned(1_000_000).is_err());
+        let at = FAILED_AT.with(Cell::get);
+        assert!(at > limit && at < limit + (4 << 10), "fired at {at}");
     }
 
     #[test]
