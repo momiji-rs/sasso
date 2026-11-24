@@ -76,6 +76,28 @@ fn deeply_nested_parentheses_fail_instead_of_aborting() {
 }
 
 #[test]
+fn a_deeply_nested_media_query_fails_instead_of_aborting() {
+    let n = 200_000;
+    assert_overflows(
+        format!("@media {}a{} {{ a {{ b: c; }} }}", "(".repeat(n), ")".repeat(n)),
+        Syntax::Scss,
+    );
+}
+
+#[test]
+fn a_deeply_nested_supports_condition_fails_instead_of_aborting() {
+    let n = 200_000;
+    assert_overflows(
+        format!(
+            "@supports {}a: b{} {{ a {{ b: c; }} }}",
+            "(".repeat(n),
+            ")".repeat(n)
+        ),
+        Syntax::Scss,
+    );
+}
+
+#[test]
 fn deeply_nested_unary_operators_fail_instead_of_aborting() {
     // `not` is the unary operator that nests: `-----1` is one identifier.
     assert_overflows(
