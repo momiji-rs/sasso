@@ -155,11 +155,16 @@ pub(super) fn binary_add(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
         _ => matches!(&r, Value::Str(s) if s.quoted),
     };
     // Sized exactly, so the buffer never grows; `into` then copies it once
-    // into the shared `Rc<str>`.
-    let (a, b) = (concat_str(&l), concat_str(&r));
-    let mut text = String::with_capacity(a.len() + b.len());
-    text.push_str(&a);
-    text.push_str(&b);
+    // into the shared `Rc<str>`. The block drops the operands first: a
+    // non-string operand's serialization is an owned buffer, and it must not
+    // still be alive while the `Rc` is allocated.
+    let text = {
+        let (a, b) = (concat_str(&l), concat_str(&r));
+        let mut text = String::with_capacity(a.len() + b.len());
+        text.push_str(&a);
+        text.push_str(&b);
+        text
+    };
     Ok(Value::Str(SassStr {
         text: text.into(),
         quoted,
