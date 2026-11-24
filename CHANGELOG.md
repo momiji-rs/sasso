@@ -46,7 +46,8 @@ Conformance is tracked separately as a ratchet against the official
 - **Runaway recursion fails with `Stack Overflow` instead of crashing**
   (#308). A recursive `@function` or `@mixin` (with or without `@content`), an
   endless `@import` chain, or source nested thousands of levels deep (rules,
-  parentheses, `not`, plain CSS, the indented syntax) overflowed the native
+  parentheses, `not`, `@media` and `@supports` conditions, plain CSS, the
+  indented syntax) overflowed the native
   stack. Natively that aborted the process (SIGABRT), taking any host that
   embeds sasso with it. In wasm it trapped with "memory access out of bounds"
   and left the instance broken for every later compile. dart-sass reports
