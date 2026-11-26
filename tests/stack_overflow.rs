@@ -371,6 +371,20 @@ fn the_default_limit_ignores_the_thread_name() {
     assert_eq!(err.message, "Stack Overflow");
 }
 
+/// `::slotted()` is scanned by its own recursive checks, which never reach the
+/// charged selector parser.
+#[test]
+fn nested_slotted_selectors_fail_cleanly_on_a_one_mib_thread_by_default() {
+    for pseudo in ["::slotted(", ":slotted("] {
+        let src = format!("{}a{} {{ b: c; }}", pseudo.repeat(3000), ")".repeat(3000));
+        let err = on_stack(1 << 20, move || compile(&src, &Options::new())).expect_err("must fail");
+        assert_eq!(err.message, "Stack Overflow");
+    }
+    let built = "$s: a;\n@for $i from 1 through 3000 { $s: \"::slotted(#{$s})\"; }\n#{$s} { b: c; }\n";
+    let err = on_stack(1 << 20, move || compile(built, &Options::new())).expect_err("must fail");
+    assert_eq!(err.message, "Stack Overflow");
+}
+
 /// The selector case on a 1 MiB thread with the default limit: before #314
 /// this aborted at about 1000 levels.
 #[test]

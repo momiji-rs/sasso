@@ -60,8 +60,9 @@ Conformance is tracked separately as a ratchet against the official
   Pseudo-class nesting in selectors (`:is(:not(…))`) is charged the same
   way, 8 KiB a level, because selector text can be assembled at run time
   (`#{$s}`) where no parser sees it. On a 1 MiB thread it used to abort at
-  about 1000 levels. The parser for a parenthesized `if()` condition
-  (`if(((sass(true))): …)`) now checks too.
+  about 1000 levels. `::slotted()`, which is scanned by its own recursive
+  checks before any selector parser sees it, checks too, and so does the
+  parser for a parenthesized `if()` condition (`if(((sass(true))): …)`).
 
   Once the guard fires, the compile now fails with `Stack Overflow` however
   it ends. Before, a speculative parse could catch the overflow, backtrack,
