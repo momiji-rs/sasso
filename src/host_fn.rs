@@ -1080,36 +1080,41 @@ mod tests {
         }
         input.push(super::TAG_NULL);
         input.extend(std::iter::repeat(0).take(depth)); // no keywords
-        let result = std::thread::Builder::new()
+                                                        // Both calls run on the overflowing thread: the guard is thread-local,
+                                                        // so only there could a trip left behind show up.
+        let (deep, after) = std::thread::Builder::new()
             .stack_size(1 << 20)
-            .spawn(move || super::host_value_op(super::OP_NUMBER_CONVERT, &input))
+            .spawn(move || {
+                let deep = super::host_value_op(super::OP_NUMBER_CONVERT, &input);
+                // The guard is gone again: an ordinary op still works.
+                let unit = Value::List(crate::value::List::new(
+                    vec![Value::Str(SassStr {
+                        text: "in".into(),
+                        quoted: false,
+                    })],
+                    ListSep::Space,
+                    false,
+                ));
+                let none = Value::List(crate::value::List::new(
+                    Vec::<Value>::new(),
+                    ListSep::Space,
+                    false,
+                ));
+                let args = vec![
+                    Value::Number(Number::with_unit(96.0, "px")),
+                    unit,
+                    none,
+                    Value::Bool(false),
+                ];
+                let after =
+                    super::host_value_op(super::OP_NUMBER_CONVERT, &super::serialize_args(&args).unwrap());
+                (deep, after)
+            })
             .unwrap()
             .join()
             .unwrap();
-        assert_eq!(result.unwrap_err(), crate::stack::MESSAGE);
-        // The guard is gone again: an ordinary op on this thread still works.
-        let unit = Value::List(crate::value::List::new(
-            vec![Value::Str(SassStr {
-                text: "in".into(),
-                quoted: false,
-            })],
-            ListSep::Space,
-            false,
-        ));
-        let none = Value::List(crate::value::List::new(
-            Vec::<Value>::new(),
-            ListSep::Space,
-            false,
-        ));
-        let args = vec![
-            Value::Number(Number::with_unit(96.0, "px")),
-            unit,
-            none,
-            Value::Bool(false),
-        ];
-        assert!(
-            super::host_value_op(super::OP_NUMBER_CONVERT, &super::serialize_args(&args).unwrap()).is_ok()
-        );
+        assert_eq!(deep.unwrap_err(), crate::stack::MESSAGE);
+        assert!(after.is_ok(), "an op after the overflow failed: {after:?}");
     }
 
     #[test]
