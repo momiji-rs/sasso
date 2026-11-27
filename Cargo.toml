@@ -237,6 +237,15 @@ source-tarball = false
 # here. Tell `dist plan` not to fail its generated-file freshness check on it.
 allow-dirty = ["ci"]
 
+# The Apple-silicon build's runner. dist 0.32 defaults it to `macos-14`, which
+# GitHub no longer serves: on the v0.22.0 tag the job was cancelled within a
+# second ("The configuration 'macos-14-arm64-us-default' is not supported"),
+# and with it the GitHub release, its binaries and the npm line. The runner
+# is read from the tagged commit when `dist plan` runs, so this takes effect
+# on the next tag.
+[workspace.metadata.dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
+
 [dev-dependencies]
 divan = { version = "5.0.0", package = "codspeed-divan-compat" }
 
