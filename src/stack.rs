@@ -167,7 +167,7 @@ pub(crate) fn untrip<T>(result: Result<T, Error>) -> Result<T, Error> {
 /// and the guard tripped, once the compile is over its limit. The caller
 /// gives up (`None`), and the next check anywhere fails with `Stack Overflow`.
 pub(crate) fn trip() -> bool {
-    if exhausted(0) {
+    if exhausted(0, 0) {
         update(|g| g.tripped = true);
         true
     } else {
@@ -184,13 +184,18 @@ pub(crate) fn trip() -> bool {
 const FALLBACK_SLACK: usize = 64 << 10;
 
 /// Whether the running compile has used more than `limit + slack` bytes: the
-/// real stack below its base, plus what the chains being built have charged.
+/// real stack below its base, plus what the chains being built have charged,
+/// plus `extra` the caller is about to need.
 #[inline]
-fn exhausted(slack: usize) -> bool {
+fn exhausted(extra: usize, slack: usize) -> bool {
     let g = GUARD.with(Cell::get);
     g.base != 0
         && (g.tripped
-            || g.base.saturating_sub(position()).saturating_add(g.charged) > g.limit.saturating_add(slack))
+            || g.base
+                .saturating_sub(position())
+                .saturating_add(g.charged)
+                .saturating_add(extra)
+                > g.limit.saturating_add(slack))
 }
 
 /// The charge for one left-deep chain while it is built: see [`LEVEL_COST`].
@@ -205,13 +210,15 @@ fn exhausted(slack: usize) -> bool {
 /// or `1 * 1 * … + 1 * 1 * …` across precedence levels, makes a tree as deep
 /// as all its chains together while charging only one at a time. So a chain
 /// that ends leaves its depth (its own levels plus its deepest operand's)
-/// behind as `finished`, and the next fold charges a level on top of the
-/// deepest of its operands. Siblings count once (`(a + a) (a + a)` is no
-/// deeper than either), so a wide expression is not charged for its width.
+/// behind as `finished`, and each fold checks the tree it makes, a level on
+/// top of the deepest of its operands. While the chain stays open it charges
+/// only its own levels, though: the operand it already folded is a sibling of
+/// the one it parses next, not its parent, so `(g) + (g) + (g)` is no deeper
+/// than `(g) + (g)` and a wide expression is not charged for its width.
 pub(crate) struct Chain {
-    /// The depth of the tree folded so far, in charged bytes.
+    /// The depth of the tree folded so far, in bytes, its operands included.
     depth: usize,
-    /// What this chain has added to the compile's charge.
+    /// What this chain has added to the compile's charge: its own levels.
     charged: usize,
     /// The enclosing chain's `finished`, put back when this one ends.
     outer_finished: usize,
@@ -228,15 +235,20 @@ impl Chain {
         }
     }
 
-    /// Charge one more level on top of the deepest operand, and fail with
-    /// `Stack Overflow` at `pos` once the compile is over its limit.
+    /// Charge one more level, and fail with `Stack Overflow` at `pos` once
+    /// the compile is over its limit counting the whole tree this fold makes:
+    /// the level on top of the deepest operand.
     pub(crate) fn level(&mut self, pos: crate::scanner::Pos) -> Result<(), Error> {
         let mut operands = 0;
         update(|g| operands = std::mem::take(&mut g.finished));
-        let depth = self.depth.max(operands) + LEVEL_COST;
-        self.charge(depth - self.depth);
-        self.depth = depth;
-        check_at(pos, 0)
+        self.depth = self.depth.max(operands) + LEVEL_COST;
+        self.charge(LEVEL_COST);
+        if exhausted(self.depth.saturating_sub(self.charged), 0) {
+            update(|g| g.tripped = true);
+            Err(Error::at(MESSAGE, pos))
+        } else {
+            Ok(())
+        }
     }
 
     /// Charge `cost` for code that cannot return an error: false, with the
@@ -282,7 +294,7 @@ pub(crate) fn check_at(pos: crate::scanner::Pos, length: usize) -> Result<(), Er
 /// path gets to report first.
 #[inline]
 pub(crate) fn check() -> Result<(), Error> {
-    if exhausted(FALLBACK_SLACK) {
+    if exhausted(0, FALLBACK_SLACK) {
         update(|g| g.tripped = true);
         Err(Error::unpositioned(MESSAGE))
     } else {

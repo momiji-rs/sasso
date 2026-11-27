@@ -463,3 +463,19 @@ fn many_sibling_chains_still_compile() {
     let css = compile_deep(format!("a {{ b: {list}; }}\n"), Syntax::Scss).expect("1000 groups");
     assert!(css.contains("b: 100 100"), "{css}");
 }
+
+/// Deep sibling groups joined by an operator, `(g) + (g) + (g)`: the tree is
+/// no deeper than one group, so adding groups never makes it fail.
+#[test]
+fn deep_sibling_groups_joined_by_an_operator_still_compile() {
+    // About 60% of the 6 MiB limit each (32 KiB a level in debug, 2.5 KiB
+    // in release).
+    let terms = if cfg!(debug_assertions) { 120 } else { 1500 };
+    let group = format!("({})", vec!["1"; terms].join(" + "));
+    let product = vec!["1"; terms].join(" * ");
+    for (operand, want) in [(group, terms * 4), (product, 4)] {
+        let sum = [operand.as_str(); 4].join(" + ");
+        let css = compile_deep(format!("a {{ b: {sum}; }}\n"), Syntax::Scss).expect("4 groups");
+        assert!(css.contains(&format!("b: {want};")), "{css}");
+    }
+}
