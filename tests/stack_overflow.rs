@@ -479,3 +479,115 @@ fn deep_sibling_groups_joined_by_an_operator_still_compile() {
         assert!(css.contains(&format!("b: {want};")), "{css}");
     }
 }
+
+/// A value nested at run time (#312): a loop builds it in a few bytes of
+/// source, so no parse-time charge covers it. Each line builds `$x` (and an
+/// equal `$y`) `DEPTH` levels deep: a list, a map, a calculation, and a
+/// calculation function.
+const DEPTH: usize = 100_000;
+
+fn deep_values() -> [String; 4] {
+    let build = |seed: &str, step: &str| {
+        format!(
+            "@use \"sass:list\"; @use \"sass:map\"; @use \"sass:meta\";\n\
+             $x: {seed}; $y: {seed};\n\
+             @for $i from 1 through {DEPTH} {{ $x: {x}; $y: {y}; }}\n",
+            x = step.replace('_', "$x"),
+            y = step.replace('_', "$y"),
+        )
+    };
+    [
+        build("1", "(_, 1)"),
+        build("(k: 1)", "(k: _)"),
+        build("1px", "calc(_ + 1%)"),
+        build("1px", "min(_, 1%)"),
+    ]
+}
+
+/// Compile on a 1 MiB thread with the default limit, the smallest stack a
+/// compile commonly gets.
+fn on_one_mib(src: String) -> Result<String, sasso::Error> {
+    on_stack(1 << 20, move || compile(&src, &Options::new()))
+}
+
+/// Building, reading and dropping a deep value walks none of it, so it
+/// compiles, as in dart-sass. Before #312 dropping one recursed once per
+/// level and aborted the process.
+#[test]
+fn a_deeply_nested_value_builds_and_drops_without_aborting() {
+    for prelude in deep_values() {
+        for body in [
+            "a { b: list.length($x); }",
+            "a { b: meta.type-of(list.nth($x, 1)); }",
+            "@each $i in $x { a { b: meta.type-of($i); } }",
+            "a { b: list.length(list.append($x, 1)); }",
+            // The same value equals itself without a walk (dart checks
+            // identity first). A calculation does not: dart has no identity
+            // check there, and `calc(NaN)` must stay unequal to itself.
+            "a { b: if(meta.type-of($x) == calculation or $x == $x, ok, no); }",
+        ] {
+            let src = format!("{prelude}{body}\n");
+            let css = on_one_mib(src.clone()).unwrap_or_else(|e| panic!("{body}: {e}\n{prelude}"));
+            assert!(css.contains("a {"), "{body}: {css}");
+        }
+    }
+}
+
+/// Anything that walks a deep value fails with `Stack Overflow`, as dart-sass
+/// does, instead of aborting: serializing, inspecting, interpolating,
+/// comparing, writing it into a diagnostic, merging it.
+#[test]
+fn walking_a_deeply_nested_value_fails_instead_of_aborting() {
+    for prelude in deep_values() {
+        for body in [
+            "a { b: $x; }",
+            "a { b: meta.inspect($x); }",
+            "a { b: \"#{$x}\"; }",
+            "@debug $x;",
+            "a { b: $x == $y; }",
+            "a { b: $x + 1; }",
+            "a { b: -$x; }",
+            "a { b: list.index(($y, 1), $x); }",
+            "a { b: unquote($x); }",
+            "a { b: map.deep-merge((k: $x), (k: $y)); }",
+        ] {
+            let src = format!("{prelude}{body}\n");
+            let err = on_one_mib(src).expect_err(body);
+            assert_eq!(err.message, "Stack Overflow", "{body}: {err}");
+        }
+    }
+}
+
+/// A deep value handed to a custom function is serialized for the host: that
+/// walk is guarded too, and the callback is never reached.
+#[test]
+fn a_deeply_nested_value_passed_to_a_custom_function_fails_cleanly() {
+    let prelude = &deep_values()[0];
+    let src = format!("{prelude}a {{ b: f($x); }}\n");
+    let err = on_stack(1 << 20, move || {
+        let f: sasso::HostFunction = std::rc::Rc::new(|_: &[u8]| Err("reached the callback".into()));
+        compile(&src, &Options::new().with_function("f($v)", f))
+    })
+    .expect_err("must fail");
+    assert_eq!(err.message, "Stack Overflow");
+}
+
+/// Values of ordinary depth are unaffected, and serializing a nested list is
+/// no longer quadratic: every level asked whether each of its elements was
+/// blank, and that walked the whole nested list first.
+#[test]
+fn nested_values_of_ordinary_depth_still_serialize() {
+    let css = on_one_mib(
+        "$l: 1;\n@for $i from 1 through 3 { $l: ($l, 2) 3; }\n\
+         $m: (k: 1);\n@for $i from 1 through 3 { $m: (k: $m); }\n\
+         $c: 1px;\n@for $i from 1 through 3 { $c: calc($c + 1%); }\n\
+         a { l: $l; m: inspect($m); c: $c; e: $l == $l; }\n"
+            .into(),
+    )
+    .expect("shallow values");
+    // dart-sass 1.104.1's output, byte for byte.
+    assert!(css.contains("l: 1, 2 3, 2 3, 2 3;"), "{css}");
+    assert!(css.contains("m: (k: (k: (k: (k: 1))));"), "{css}");
+    assert!(css.contains("c: calc(1px + 1% + 1% + 1%);"), "{css}");
+    assert!(css.contains("e: true;"), "{css}");
+}
