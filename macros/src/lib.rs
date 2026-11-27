@@ -104,6 +104,9 @@ fn expand(input: TokenStream) -> Result<TokenStream, Failure> {
     // Cargo what to watch: rustc records every file it includes in the
     // crate's dep-info, so an edit to any of them reruns the expansion. The
     // bytes land in an unnamed constant nobody reads, which costs nothing.
+    //
+    // Every name is spelled from the crate root: the expansion resolves in
+    // the caller's scope, where `u8` or `include_bytes` may be rebound.
     let mut files = vec![url];
     for f in importer.loaded.into_inner() {
         if !files.contains(&f) {
@@ -113,7 +116,7 @@ fn expand(input: TokenStream) -> Result<TokenStream, Failure> {
     let mut code = String::from("{");
     for f in &files {
         code.push_str(&format!(
-            "const _: &[u8] = ::core::include_bytes!({});",
+            "const _: &[::core::primitive::u8] = ::core::include_bytes!({});",
             Literal::string(f)
         ));
     }

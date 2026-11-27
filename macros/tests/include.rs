@@ -39,3 +39,23 @@ fn matches_the_library_compile() {
     let options = sasso_core::Options::new().with_importer(&importer).with_url(&url);
     assert_eq!(EXPANDED, sasso_core::compile(&source, &options).unwrap());
 }
+
+/// The expansion resolves in the caller's scope, so every name it uses must
+/// be one the caller cannot rebind: a module that shadows a primitive or a
+/// standard macro still gets its CSS.
+mod shadowed_names {
+    #[allow(non_camel_case_types, dead_code)]
+    type u8 = u16;
+    #[allow(unused_macros)]
+    macro_rules! include_bytes {
+        ($($t:tt)*) => {
+            &[0u16]
+        };
+    }
+    pub static CSS: &str = sasso_macros::include!("tests/fixtures/scss/indented.sass");
+}
+
+#[test]
+fn expansion_ignores_names_the_caller_shadows() {
+    assert_eq!(shadowed_names::CSS, ".b {\n  color: blue;\n}");
+}
