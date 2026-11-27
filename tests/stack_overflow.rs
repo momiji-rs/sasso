@@ -533,6 +533,28 @@ fn a_deeply_nested_value_builds_and_drops_without_aborting() {
     }
 }
 
+/// A value whose levels share their children (`$l: ($l, $l)`) is as deep as
+/// one that does not, and drops just as flat: a child held twice by the same
+/// parent is released by the parent's last reference, not by a walk.
+#[test]
+fn a_deep_value_with_shared_children_drops_without_aborting() {
+    for (step, length) in [
+        ("($x, $x)", 2),
+        ("(k: $x, j: $x)", 2),
+        ("[$x $x]", 2),
+        // A calculation's operands are separate `Rc`s around shared subtrees.
+        ("calc($x + $x * var(--a))", 1),
+        ("min($x, $x, 1%)", 1),
+    ] {
+        let src = format!(
+            "@use \"sass:list\";\n$x: 1px;\n@for $i from 1 through {DEPTH} {{ $x: {step}; }}\n\
+             a {{ b: list.length($x); }}\n"
+        );
+        let css = on_one_mib(src).unwrap_or_else(|e| panic!("{step}: {e}"));
+        assert!(css.contains(&format!("b: {length};")), "{step}: {css}");
+    }
+}
+
 /// Anything that walks a deep value fails with `Stack Overflow`, as dart-sass
 /// does, instead of aborting: serializing, inspecting, interpolating,
 /// comparing, writing it into a diagnostic, merging it.

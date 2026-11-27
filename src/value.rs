@@ -941,9 +941,10 @@ pub(crate) struct List {
 /// Dropping a deeply nested list or map (`$l: ($l, 1)` in a loop) must not
 /// recurse once per level: the depth is in the data, which a loop builds in a
 /// few bytes of source, and a drop cannot fail with `Stack Overflow` (#312).
-/// So when a list or map is the last owner of nested lists or maps, they move
-/// to a work list and are dropped one at a time, each with its own nested
-/// containers detached first. A shallow one never allocates.
+/// So when a list or map holds nested lists or maps, they move to a work list
+/// and are dropped one at a time: one this was the last holder of detaches
+/// its own nested containers first, one still shared only loses a reference.
+/// A list or map with no nested containers never allocates.
 impl Drop for List {
     fn drop(&mut self) {
         let mut work = Vec::new();
@@ -984,36 +985,39 @@ impl PartialEq for Map {
     }
 }
 
-/// Whether dropping `v` would drop a list or map that holds more of them:
-/// a container nothing else shares. (A calculation drops its own tree
+/// Whether `v` is a list or map that holds more of them, the slots the
+/// iterative drop takes over. Whether anything else still shares it is
+/// decided only when it comes off the work list: a child held twice by one
+/// parent (`$l: ($l, $l)`) is shared while the parent looks, and released by
+/// the parent's own last reference, which would recurse if it were left to
+/// ordinary field destruction. (A calculation drops its own tree
 /// iteratively, so it is not one.)
-fn owns_nested(v: &Value) -> bool {
+fn holds_nested(v: &Value) -> bool {
     let nested = |v: &Value| matches!(v, Value::List(_) | Value::Map(_));
     match v {
         Value::List(l) => {
-            (Rc::strong_count(&l.items) == 1 && l.items.iter().any(nested))
+            l.items.iter().any(nested)
                 || l.keywords
                     .as_ref()
                     .is_some_and(|kw| kw.iter().any(|(k, v)| nested(k) || nested(v)))
         }
-        Value::Map(m) => {
-            Rc::strong_count(&m.entries) == 1 && m.entries.iter().any(|(k, v)| nested(k) || nested(v))
-        }
+        Value::Map(m) => m.entries.iter().any(|(k, v)| nested(k) || nested(v)),
         _ => false,
     }
 }
 
-/// Move every slot that owns nested containers into `work`, leaving `null`.
+/// Move every slot that holds nested containers into `work`, leaving `null`.
 fn detach_nested<'a>(slots: impl Iterator<Item = &'a mut Value>, work: &mut Vec<Value>) {
     work.extend(
         slots
-            .filter(|v| owns_nested(v))
+            .filter(|v| holds_nested(v))
             .map(|v| std::mem::replace(v, Value::Null)),
     );
 }
 
 /// Drop detached containers one at a time, detaching theirs in turn, so the
-/// stack stays flat however deep the value went.
+/// stack stays flat however deep the value went. One still shared elsewhere
+/// only loses a reference here; its last holder detaches it.
 fn drop_work(mut work: Vec<Value>) {
     while let Some(mut v) = work.pop() {
         match &mut v {
