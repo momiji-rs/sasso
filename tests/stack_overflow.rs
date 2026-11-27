@@ -559,17 +559,26 @@ fn walking_a_deeply_nested_value_fails_instead_of_aborting() {
 }
 
 /// A deep value handed to a custom function is serialized for the host: that
-/// walk is guarded too, and the callback is never reached.
+/// walk is guarded too, and the callback is never reached. The compile would
+/// end in `Stack Overflow` either way, so the test counts the calls: a host
+/// handed a truncated payload has already run on it by then.
 #[test]
 fn a_deeply_nested_value_passed_to_a_custom_function_fails_cleanly() {
-    let prelude = &deep_values()[0];
-    let src = format!("{prelude}a {{ b: f($x); }}\n");
-    let err = on_stack(1 << 20, move || {
-        let f: sasso::HostFunction = std::rc::Rc::new(|_: &[u8]| Err("reached the callback".into()));
-        compile(&src, &Options::new().with_function("f($v)", f))
-    })
-    .expect_err("must fail");
-    assert_eq!(err.message, "Stack Overflow");
+    for prelude in deep_values() {
+        let src = format!("{prelude}a {{ b: f($x); }}\n");
+        let (err, calls) = on_stack(1 << 20, move || {
+            let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+            let seen = calls.clone();
+            let f: sasso::HostFunction = std::rc::Rc::new(move |_: &[u8]| {
+                seen.set(seen.get() + 1);
+                Err("reached the callback".into())
+            });
+            let result = compile(&src, &Options::new().with_function("f($v)", f));
+            (result.expect_err("must fail"), calls.get())
+        });
+        assert_eq!(err.message, "Stack Overflow", "{prelude}");
+        assert_eq!(calls, 0, "the callback ran on a truncated payload:\n{prelude}");
+    }
 }
 
 /// Values of ordinary depth are unaffected, and serializing a nested list is

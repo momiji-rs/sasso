@@ -537,7 +537,7 @@ fn serialize_value(out: &mut Vec<u8>, v: &Value) -> Result<(), String> {
         }
         Value::Calc(node) => {
             out.push(TAG_CALC);
-            write_calc_node(out, node);
+            write_calc_node(out, node)?;
         }
         Value::Slash(..) => {
             // A slash-division never reaches here (call args are slash-collapsed
@@ -584,11 +584,12 @@ fn calc_op_code(op: CalcOp) -> u8 {
 }
 
 /// Serialize a `CalcNode` tree: tag byte (0 Number, 1 Str, 2 Op, 3 Func) + payload.
-fn write_calc_node(out: &mut Vec<u8>, node: &CalcNode) {
-    // See `serialize_value`; a calculation reaching this has already passed
-    // there, so giving up here is enough.
+fn write_calc_node(out: &mut Vec<u8>, node: &CalcNode) -> Result<(), String> {
+    // A calculation can nest deeper than the stack (#312). Giving up must
+    // fail the whole serialization: a truncated payload would still reach
+    // the host's callback.
     if crate::stack::trip() {
-        return;
+        return Err(crate::stack::MESSAGE.into());
     }
     match node {
         CalcNode::Number(n) => {
@@ -602,18 +603,19 @@ fn write_calc_node(out: &mut Vec<u8>, node: &CalcNode) {
         CalcNode::Op { op, left, right } => {
             out.push(2);
             out.push(calc_op_code(*op));
-            write_calc_node(out, left);
-            write_calc_node(out, right);
+            write_calc_node(out, left)?;
+            write_calc_node(out, right)?;
         }
         CalcNode::Func { name, args } => {
             out.push(3);
             put_str(out, name);
             put_u32(out, args.len());
             for a in args.iter() {
-                write_calc_node(out, a);
+                write_calc_node(out, a)?;
             }
         }
     }
+    Ok(())
 }
 
 fn sep_code(sep: ListSep) -> u8 {
