@@ -101,35 +101,37 @@ fn update(f: impl FnOnce(&mut Guard)) {
 
 /// Restores the previous guard when the compile that entered it ends.
 pub(crate) struct Scope {
-    outermost: bool,
+    /// The enclosing compile's guard, or the idle one for the outermost.
+    outer: Guard,
 }
 
 /// Start guarding a compile that may use `limit` bytes of stack from here.
 ///
 /// A compile nested inside another on the same thread (a custom function or a
-/// warn handler that compiles) keeps the outer compile's state: both run on
-/// the same stack, and what matters is how much of it is used in all.
+/// warn handler that compiles) keeps the outer compile's base and limit: both
+/// run on the same stack, and what matters is how much of it is used in all.
+/// Whether the nested one tripped is its own business, though: its result
+/// already says so, and a host that handles that error has not made the outer
+/// compile overflow. So the outer state comes back when the nested scope ends.
 pub(crate) fn enter(limit: usize) -> Scope {
-    let outermost = GUARD.with(Cell::get).base == 0;
-    if outermost {
+    let outer = GUARD.with(Cell::get);
+    if outer.base == 0 {
         let base = position();
         GUARD.with(|g| {
             g.set(Guard {
                 base,
                 limit,
-                charged: 0,
-                tripped: false,
+                ..Guard::default()
             })
         });
     }
-    Scope { outermost }
+    Scope { outer }
 }
 
 impl Drop for Scope {
     fn drop(&mut self) {
-        if self.outermost {
-            GUARD.with(|g| g.set(Guard::default()));
-        }
+        let outer = self.outer;
+        GUARD.with(|g| g.set(outer));
     }
 }
 

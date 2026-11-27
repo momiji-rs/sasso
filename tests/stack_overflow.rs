@@ -393,3 +393,29 @@ fn nested_selectors_fail_cleanly_on_a_one_mib_thread_by_default() {
     let err = on_stack(1 << 20, move || compile(&src, &Options::new())).expect_err("must fail");
     assert_eq!(err.message, "Stack Overflow");
 }
+
+/// A warn handler that runs a nested compile and handles its overflow leaves
+/// the outer compile untouched: the outer one never reached its limit.
+#[test]
+fn a_handled_nested_overflow_does_not_fail_the_outer_compile() {
+    let css = on_stack(8 << 20, || {
+        let handler = std::rc::Rc::new(|_: &sasso::WarnEvent<'_>| {
+            let inner = compile(
+                "@function f($n) { @return f($n + 1); }\na { b: f(0); }\n",
+                &Options::new(),
+            );
+            assert_eq!(
+                inner.expect_err("the inner compile overflows").message,
+                "Stack Overflow"
+            );
+        });
+        compile(
+            "@warn \"w\";\na { b: c; }\n",
+            &Options::new()
+                .with_stack_limit(6 << 20)
+                .with_warn_handler(handler),
+        )
+    })
+    .expect("the outer compile is fine");
+    assert!(css.contains("b: c;"), "{css}");
+}
