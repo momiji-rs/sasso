@@ -16,6 +16,21 @@
 //! assert!(css.contains("a:hover {"));
 //! ```
 //!
+//! # At compile time
+//!
+//! With the `macro` feature, [`include!`] compiles a stylesheet while your
+//! crate builds and expands to the CSS as a `&'static str`; a Sass error
+//! fails the build:
+//!
+//! ```toml
+//! [dependencies]
+//! sasso = { version = "0.21", features = ["macro"] }
+//! ```
+//!
+//! ```ignore
+//! static CSS: &str = sasso::include!("static/main.scss");
+//! ```
+//!
 //! ## Scope
 //!
 //! This covers a large slice of Sass: variables (`!default`/`!global`),
@@ -29,5 +44,8 @@
 //! official `sass-spec` suite, tracked by the harness in `spec/`.
 
 // The compiler is `sasso-core` (`/core`); this crate is its public face, plus
-// the CLI binary. Why the split exists: see `core/Cargo.toml`.
+// the CLI binary. The split exists for `include!`: see `core/Cargo.toml`.
 pub use sasso_core::*;
+
+#[cfg(feature = "macro")]
+pub use sasso_macros::include;
