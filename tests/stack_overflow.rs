@@ -419,3 +419,47 @@ fn a_handled_nested_overflow_does_not_fail_the_outer_compile() {
     .expect("the outer compile is fine");
     assert!(css.contains("b: c;"), "{css}");
 }
+
+/// `((g) and g) and g …`: each group `g` is a chain short enough to pass on
+/// its own, but the tree nests them, so it is as deep as all of them
+/// together. Before the chains carried their depth out, this aborted a
+/// 1 MiB thread at the default limit in a release build.
+fn composed(unit: &str, op: &str) -> String {
+    let group = vec![unit; 1000].join(op);
+    let nesting = 200;
+    let mut out = "(".repeat(nesting);
+    out.push_str(&group);
+    for _ in 0..nesting {
+        out.push(')');
+        out.push_str(op);
+        out.push_str(&group);
+    }
+    out
+}
+
+#[test]
+fn chains_composed_through_parentheses_fail_instead_of_aborting() {
+    let supports = format!("@supports {} {{ a {{ b: c; }} }}\n", composed("(a: b)", " and "));
+    // Never called, so no evaluation fails first.
+    let sum = format!(
+        "@function f() {{ @return {}; }}\na {{ b: c; }}\n",
+        composed("1", " + ")
+    );
+    for src in [supports, sum] {
+        let err = on_stack(64 << 20, move || {
+            compile(&src, &Options::new().with_stack_limit(60 << 20))
+        })
+        .expect_err("must fail");
+        assert_eq!(err.message, "Stack Overflow");
+    }
+}
+
+/// Sibling chains are not added up: an expression as wide as it likes is
+/// only as deep as its deepest part.
+#[test]
+fn many_sibling_chains_still_compile() {
+    let group = format!("({})", vec!["1"; 100].join(" + "));
+    let list = vec![group.as_str(); 1000].join(" ");
+    let css = compile_deep(format!("a {{ b: {list}; }}\n"), Syntax::Scss).expect("1000 groups");
+    assert!(css.contains("b: 100 100"), "{css}");
+}

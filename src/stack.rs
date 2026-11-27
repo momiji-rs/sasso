@@ -71,6 +71,10 @@ struct Guard {
     limit: usize,
     /// Bytes charged by [`Chain`]s still being built.
     charged: usize,
+    /// The charged depth of the deepest tree a [`Chain`] finished since the
+    /// innermost open chain started or last folded: the operands it is about
+    /// to fold, which a finished chain no longer charges for itself.
+    finished: usize,
     /// Code that cannot return an error reached the limit ([`trip`]): every
     /// later check fails, and the compile ends in `Stack Overflow`.
     tripped: bool,
@@ -78,7 +82,7 @@ struct Guard {
 
 thread_local! {
     static GUARD: Cell<Guard> = const {
-        Cell::new(Guard { base: 0, limit: 0, charged: 0, tripped: false })
+        Cell::new(Guard { base: 0, limit: 0, charged: 0, finished: 0, tripped: false })
     };
 }
 
@@ -194,17 +198,44 @@ fn exhausted(slack: usize) -> bool {
 /// call [`Chain::level`] before each fold, and let it drop when the function
 /// returns. A chain nested inside another (an operand that is itself a chain)
 /// adds to the outer one's charge, as it would add to the stack if parsing
-/// recursed. One that folded nothing costs nothing to drop.
-#[derive(Default)]
+/// recursed.
+///
+/// A chain that has returned still counts: its tree is now an operand of
+/// whatever folds it next. `((a + a) + a) + a …`, each group parenthesized,
+/// or `1 * 1 * … + 1 * 1 * …` across precedence levels, makes a tree as deep
+/// as all its chains together while charging only one at a time. So a chain
+/// that ends leaves its depth (its own levels plus its deepest operand's)
+/// behind as `finished`, and the next fold charges a level on top of the
+/// deepest of its operands. Siblings count once (`(a + a) (a + a)` is no
+/// deeper than either), so a wide expression is not charged for its width.
 pub(crate) struct Chain {
+    /// The depth of the tree folded so far, in charged bytes.
+    depth: usize,
+    /// What this chain has added to the compile's charge.
     charged: usize,
+    /// The enclosing chain's `finished`, put back when this one ends.
+    outer_finished: usize,
 }
 
 impl Chain {
-    /// Charge one more level, and fail with `Stack Overflow` at `pos` once the
-    /// compile is over its limit.
+    pub(crate) fn new() -> Self {
+        let mut outer_finished = 0;
+        update(|g| outer_finished = std::mem::take(&mut g.finished));
+        Self {
+            depth: 0,
+            charged: 0,
+            outer_finished,
+        }
+    }
+
+    /// Charge one more level on top of the deepest operand, and fail with
+    /// `Stack Overflow` at `pos` once the compile is over its limit.
     pub(crate) fn level(&mut self, pos: crate::scanner::Pos) -> Result<(), Error> {
-        self.charge(LEVEL_COST);
+        let mut operands = 0;
+        update(|g| operands = std::mem::take(&mut g.finished));
+        let depth = self.depth.max(operands) + LEVEL_COST;
+        self.charge(depth - self.depth);
+        self.depth = depth;
         check_at(pos, 0)
     }
 
@@ -223,9 +254,12 @@ impl Chain {
 
 impl Drop for Chain {
     fn drop(&mut self) {
-        if self.charged != 0 {
-            let charged = self.charged;
-            update(|g| g.charged = g.charged.saturating_sub(charged));
+        let (charged, depth, outer) = (self.charged, self.depth, self.outer_finished);
+        if charged != 0 || outer != 0 {
+            update(|g| {
+                g.charged = g.charged.saturating_sub(charged);
+                g.finished = outer.max(depth.max(g.finished));
+            });
         }
     }
 }

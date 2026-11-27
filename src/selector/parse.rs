@@ -14,7 +14,7 @@ pub(crate) fn parse_list(sel: &str) -> Option<Vec<Complex>> {
     // Every level of pseudo-class nesting comes back through here, and the
     // parsed list is walked again later (#314): charge the level, and give up
     // with the guard tripped once over the limit.
-    let mut nest = crate::stack::Chain::default();
+    let mut nest = crate::stack::Chain::new();
     if !nest.level_or_trip(crate::stack::SELECTOR_LEVEL_COST) {
         return None;
     }

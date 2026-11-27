@@ -186,7 +186,7 @@ impl Parser {
     // keywords are bare identifiers recognized only in operator position.
 
     pub(super) fn or_expr(&mut self) -> Result<Expr, Error> {
-        let mut chain = crate::stack::Chain::default();
+        let mut chain = crate::stack::Chain::new();
         let mut lhs = self.and_expr()?;
         // In plain CSS `or`/`and`/`not` are ordinary identifiers, not operators.
         while !self.plain_css && self.try_keyword("or") {
@@ -205,7 +205,7 @@ impl Parser {
     }
 
     fn and_expr(&mut self) -> Result<Expr, Error> {
-        let mut chain = crate::stack::Chain::default();
+        let mut chain = crate::stack::Chain::new();
         let mut lhs = self.equality()?;
         while !self.plain_css && self.try_keyword("and") {
             self.skip_ws_inline();
@@ -223,7 +223,7 @@ impl Parser {
     }
 
     fn equality(&mut self) -> Result<Expr, Error> {
-        let mut chain = crate::stack::Chain::default();
+        let mut chain = crate::stack::Chain::new();
         let mut lhs = self.relational()?;
         loop {
             let mark = self.sc.mark();
@@ -261,7 +261,7 @@ impl Parser {
     }
 
     fn relational(&mut self) -> Result<Expr, Error> {
-        let mut chain = crate::stack::Chain::default();
+        let mut chain = crate::stack::Chain::new();
         let mut lhs = self.additive()?;
         loop {
             let mark = self.sc.mark();
@@ -335,7 +335,7 @@ impl Parser {
     }
 
     pub(super) fn additive(&mut self) -> Result<Expr, Error> {
-        let mut chain = crate::stack::Chain::default();
+        let mut chain = crate::stack::Chain::new();
         let mut lhs = self.multiplicative()?;
         loop {
             // A `?`-wildcard unicode-range token is terminal: a directly
@@ -455,7 +455,7 @@ impl Parser {
     }
 
     fn multiplicative(&mut self) -> Result<Expr, Error> {
-        let mut chain = crate::stack::Chain::default();
+        let mut chain = crate::stack::Chain::new();
         let mut lhs = self.unary()?;
         loop {
             let mark = self.sc.mark();
@@ -2444,7 +2444,7 @@ impl Parser {
     /// `==` is the equality operator and is handled at its own precedence, so
     /// only a `=` not followed by `=` is consumed.
     fn arg_value(&mut self) -> Result<Expr, Error> {
-        let mut chain = crate::stack::Chain::default();
+        let mut chain = crate::stack::Chain::new();
         let mut lhs = self.space_list()?;
         loop {
             let mark = self.sc.mark();

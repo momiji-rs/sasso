@@ -55,7 +55,10 @@ Conformance is tracked separately as a ratchet against the official
   counts against the same stack limit, as if parsing had recursed: 2.5 KiB a
   level in release builds, the measured cost of evaluating one. So a chain
   too deep to evaluate is also too deep to parse, and nothing evaluation
-  could handle is rejected.
+  could handle is rejected. A finished chain's depth carries over to the
+  operator that folds it next, so chains nested in parentheses
+  (`((a + a) + a) + …`) or across precedence levels (`1 * 1 * … + 1 * 1 * …`)
+  are charged as the one tree they build, while sibling chains count once.
 
   Pseudo-class nesting in selectors (`:is(:not(…))`) is charged the same
   way, 8 KiB a level, because selector text can be assembled at run time
