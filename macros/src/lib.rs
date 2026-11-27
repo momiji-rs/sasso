@@ -125,7 +125,13 @@ fn expand(input: TokenStream) -> Result<TokenStream, Failure> {
 fn manifest_dir() -> PathBuf {
     // Cargo sets it for every crate it compiles; a bare `rustc` invocation
     // gets the working directory, which is what relative paths meant there.
-    std::env::var_os("CARGO_MANIFEST_DIR").map_or_else(|| PathBuf::from("."), PathBuf::from)
+    // Absolute either way: the expansion's `include_bytes!` resolves a
+    // relative path against the invoking source file, not the working
+    // directory, and would name a different file than the one compiled.
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn syntax_for(path: &Path) -> Syntax {
@@ -331,9 +337,13 @@ fn unescape(body: &str) -> Option<String> {
                 out.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
             }
             // A line continuation: the newline and the next line's leading
-            // whitespace are dropped.
+            // whitespace are dropped — only the four characters Rust's lexer
+            // skips there, not every Unicode space (a U+00A0 is kept).
             '\n' => {
-                while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                while chars
+                    .peek()
+                    .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '\r'))
+                {
                     chars.next();
                 }
             }
@@ -343,18 +353,31 @@ fn unescape(body: &str) -> Option<String> {
     Some(out)
 }
 
-/// `compile_error!("message")`, every token spanned at `span` so the error
-/// points at the offending input.
+/// `::core::compile_error!("message")`, every token spanned at `span` so the
+/// error points at the offending input.
+///
+/// The path is absolute because the tokens resolve in the caller's scope: a
+/// bare `compile_error!` would pick up a `macro_rules! compile_error` the
+/// caller defined, which could expand to anything — and turn a failed
+/// compile into a successful build.
 fn compile_error(span: Span, message: &str) -> TokenStream {
+    let punct = |c, spacing| {
+        let mut p = Punct::new(c, spacing);
+        p.set_span(span);
+        TokenTree::Punct(p)
+    };
     let mut lit = Literal::string(message);
     lit.set_span(span);
-    let mut bang = Punct::new('!', Spacing::Alone);
-    bang.set_span(span);
     let mut group = Group::new(Delimiter::Parenthesis, TokenTree::Literal(lit).into());
     group.set_span(span);
     [
+        punct(':', Spacing::Joint),
+        punct(':', Spacing::Alone),
+        TokenTree::Ident(Ident::new("core", span)),
+        punct(':', Spacing::Joint),
+        punct(':', Spacing::Alone),
         TokenTree::Ident(Ident::new("compile_error", span)),
-        TokenTree::Punct(bang),
+        punct('!', Spacing::Alone),
         TokenTree::Group(group),
     ]
     .into_iter()
