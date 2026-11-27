@@ -495,7 +495,12 @@ version = "0.21.0"
 dependencies = [
  "chrono",
  "codspeed-divan-compat",
+ "sasso-core",
 ]
+
+[[package]]
+name = "sasso-core"
+version = "0.21.0"
 
 [[package]]
 name = "serde"
