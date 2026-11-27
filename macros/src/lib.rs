@@ -76,29 +76,8 @@ struct Args {
 
 fn expand(input: TokenStream) -> Result<TokenStream, Failure> {
     let args = parse_args(input)?;
-    let root = manifest_dir();
-    let entry = root.join(&args.path);
-    let source = std::fs::read_to_string(&entry)
-        .map_err(|e| (args.path_span, format!("couldn't read {}: {e}", entry.display())))?;
-
-    let importer = RecordingImporter {
-        inner: FsImporter::new(args.load_paths.iter().map(|p| root.join(p)).collect()),
-        loaded: RefCell::new(Vec::new()),
-    };
-    let url = entry.to_string_lossy().into_owned();
-    let options = Options::new()
-        .with_style(args.style)
-        .with_syntax(syntax_for(&entry))
-        .with_importer(&importer)
-        .with_url(&url);
-    let css = sasso_core::compile(&source, &options).map_err(|e| {
-        // rustc already heads the diagnostic with `error: `.
-        let text = e.to_string();
-        (
-            args.path_span,
-            text.strip_prefix("Error: ").unwrap_or(&text).to_owned(),
-        )
-    })?;
+    let (css, files) = compile_tracked(&manifest_dir(), &args.path, args.style, &args.load_paths)
+        .map_err(|message| (args.path_span, message))?;
 
     // `include_bytes!` of each file read is how a macro on stable Rust tells
     // Cargo what to watch: rustc records every file it includes in the
@@ -107,12 +86,6 @@ fn expand(input: TokenStream) -> Result<TokenStream, Failure> {
     //
     // Every name is spelled from the crate root: the expansion resolves in
     // the caller's scope, where `u8` or `include_bytes` may be rebound.
-    let mut files = vec![url];
-    for f in importer.loaded.into_inner() {
-        if !files.contains(&f) {
-            files.push(f);
-        }
-    }
     let mut code = String::from("{");
     for f in &files {
         code.push_str(&format!(
@@ -123,6 +96,47 @@ fn expand(input: TokenStream) -> Result<TokenStream, Failure> {
     code.push_str(&Literal::string(&css).to_string());
     code.push('}');
     Ok(code.parse().expect("generated tokens parse"))
+}
+
+/// Compile `path` (relative to `root` unless absolute) and return the CSS with
+/// every file the compile read: the entry first, then each loaded file once,
+/// in load order. Those are the files the expansion must track.
+///
+/// Kept apart from the `proc_macro` API, which works only inside a macro
+/// expansion, so the tracking contract can be unit-tested.
+fn compile_tracked(
+    root: &Path,
+    path: &str,
+    style: OutputStyle,
+    load_paths: &[String],
+) -> Result<(String, Vec<String>), String> {
+    let entry = root.join(path);
+    let source =
+        std::fs::read_to_string(&entry).map_err(|e| format!("couldn't read {}: {e}", entry.display()))?;
+
+    let importer = RecordingImporter {
+        inner: FsImporter::new(load_paths.iter().map(|p| root.join(p)).collect()),
+        loaded: RefCell::new(Vec::new()),
+    };
+    let url = entry.to_string_lossy().into_owned();
+    let options = Options::new()
+        .with_style(style)
+        .with_syntax(syntax_for(&entry))
+        .with_importer(&importer)
+        .with_url(&url);
+    let css = sasso_core::compile(&source, &options).map_err(|e| {
+        // rustc already heads the diagnostic with `error: `.
+        let text = e.to_string();
+        text.strip_prefix("Error: ").unwrap_or(&text).to_owned()
+    })?;
+
+    let mut files = vec![url];
+    for f in importer.loaded.into_inner() {
+        if !files.contains(&f) {
+            files.push(f);
+        }
+    }
+    Ok((css, files))
 }
 
 fn manifest_dir() -> PathBuf {
@@ -385,4 +399,55 @@ fn compile_error(span: Span, message: &str) -> TokenStream {
     ]
     .into_iter()
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixtures() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scss")
+    }
+
+    fn compile_main(load_paths: &[&str]) -> Result<(String, Vec<String>), String> {
+        let load_paths: Vec<String> = load_paths.iter().map(|p| p.to_string()).collect();
+        compile_tracked(&fixtures(), "main.scss", OutputStyle::Expanded, &load_paths)
+    }
+
+    /// The rebuild contract: what `compile_tracked` returns is what the
+    /// expansion `include_bytes!`es, and rustc puts each of those in the
+    /// crate's dep-info. A partial missing here would compile once and then
+    /// never rebuild when edited.
+    #[test]
+    fn tracks_the_entry_and_every_partial_it_loads() {
+        let (_, files) = compile_main(&["lib"]).unwrap();
+        let tracked = |name: &str| files.iter().filter(|f| Path::new(f).ends_with(name)).count();
+        assert_eq!(files.len(), 3, "{files:?}");
+        assert!(
+            Path::new(&files[0]).ends_with("main.scss"),
+            "entry first: {files:?}"
+        );
+        assert_eq!(tracked("_colors.scss"), 1, "loaded relatively: {files:?}");
+        assert_eq!(
+            tracked("lib/_theme.scss"),
+            1,
+            "loaded through a load path: {files:?}"
+        );
+    }
+
+    /// Every tracked path must be absolute: `include_bytes!` resolves a
+    /// relative one against the invoking source file, not against `root`.
+    #[test]
+    fn tracked_paths_are_absolute() {
+        let (_, files) = compile_main(&["lib"]).unwrap();
+        for f in &files {
+            assert!(Path::new(f).is_absolute(), "{f}");
+        }
+    }
+
+    #[test]
+    fn a_partial_it_cannot_find_fails_the_compile() {
+        let err = compile_main(&[]).unwrap_err();
+        assert!(err.starts_with("Can't find stylesheet to import."), "{err}");
+    }
 }
